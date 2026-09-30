@@ -1,0 +1,125 @@
+# structs.ok — Okular 0.5 records (spec §8.3).
+# Declaration, positional literals, field access, value semantics,
+# nesting, arrays of structs, structs on the heap.
+
+type.text=1
+
+struct.Point = {
+    type.number x
+    type.number y
+}.end
+
+struct.Rect = {
+    type.Point corner
+    type.uint16 w
+    type.uint16 h
+    type.bool visible
+}.end
+
+struct.Stats = {
+    type.uint32 hits
+    type.uint32 misses
+    type.decimal ratio
+}.end
+
+function.area(ptr<Rect>.r) -> number {
+    return r.w * r.h
+}
+
+function.grow(ptr<Rect>.r, number.dw, number.dh) {
+    r.w = r.w + number.to_uint16(dw)
+    r.h = r.h + number.to_uint16(dh)
+}
+
+function.hit_rate(type.Stats.s) -> decimal {
+    return s.ratio
+}
+
+function.record_hit(ptr<Stats>.s) {
+    s.hits = s.hits + 1
+    type.uint32 total = s.hits + s.misses
+    s.ratio = uint32.to_decimal(s.hits) / uint32.to_decimal(total)
+}
+
+function.run() -> number {
+    write("--- declaration and literals ---")
+    print
+    type.Point pt = {3, 4}
+    write(pt.x)
+    print
+    write(pt.y)
+    print
+
+    type.Rect r = {{1, 2}, 10, 20, true}
+    write(r.corner.x)
+    print
+    write(r.corner.y)
+    print
+    write(r.w)
+    print
+    write(r.h)
+    print
+    write(r.visible)
+    print
+
+    write("--- field assignment and value semantics ---")
+    print
+    pt.x = 30
+    write(pt.x)
+    print
+    type.Point copy = pt
+    copy.y = 999
+    write(pt.y)
+    print
+
+    write("--- functions over structs ---")
+    print
+    write(area(&r))
+    print
+    grow(&r, 5, 10)
+    write(area(&r))
+    print
+
+    type.Stats s = {0, 0, 0.0}
+    record_hit(&s)
+    record_hit(&s)
+    s.misses = 1
+    record_hit(&s)
+    write(s.hits)
+    print
+    write(s.misses)
+    print
+    write(hit_rate(s))
+    print
+
+    write("--- arrays of structs ---")
+    print
+    type.array<type.Point, 3> pts = {{1, 2}, {3, 4}, {5, 6}}
+    type.number sum = 0
+    loop (i from 0 until 3) {
+        sum = sum + pts[i].x + pts[i].y
+    }
+    write(sum)
+    print
+    pts[1].x = 100
+    write(pts[1].x)
+    print
+
+    write("--- structs on the heap ---")
+    print
+    type.ptr<type.Rect> hr = alloc<type.Rect>(2)
+    hr[0].w = 7
+    hr[0].h = 6
+    hr[1].w = 3
+    hr[1].h = 5
+    write(hr[0].w * hr[0].h)
+    print
+    write(hr[1].w * hr[1].h)
+    print
+    write(area(hr))
+    print
+    release(hr)
+    return 0
+}
+
+run()

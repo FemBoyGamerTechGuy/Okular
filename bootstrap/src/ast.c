@@ -64,6 +64,11 @@ static void dump_stmt(Node *s, int ind) {
         dump_expr(s->a, ind + 2);
         dump_expr(s->c, ind + 2);
         break;
+    case A_FIELDASSIGN:
+        printf("field-assign .%s\n", s->name);
+        dump_expr(s->a, ind + 2);
+        dump_expr(s->c, ind + 2);
+        break;
     case A_RELEASE:
         printf("release\n");
         dump_expr(s->a, ind + 2);
@@ -160,6 +165,10 @@ static void dump_expr(Node *e, int ind) {
         printf("alloc -> %s\n", ok_type_name(e->otype));
         dump_expr(e->a, ind + 2);
         break;
+    case A_MEMBER:
+        printf("member .%s\n", e->name);
+        dump_expr(e->a, ind + 2);
+        break;
     case A_ARRAYLIT:
         printf("arraylit (%zu elements)\n", e->args.len);
         for (size_t i = 0; i < e->args.len; i++)
@@ -198,6 +207,14 @@ static void dump_top(Node *n, int ind) {
         printf("devcol %s = {\n", n->name);
         for (size_t i = 0; i < n->body.len; i++)
             dump_top((Node *)n->body.items[i], ind + 2);
+        pad(ind); printf("}.end\n");
+        break;
+    case A_STRUCTDECL:
+        printf("struct %s = {\n", n->name);
+        for (size_t i = 0; i < n->nparams; i++) {
+            pad(ind + 2);
+            printf("%s %s\n", ok_type_name(n->params[i].type), n->params[i].name);
+        }
         pad(ind); printf("}.end\n");
         break;
     case A_FUNC:

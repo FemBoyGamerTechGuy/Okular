@@ -1,1 +1,1 @@
-functions cannot return arrays in Okular 0.2
+functions cannot return arrays directly in Okular

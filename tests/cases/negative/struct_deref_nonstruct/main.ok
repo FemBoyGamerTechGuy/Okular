@@ -1,0 +1,10 @@
+type.text=1
+struct.Point = {
+    type.number x
+}.end
+function.run() -> number {
+    type.number n = 5
+    write(n.x)
+    return 0
+}
+run()

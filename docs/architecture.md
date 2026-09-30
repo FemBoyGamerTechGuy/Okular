@@ -1,6 +1,6 @@
 # Okular Bootstrap Compiler — Architecture
 
-**Version:** 0.4
+**Version:** 0.5
 **Applies to:** `bootstrap/` (the C implementation)
 
 > The C implementation is scaffolding. It exists because Okular does not yet
@@ -178,6 +178,12 @@ x86-64, Linux, freestanding:
   slots and live in `xmm` registers only while being computed. This is
   deliberately *not* full System V — SysV interop (XMM arg regs, varargs) is
   a designed milestone gated on FFI. It is our own ABI, documented here.
+* **Structs (0.5)**: struct types are laid out at natural alignment in
+  declaration order (a shared placeholder per name is filled in place
+  after collection, so forward and cross-file references resolve). Struct
+  expressions evaluate to their storage address exactly like arrays;
+  field access lowers to `I_ADDOFF` + width-typed loads/stores; literals
+  store field-by-field; parameters pass as caller-owned copies.
 * **Arrays (v1)**: array-typed expressions evaluate to an *address* on the
   operand stack (`ADDR_LOCAL/GLOBAL`, `INDEX`, `LOAD_AT`, `STORE_AT`,
   `COPY`). Indexing scales by the element size after an unsigned bounds

@@ -1,0 +1,14 @@
+struct.Point = {
+    type.number x
+    type.number y
+}.end
+struct.Tagged = {
+    type.text label
+}.end
+function.run() -> number {
+    type.Point p = {1, 2}
+    type.Tagged t = {"hi"}
+    type.Tagged bad = p
+    return 0
+}
+run()

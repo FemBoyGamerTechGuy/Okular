@@ -1,0 +1,66 @@
+type.text=1
+
+struct.Item = {
+    type.number id
+    type.decimal weight
+}.end
+
+struct.Node = {
+    type.number value
+    type.ptr<type.Node> next
+}.end
+
+function.run() -> number {
+    type.ptr<type.Item> it = alloc<type.Item>(2)
+    it[0].id = 100
+    it[0].weight = 1.5
+    it[1].id = 200
+    it[1].weight = 2.5
+    write(it[0].id + it[1].id)
+    print
+    write(it[0].weight + it[1].weight)
+    print
+    release(it)
+
+    type.ptr<type.Item> one = alloc<type.Item>(1)
+    one.id = 42
+    one.weight = 3.25
+    write(one.id)
+    print
+    write(one.weight)
+    print
+    release(one)
+
+    type.ptr<type.Node> a = alloc<type.Node>(1)
+    type.ptr<type.Node> b = alloc<type.Node>(1)
+    type.ptr<type.Node> c = alloc<type.Node>(1)
+    a.value = 1
+    a.next = b
+    b.value = 2
+    b.next = c
+    c.value = 3
+    c.next = null
+
+    type.number sum = 0
+    type.ptr<type.Node> cur = a
+    loop (i from 0 until 3) {
+        sum = sum + cur.value
+        cur = cur.next
+    }
+    write(sum)
+    print
+
+    when (c.next == null) { write(true) }
+    print
+
+    release(a)
+    release(b)
+    release(c)
+
+    type.ptr<type.Node> nul = null
+    when (nul == null) { write(true) }
+    print
+    return 0
+}
+
+run()

@@ -76,6 +76,9 @@ const char *ok_suggest_name(Scope *s, const char *name) {
  * equality IS type equality — arrays must match exactly (same element type,
  * same count); integers widen safely per the 0.3 lattice (ty_assignable). */
 static bool const_eval(SemaCtx *c, Node *e, ConstVal *out); /* fwd */
+static bool check_struct_lit_runtime(SemaCtx *c, Node *lit, OkType st, const char *what); /* fwd */
+static bool check_struct_lit_const(SemaCtx *c, Node *lit, OkType st, const char *what,
+                                   ConstVal *out); /* fwd */
 
 static bool assignable(OkType from, OkType to) {
     return ty_assignable(from, to);
@@ -129,6 +132,178 @@ static char *mangle(const char *mod, const char *colpath, const char *name) {
     return out;
 }
 
+/* ---------------- structs (spec §8.3, 0.5) ----------------
+ *
+ * The parser hands every `type.Name` reference the SAME placeholder object
+ * for a given name (a process-wide registry, so the flat type namespace
+ * spans files). Collection registers each declaration's symbol; the layout
+ * pass then FILLS the placeholder in place — kind, fields, offsets, size —
+ * which retroactively resolves every reference, including interned
+ * array<Name, N> and ptr<Name> element types. A fixpoint loop handles
+ * declaration order; leftovers are unknown or circular field types. */
+
+#define OK_MAX_STRUCT_BYTES (1u << 20)
+
+typedef struct StructDeclSite {
+    Node *decl;
+    OkModule *mod;
+    Scope *scope;
+} StructDeclSite;
+
+static Vec g_struct_sites; /* StructDeclSite */
+
+static void register_struct_decl(SemaCtx *c, OkModule *m, Scope *scope, Node *n) {
+    Symbol *ex = scope_insert(scope, n->name, SYM_TYPE, n->line, n->col);
+    if (ex->kind != SYM_TYPE || (ex->decl && ex->decl != n)) {
+        serr(c, n, "duplicate definition of struct `%s`.", n->name);
+        return;
+    }
+    ex->type = n->otype;   /* the shared placeholder, filled below */
+    ex->decl = n;
+    StructDeclSite *site = ok_xmalloc(sizeof *site);
+    site->decl = n; site->mod = m; site->scope = scope;
+    vec_push(&g_struct_sites, site);
+}
+
+static void collect_structs_in(SemaCtx *c, OkModule *m, Node *file, Scope *scope) {
+    for (size_t i = 0; i < file->body.len; i++) {
+        Node *n = file->body.items[i];
+        if (n->kind == A_STRUCTDECL) register_struct_decl(c, m, scope, n);
+        else if (n->kind == A_DEVCOL) {
+            Symbol *colsym = scope_find_local(scope, n->name);
+            if (colsym && colsym->ns) {
+                for (size_t k = 0; k < n->body.len; k++) {
+                    Node *mem = n->body.items[k];
+                    if (mem->kind == A_STRUCTDECL)
+                        register_struct_decl(c, m, colsym->ns, mem);
+                    else if (mem->kind == A_DEVCOL) {
+                        Symbol *nested = scope_find_local(colsym->ns, mem->name);
+                        if (nested && nested->ns) {
+                            for (size_t j = 0; j < mem->body.len; j++)
+                                if (((Node *)mem->body.items[j])->kind == A_STRUCTDECL)
+                                    register_struct_decl(c, m, nested->ns, mem->body.items[j]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* fill one struct placeholder: fields, offsets, total size (natural
+ * alignment, declared order — spec §8.3). Returns false when a field type
+ * is still an unfilled placeholder (unknown or circular). */
+static bool layout_one_struct(SemaCtx *c, Node *decl) {
+    OkType t = decl->otype;
+    if (t->kind != OK_NAMED) return true; /* already laid out */
+    for (size_t i = 0; i < decl->nparams; i++)
+        if (decl->params[i].type->kind == OK_NAMED) return false;
+
+    StructField *fields = ok_xmalloc((decl->nparams ? decl->nparams : 1) * sizeof(StructField));
+    size_t off = 0, align = 1;
+    for (size_t i = 0; i < decl->nparams; i++) {
+        OkType ft = decl->params[i].type;
+        size_t fa = ty_align(ft);
+        if (fa > align) align = fa;
+        off = (off + fa - 1) & ~(fa - 1);
+        fields[i].name = ok_xstrdup(decl->params[i].name);
+        fields[i].type = ft;
+        fields[i].offset = off;
+        off += ty_bytes(ft);
+        if (off > OK_MAX_STRUCT_BYTES) {
+            serr(c, decl, "struct `%s` is too large (more than 1 MiB).", decl->name);
+            return true; /* reported; do not retry */
+        }
+    }
+    size_t size = (off + align - 1) & ~(align - 1);
+    if (size == 0) size = align; /* empty struct occupies its alignment */
+
+    /* fill the shared placeholder IN PLACE: every reference resolves */
+    t->kind = OK_STRUCT;
+    t->sfields = fields;
+    t->nsfields = decl->nparams;
+    t->count = size;           /* count doubles as the struct's byte size */
+    t->elem = NULL;
+    t->bits = 0;
+    t->is_signed = false;
+    return true;
+}
+
+static void layout_all_structs(SemaCtx *c) {
+    bool progress = true;
+    while (progress) {
+        progress = false;
+        for (size_t i = 0; i < g_struct_sites.len; i++) {
+            StructDeclSite *s = (StructDeclSite *)g_struct_sites.items[i];
+            if (s->decl->otype->kind == OK_NAMED) {
+                if (layout_one_struct(c, s->decl)) progress = true;
+            }
+        }
+    }
+    /* leftovers: unknown or mutually-recursive field types */
+    for (size_t i = 0; i < g_struct_sites.len; i++) {
+        StructDeclSite *s = (StructDeclSite *)g_struct_sites.items[i];
+        if (s->decl->otype->kind == OK_NAMED) {
+            Diag *d = serr(c, s->decl, "struct `%s` cannot be laid out: a field type is unknown or circular.",
+                           s->decl->name);
+            diag_note(d, "structs may nest, but a struct cannot contain itself (directly or through a cycle).");
+        }
+    }
+}
+
+/* Build the A_MEMBER chain for a struct-field path whose namespace prefix
+ * is parts[0..first_field) (the base var is `base` = parts[first_field-1])
+ * and whose fields are parts[first_field..nparts). Returns the chain ROOT
+ * (the last member); *out_t receives the final field type. Auto-derefs a
+ * leading ptr<struct> and any ptr<struct> field segment. */
+static Node *mk_field_chain(SemaCtx *c, Node *origin, char **parts, size_t nparts,
+                            size_t first_field, Symbol *base, OkType *out_t) {
+    Node *basenode = ok_xmalloc(sizeof(Node));
+    memset(basenode, 0, sizeof *basenode);
+    basenode->kind = A_PATH;
+    basenode->line = origin->line;
+    basenode->col = origin->col;
+    basenode->parts = parts;      /* alias: only parts[0] is read */
+    basenode->nparts = first_field;
+    basenode->sym = base;
+    basenode->rtype = base->type;
+    base->used = true;
+
+    OkType t = base->type;
+    Node *cur = basenode;
+    for (size_t i = first_field; i < nparts; i++) {
+        bool deref = false;
+        if (ty_is_ptr(t)) { t = t->elem; deref = true; }
+        if (!ty_is_struct(t)) {
+            serr(c, origin, "`%s` is a `%s` — `.` needs a struct or a pointer to one.",
+                 parts[i - 1] ? parts[i - 1] : "?", ok_type_name(deref ? t : base->type));
+            *out_t = NULL;
+            return NULL;
+        }
+        StructField *f = ty_field(t, parts[i]);
+        if (!f) {
+            Diag *d = serr(c, origin, "struct `%s` has no field `%s`.", t->name, parts[i]);
+            (void)d;
+            *out_t = NULL;
+            return NULL;
+        }
+        Node *mem = ok_xmalloc(sizeof(Node));
+        memset(mem, 0, sizeof *mem);
+        mem->kind = A_MEMBER;
+        mem->line = origin->line;
+        mem->col = origin->col;
+        mem->a = cur;
+        mem->name = parts[i];
+        mem->autoderef = deref;
+        mem->offset = f->offset;
+        mem->rtype = f->type;
+        cur = mem;
+        t = f->type;
+    }
+    *out_t = t;
+    return cur; /* the chain ROOT (last member); its ->a walks down to the base */
+}
+
 /* ---------------- phase 1: collect ---------------- */
 
 static void collect_devcol(SemaCtx *c, OkModule *m, Node *col, Scope *parent,
@@ -169,8 +344,13 @@ static void collect_toplevel(SemaCtx *c, OkModule *m, Node *file, Scope *scope) 
                 diag_note(d, "the 0.2 internal ABI passes up to 6 arguments in registers (docs/architecture.md §3.5); the limit lifts with the stack-args milestone.");
             }
             if (ty_kind(n->otype) == OK_ARRAY) {
-                Diag *d = serr(c, n, "functions cannot return arrays in Okular 0.2.");
-                diag_note(d, "return an element, or pass a destination array when pointers arrive (spec §12).");
+                Diag *d = serr(c, n, "functions cannot return arrays directly in Okular.");
+                diag_note(d, "return `ptr<array<T, N>>` instead (0.4, spec §12), or an element.");
+            }
+            if (ty_kind(n->otype) == OK_STRUCT) {
+                Diag *d = serr(c, n, "functions cannot return structs directly in Okular 0.5.");
+                diag_note(d, "return `ptr<%s>` (heap- or global-backed), or write into a pointer parameter (spec §12).",
+                          ok_type_name(n->otype));
             }
             char *mg = mangle(m->name, NULL, n->name);
             FuncInfo *fi = funcinfo_new(n->name, mg, n->otype, n, m);
@@ -238,8 +418,13 @@ static void collect_devcol(SemaCtx *c, OkModule *m, Node *col, Scope *parent,
                 diag_note(d, "the 0.2 internal ABI passes up to 6 arguments in registers (docs/architecture.md §3.5).");
             }
             if (ty_kind(n->otype) == OK_ARRAY) {
-                Diag *d = serr(c, n, "functions cannot return arrays in Okular 0.2.");
-                diag_note(d, "return an element, or pass a destination array when pointers arrive (spec §12).");
+                Diag *d = serr(c, n, "functions cannot return arrays directly in Okular.");
+                diag_note(d, "return `ptr<array<T, N>>` instead (0.4, spec §12), or an element.");
+            }
+            if (ty_kind(n->otype) == OK_STRUCT) {
+                Diag *d = serr(c, n, "functions cannot return structs directly in Okular 0.5.");
+                diag_note(d, "return `ptr<%s>` (heap- or global-backed), or write into a pointer parameter (spec §12).",
+                          ok_type_name(n->otype));
             }
             char *mg = mangle(m->name, colpath, n->name);
             FuncInfo *fi = funcinfo_new(n->name, mg, n->otype, n, m);
@@ -444,8 +629,12 @@ static bool check_array_lit_runtime(SemaCtx *c, Node *lit, OkType atype, const c
     for (size_t k = 0; k < check_n; k++) {
         Node *el = lit->args.items[k];
         if (el->kind == A_ARRAYLIT) {
+            if (ty_kind(atype->elem) == OK_STRUCT) {
+                if (!check_struct_lit_runtime(c, el, atype->elem, what)) ok = false;
+                continue;
+            }
             if (ty_kind(atype->elem) != OK_ARRAY) {
-                Diag *d = serr(c, el, "element %zu of %s must be `%s`, not a nested array.",
+                Diag *d = serr(c, el, "element %zu of %s must be `%s`, not a nested literal.",
                                k + 1, what, ok_type_name(atype->elem));
                 (void)d;
                 ok = false;
@@ -487,8 +676,13 @@ static bool check_array_lit_const(SemaCtx *c, Node *lit, OkType atype, const cha
     for (size_t k = 0; k < check_n; k++) {
         Node *el = lit->args.items[k];
         if (el->kind == A_ARRAYLIT) {
+            if (ty_kind(atype->elem) == OK_STRUCT) {
+                if (!check_struct_lit_const(c, el, atype->elem, what, &out->elems[k])) ok = false;
+                else out->elems[k].valid = true;
+                continue;
+            }
             if (ty_kind(atype->elem) != OK_ARRAY) {
-                Diag *d = serr(c, el, "element %zu of %s must be `%s`, not a nested array.",
+                Diag *d = serr(c, el, "element %zu of %s must be `%s`, not a nested literal.",
                                k + 1, what, ok_type_name(atype->elem));
                 (void)d;
                 ok = false;
@@ -568,6 +762,161 @@ static bool const_into_type(SemaCtx *c, Node *init, ConstVal *cv, OkType to) {
     return false;
 }
 
+/* ---------------- struct literals (spec §8.3, 0.5) ----------------
+ * `{ v1, v2, ... }` in a struct-typed declaration initializes fields in
+ * declaration order (positional). Same shape as array literals. */
+
+static bool check_struct_lit_runtime(SemaCtx *c, Node *lit, OkType st, const char *what) {
+    bool ok = true;
+    lit->rtype = st;
+    if (lit->args.len != st->nsfields) {
+        Diag *d = serr(c, lit, "%s has %zu field%s, but %zu initializer%s were given.",
+                       what, st->nsfields, st->nsfields == 1 ? "" : "s",
+                       lit->args.len, lit->args.len == 1 ? "" : "s");
+        diag_note(d, "struct literals are positional: `type.%s v = { field1, field2, ... }` in declaration order.", st->name);
+        ok = false;
+    }
+    size_t check_n = lit->args.len < st->nsfields ? lit->args.len : st->nsfields;
+    for (size_t k = 0; k < check_n; k++) {
+        Node *el = lit->args.items[k];
+        OkType ft = st->sfields[k].type;
+        const char *fname = st->sfields[k].name;
+        if (el->kind == A_ARRAYLIT) {
+            if (ty_kind(ft) == OK_STRUCT) {
+                if (!check_struct_lit_runtime(c, el, ft, what)) ok = false;
+                continue;
+            }
+            if (ty_kind(ft) == OK_ARRAY) {
+                if (!check_array_lit_runtime(c, el, ft, what)) ok = false;
+                continue;
+            }
+            Diag *d = serr(c, el, "field `%s` is `%s`, not a nested literal.", fname, ok_type_name(ft));
+            (void)d;
+            ok = false;
+            continue;
+        }
+        OkType et = check_expr(c, el);
+        if (ty_kind(ft) == OK_ARRAY || ty_kind(ft) == OK_STRUCT) {
+            if (et != ft) {
+                Diag *d = serr(c, el, "field `%s` is `%s`, but a `%s` value was given.",
+                               fname, ok_type_name(ft), ok_type_name(et));
+                diag_note(d, "whole array/struct values copy into fields; the types must match exactly.");
+                ok = false;
+            }
+            continue;
+        }
+        if (!assignable_value(c, el, et, ft)) {
+            Diag *d = serr(c, el, "field `%s` is `%s`, but a `%s` value was given.",
+                           fname, ok_type_name(ft), ok_type_name(et));
+            diag_note(d, "safe widening is implicit; everything else converts explicitly (spec §4.4).");
+            ok = false;
+        } else if (et != ft && ft == ty_decimal && c->opt->warnings && el->kind != A_INT) {
+            swarn(c, el, "field `%s` implicitly widens to `decimal`.", fname);
+        }
+    }
+    return ok;
+}
+
+static bool check_struct_lit_const(SemaCtx *c, Node *lit, OkType st, const char *what,
+                                   ConstVal *out) {
+    bool ok = true;
+    memset(out, 0, sizeof *out);
+    out->type = st;
+    out->nelems = lit->args.len;
+    out->elems = ok_xmalloc((lit->args.len ? lit->args.len : 1) * sizeof(ConstVal));
+    if (lit->args.len != st->nsfields) {
+        Diag *d = serr(c, lit, "%s has %zu field%s, but %zu initializer%s were given.",
+                       what, st->nsfields, st->nsfields == 1 ? "" : "s",
+                       lit->args.len, lit->args.len == 1 ? "" : "s");
+        diag_note(d, "struct literals are positional: `type.%s v = { field1, field2, ... }` in declaration order.", st->name);
+        ok = false;
+    }
+    size_t check_n = lit->args.len < st->nsfields ? lit->args.len : st->nsfields;
+    for (size_t k = 0; k < check_n; k++) {
+        Node *el = lit->args.items[k];
+        OkType ft = st->sfields[k].type;
+        const char *fname = st->sfields[k].name;
+        if (el->kind == A_ARRAYLIT) {
+            if (ty_kind(ft) == OK_STRUCT) {
+                if (!check_struct_lit_const(c, el, ft, what, &out->elems[k])) ok = false;
+                else out->elems[k].valid = true;
+                continue;
+            }
+            if (ty_kind(ft) == OK_ARRAY) {
+                if (!check_array_lit_const(c, el, ft, what, &out->elems[k])) ok = false;
+                else out->elems[k].valid = true;
+                continue;
+            }
+            serr(c, el, "field `%s` is `%s`, not a nested literal.", fname, ok_type_name(ft));
+            ok = false;
+            continue;
+        }
+        size_t mark = c->de->errors;
+        ConstVal ev;
+        if (!const_eval(c, el, &ev)) {
+            if (c->de->errors == mark) {
+                Diag *d = serr(c, el, "the initializer of field `%s` is not a compile-time constant.", fname);
+                diag_note(d, "global struct fields must be literal or foldable values (spec §7).");
+            }
+            ok = false;
+            continue;
+        }
+        if (ty_kind(ft) == OK_ARRAY || ty_kind(ft) == OK_STRUCT) {
+            Diag *d = serr(c, el, "whole `%s` values are not constants; use a literal `{ ... }` for field `%s`.",
+                           ok_type_name(ft), fname);
+            (void)d;
+            ok = false;
+            continue;
+        }
+        if (!assignable_value(c, el, ev.type, ft)) {
+            Diag *d = serr(c, el, "field `%s` is `%s`, but a `%s` value was given.",
+                           fname, ok_type_name(ft), ok_type_name(ev.type));
+            (void)d;
+            ok = false;
+            continue;
+        }
+        if (ty_is_integer(ft)) {
+            ev.type = ft;
+            ev.i = ty_reencode(ev.i, ft);
+        } else if (ev.type == ty_number && ft == ty_decimal) {
+            ev.type = ty_decimal;
+            ev.d = (double)ev.i;
+        }
+        ev.valid = true;
+        out->elems[k] = ev;
+    }
+    out->valid = ok;
+    return ok;
+}
+
+/* If `n` (A_PATH or A_ASSIGN) is a struct-field path — possibly through
+ * namespaces (`config.center.x`) — build the member chain, stash the chain
+ * root on the node (n->a), set n->rtype to the field type, and return
+ * true. Returns true with rtype NULL when a diagnostic was reported. */
+static bool try_struct_field_path(SemaCtx *c, Node *n) {
+    if (n->nparts < 2) return false;
+    Symbol *cur = scope_lookup(c->cur_scope, n->parts[0]);
+    size_t i = 1;
+    while (i < n->nparts && cur && cur->kind == SYM_NS && cur->ns) {
+        cur = scope_find_local(cur->ns, n->parts[i]);
+        i++;
+    }
+    if (!cur || cur->kind != SYM_VAR || i >= n->nparts) return false;
+    OkType bt = cur->type;
+    if (ty_is_ptr(bt)) bt = bt->elem;
+    if (!ty_is_struct(bt)) return false;
+    OkType ft = NULL;
+    Node *root = mk_field_chain(c, n, n->parts, n->nparts, i, cur, &ft);
+    if (!root) {
+        n->rtype = NULL;
+        return true; /* reported inside */
+    }
+    n->sym = cur;
+    n->a = root;      /* IR lowers the member chain from here */
+    n->rtype = ft;
+    return true;
+}
+
 /* ---------------- phase 2: check ---------------- */
 
 static OkType check_expr(SemaCtx *c, Node *e);
@@ -598,8 +947,12 @@ static Symbol *resolve_path(SemaCtx *c, Node *n, bool want_var) {
     Symbol *cur = first;
     for (size_t i = 1; i < n->nparts; i++) {
         if (cur->kind != SYM_NS) {
-            serr(c, n, "`%s` is not a namespace — `.` cannot follow it in 0.1.",
-                 path_join_str(n->parts, i));
+            if (cur->kind == SYM_VAR)
+                serr(c, n, "`%s` is a `%s` value — `.` accesses struct fields, namespaces hold declarations.",
+                     path_join_str(n->parts, i), ok_type_name(cur->type));
+            else
+                serr(c, n, "`%s` is not a namespace — `.` cannot follow it.",
+                     path_join_str(n->parts, i));
             return NULL;
         }
         Symbol *next = scope_find_local(cur->ns, n->parts[i]);
@@ -750,6 +1103,10 @@ static OkType check_write(SemaCtx *c, Node *n) {
         if (ty_kind(at) == OK_ARRAY) {
             Diag *d = serr(c, arg, "`write` prints one value at a time, not a whole array.");
             diag_note(d, "loop over the array and `write(xs[i])` for each element (spec §11).");
+        }
+        if (ty_kind(at) == OK_STRUCT) {
+            Diag *d = serr(c, arg, "`write` cannot print a whole struct in 0.5.");
+            diag_note(d, "print its fields: `write(pkt.length)` (spec §11).");
         }
         if (ty_is_ptr(at) || at == ty_null) {
             Diag *d = serr(c, arg, "`write` does not print pointer values in 0.4.");
@@ -980,6 +1337,13 @@ static OkType check_expr(SemaCtx *c, Node *e) {
         return e->otype;
     }
     case A_PATH: {
+        /* struct-field path? `var.f1.f2` / `column.member.f1` where the
+         * base value is a struct (or a pointer to one) — rewrite into an
+         * A_MEMBER chain (spec §8.3) */
+        if (try_struct_field_path(c, e)) {
+            if (!e->rtype) { e->rtype = ty_number; return ty_number; }
+            return e->rtype;
+        }
         Symbol *s = resolve_path(c, e, true);
         if (!s) { e->rtype = ty_number; return ty_number; }
         e->sym = s;
@@ -994,6 +1358,36 @@ static OkType check_expr(SemaCtx *c, Node *e) {
         check_expr(c, e->a);
         e->rtype = e->otype;
         return e->otype;
+    case A_MEMBER: {
+        /* base.field — struct field access (spec §8.3); a pointer base
+         * auto-derefs (null-checked at runtime) */
+        OkType bt = check_expr(c, e->a);
+        bool deref = false;
+        if (ty_is_ptr(bt)) { bt = bt->elem; deref = true; }
+        if (!ty_is_struct(bt)) {
+            Diag *d = serr(c, e, "member access `.%s` needs a struct or a pointer to one, but the base is `%s`.",
+                           e->name, ok_type_name(bt));
+            diag_note(d, "struct fields are declared with `struct.Name = { ... }.end` (spec §8.3).");
+            e->rtype = ty_number;
+            return ty_number;
+        }
+        StructField *f = ty_field(bt, e->name);
+        if (!f) {
+            Diag *d = serr(c, e, "struct `%s` has no field `%s`.", bt->name, e->name);
+            char list[256];
+            size_t off = 0;
+            off += snprintf(list + off, sizeof list - off, "fields:");
+            for (size_t k = 0; k < bt->nsfields && off < sizeof list - 2; k++)
+                off += snprintf(list + off, sizeof list - off, " %s", bt->sfields[k].name);
+            diag_note(d, "%s", list);
+            e->rtype = ty_number;
+            return ty_number;
+        }
+        e->autoderef = deref;
+        e->offset = f->offset;
+        e->rtype = f->type;
+        return f->type;
+    }
     case A_WRITE: return check_write(c, e);
     case A_BIN:   return check_bin(c, e);
     case A_ARRAYLIT: {
@@ -1104,6 +1498,14 @@ static void check_func_body(SemaCtx *c, Node *fn, FuncInfo *fi) {
     c->cur_func = fi;
     c->in_loop = false;
 
+    /* struct/array returns are rejected post-layout (the parser cannot
+     * know a named type becomes a struct) */
+    if (ty_kind(fi->ret) == OK_STRUCT) {
+        Diag *d = serr(c, fn, "functions cannot return structs directly in Okular 0.5.");
+        diag_note(d, "return `ptr<%s>` (heap- or global-backed), or write into a pointer parameter (spec §12).",
+                  ok_type_name(fi->ret));
+    }
+
     /* parameters live in the function scope */
     fi->param_syms = ok_xmalloc((fn->nparams ? fn->nparams : 1) * sizeof(Symbol *));
     for (size_t i = 0; i < fn->nparams; i++) {
@@ -1140,6 +1542,27 @@ static void check_func_body(SemaCtx *c, Node *fn, FuncInfo *fi) {
 static void check_stmt(SemaCtx *c, Node *s) {
     switch (s->kind) {
     case A_VARDECL: {
+        if (ty_kind(s->otype) == OK_STRUCT) {
+            if (s->a->kind == A_ARRAYLIT) {
+                check_struct_lit_runtime(c, s->a, s->otype, s->name);
+            } else {
+                OkType it = check_expr(c, s->a);
+                if (it != s->otype) {
+                    Diag *d = serr(c, s, "variable `%s` is `%s`, but the initializer is `%s`.",
+                                   s->name, ok_type_name(s->otype), ok_type_name(it));
+                    diag_note(d, "struct assignment copies the contents; the types must match exactly (spec §8.3).");
+                }
+            }
+            Symbol *ex = scope_insert(c->cur_scope, s->name, SYM_VAR, s->line, s->col);
+            if (ex->decl && ex->decl != s) {
+                serr(c, s, "duplicate definition of `%s` in this scope.", s->name);
+                break;
+            }
+            ex->type = s->otype;
+            ex->decl = s;
+            s->sym = ex;
+            break;
+        }
         if (ty_kind(s->otype) == OK_ARRAY) {
             if (s->a->kind == A_ARRAYLIT) {
                 check_array_lit_runtime(c, s->a, s->otype, s->name);
@@ -1190,16 +1613,38 @@ static void check_stmt(SemaCtx *c, Node *s) {
         break;
     }
     case A_ASSIGN: {
+        /* struct-field path target? `var.field = value` — rewrite into an
+         * A_FIELDASSIGN and re-check (spec §8.3). The value node must be
+         * saved FIRST: the path rewrite overwrites s->a with the chain. */
+        Node *assign_val = s->a;
+        if (try_struct_field_path(c, s)) {
+            Node *val = assign_val;
+            if (s->a && s->rtype) {
+                Node *root = s->a;   /* the chain root = the last member */
+                s->kind = A_FIELDASSIGN;
+                s->a = root->a;
+                s->name = root->name;
+                s->autoderef = root->autoderef;
+                s->offset = root->offset;
+                s->c = val;
+                check_stmt(c, s);
+                return;
+            }
+            /* reported inside; still check the value */
+            check_expr(c, val);
+            return;
+        }
         Symbol *target = resolve_path(c, s, true);
         if (!target) break;
         s->sym = target;
         OkType vt = check_expr(c, s->a);
-        if (ty_kind(target->type) == OK_ARRAY || ty_kind(vt) == OK_ARRAY) {
+        if (ty_kind(target->type) == OK_ARRAY || ty_kind(vt) == OK_ARRAY ||
+            ty_kind(target->type) == OK_STRUCT) {
             if (vt != target->type) {
                 Diag *d = serr(c, s, "cannot assign a `%s` value to `%s`, which is `%s`.",
                                ok_type_name(vt), path_join_str(s->parts, s->nparts),
                                ok_type_name(target->type));
-                diag_note(d, "array assignment copies the contents; the types must match exactly (spec §8.4).");
+                diag_note(d, "array/struct assignment copies the contents; the types must match exactly (spec §8.4/§8.3).");
             }
             break;
         }
@@ -1269,6 +1714,47 @@ static void check_stmt(SemaCtx *c, Node *s) {
                  ok_type_name(elem), ok_type_name(vt));
         } else if (vt != elem && elem == ty_decimal && c->opt->warnings && s->c->kind != A_INT) {
             swarn(c, s, "deref assignment implicitly widens to `decimal`.");
+        }
+        break;
+    }
+    case A_FIELDASSIGN: {
+        /* base.field = value (spec §8.3); pointer bases auto-deref */
+        OkType bt = check_expr(c, s->a);
+        bool deref = false;
+        if (ty_is_ptr(bt)) { bt = bt->elem; deref = true; }
+        if (!ty_is_struct(bt)) {
+            Diag *d = serr(c, s->a, "field assignment `.%s` needs a struct or a pointer to one, but the base is `%s`.",
+                           s->name, ok_type_name(bt));
+            diag_note(d, "struct fields are declared with `struct.Name = { ... }.end` (spec §8.3).");
+            check_expr(c, s->c);
+            break;
+        }
+        StructField *f = ty_field(bt, s->name);
+        if (!f) {
+            Diag *d = serr(c, s, "struct `%s` has no field `%s`.", bt->name, s->name);
+            (void)d;
+            check_expr(c, s->c);
+            break;
+        }
+        s->autoderef = deref;
+        s->offset = f->offset;
+        OkType ft = f->type;
+        s->otype = ft;   /* IR reads the field type from here */
+        OkType vt = check_expr(c, s->c);
+        if (ty_kind(ft) == OK_ARRAY || ty_kind(ft) == OK_STRUCT) {
+            if (vt != ft) {
+                Diag *d = serr(c, s->c, "field `%s` is `%s`, but a `%s` value was given.",
+                               s->name, ok_type_name(ft), ok_type_name(vt));
+                diag_note(d, "whole array/struct values copy into fields; the types must match exactly.");
+            }
+            break;
+        }
+        if (!assignable_value(c, s->c, vt, ft)) {
+            Diag *d = serr(c, s->c, "field `%s` is `%s`, but a `%s` value was given.",
+                           s->name, ok_type_name(ft), ok_type_name(vt));
+            diag_note(d, "safe widening is implicit; everything else converts explicitly (spec §4.4).");
+        } else if (vt != ft && ft == ty_decimal && c->opt->warnings && s->c->kind != A_INT) {
+            swarn(c, s, "field assignment implicitly widens to `decimal`.");
         }
         break;
     }
@@ -1406,6 +1892,22 @@ static void check_column(SemaCtx *c, Node *col, Scope *ns) {
                 check_func_body(c, mem, mem->finfo);
             }
         } else if (mem->kind == A_VARDECL) {
+            if (ty_kind(mem->otype) == OK_STRUCT) {
+                char what[192];
+                snprintf(what, sizeof what, "struct `%s.%s`", col->name, mem->name);
+                if (mem->a->kind != A_ARRAYLIT) {
+                    Diag *d = serr(c, mem, "the initializer of `%s.%s` must be a literal `{ ... }`.",
+                                   col->name, mem->name);
+                    diag_note(d, "global initializers must be compile-time constants (spec §7).");
+                    c->cur_scope = ns;
+                    check_expr(c, mem->a);
+                } else {
+                    ConstVal cv;
+                    check_struct_lit_const(c, mem->a, mem->otype, what, &cv);
+                    if (mem->sym) mem->sym->cval = cv;
+                }
+                continue;
+            }
             if (ty_kind(mem->otype) == OK_ARRAY) {
                 char what[192];
                 snprintf(what, sizeof what, "array `%s.%s`", col->name, mem->name);
@@ -1476,6 +1978,22 @@ static void check_module(SemaCtx *c, OkModule *m, Scope *scope) {
         }
         case A_VARDECL: {
             /* global: initializer must be a compile-time constant (spec §7) */
+            if (ty_kind(n->otype) == OK_STRUCT) {
+                char what[160];
+                snprintf(what, sizeof what, "global struct `%s`", n->name);
+                if (n->a->kind != A_ARRAYLIT) {
+                    Diag *d = serr(c, n, "the initializer of global struct `%s` must be a literal `{ ... }`.",
+                                   n->name);
+                    diag_note(d, "global initializers must be compile-time constants (spec §7).");
+                    c->cur_scope = scope;
+                    check_expr(c, n->a);
+                } else {
+                    ConstVal cv;
+                    check_struct_lit_const(c, n->a, n->otype, what, &cv);
+                    if (n->sym) n->sym->cval = cv;
+                }
+                break;
+            }
             if (ty_kind(n->otype) == OK_ARRAY) {
                 char what[160];
                 snprintf(what, sizeof what, "global array `%s`", n->name);
@@ -1531,6 +2049,7 @@ static void check_module(SemaCtx *c, OkModule *m, Scope *scope) {
         }
         case A_DIRECTIVE:
         case A_LANGCOL:
+        case A_STRUCTDECL:
             /* collected/validated in phase 1; no body to check */
             break;
         default:
@@ -1564,6 +2083,8 @@ bool sema_run(OkProject *p, DiagEngine *de, const OkOptions *opt) {
 
     size_t errmark = de->errors;
 
+    vec_init(&g_struct_sites);
+
     /* phase 1: collect symbols, module scopes */
     for (size_t i = 0; i < p->modules.len; i++) {
         OkModule *m = p->modules.items[i];
@@ -1581,6 +2102,18 @@ bool sema_run(OkProject *p, DiagEngine *de, const OkOptions *opt) {
             bind->ns = mscope;
         }
     }
+
+    /* phase 1.5: register + lay out struct types (fill placeholders in
+     * place, resolving every reference — spec §8.3) */
+    for (size_t i = 0; i < p->modules.len; i++) {
+        OkModule *m = p->modules.items[i];
+        if (m->state != MOD_LOADED) continue;
+        Scope *mscope = (strcmp(m->name, "main") == 0)
+            ? c.root
+            : scope_find_local(c.root, m->name)->ns;
+        collect_structs_in(&c, m, m->ast, mscope);
+    }
+    layout_all_structs(&c);
 
     /* phase 2: check bodies */
     for (size_t i = 0; i < p->modules.len; i++) {

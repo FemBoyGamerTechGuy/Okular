@@ -23,12 +23,14 @@ typedef enum {
     A_CONV,          /* explicit conversion builtin T.to_U(x) (a = value, otype = target) */
     A_NULL,          /* the `null` literal (rtype ty_null) */
     A_ALLOC,         /* alloc<T>(count) (a = count, otype = ptr<T>) */
+    A_MEMBER,        /* base.field — struct field access on a non-path base (spec §8.3) */
     /* statements */
     A_VARDECL,       /* type.<T> name = init (init may be A_ARRAYLIT) */
     A_ASSIGN,        /* path = value */
     A_INDEXASSIGN,   /* base[index] = value (base a, index b, value c) */
     A_DEREFASSIGN,   /* *ptr = value (ptr in a, value in c) — 0.4, spec §12 */
     A_RELEASE,       /* release(ptr) — statement, a = pointer expression */
+    A_FIELDASSIGN,   /* base.field = value (a = base, name = field, c = value) — 0.5 */
     A_EXPRSTMT,      /* expression statement (calls / write only, checked in sema) */
     A_WHEN,          /* when (cond) { } else { } */
     A_LOOP_COUNT,    /* loop (i from a to/until b) { } */
@@ -39,6 +41,7 @@ typedef enum {
     A_DIRECTIVE,     /* type.<feature>=<value> */
     A_LANGCOL,       /* [libs.use] = { ... }.end */
     A_DEVCOL,        /* name = { members }.end  (namespace) */
+    A_STRUCTDECL,    /* struct.Name = { fields }.end — params[] are the fields (0.5) */
     A_FUNC,          /* function.<name>(params) -> ret { body } */
     A_FILE,          /* one parsed .ok file */
 } NodeKind;
@@ -89,6 +92,8 @@ struct Node {
     BinOp op;            /* A_BIN */
     UnOp uop;            /* A_UN */
     bool inclusive;      /* loop `to` (true) vs `until` (false) */
+    bool autoderef;      /* A_MEMBER/A_FIELDASSIGN: base is ptr<struct>, deref first */
+    size_t offset;       /* A_MEMBER/A_FIELDASSIGN: field byte offset */
     int feature;         /* A_DIRECTIVE: index into ok_feature_names */
     int fvalue;          /* A_DIRECTIVE: value */
 

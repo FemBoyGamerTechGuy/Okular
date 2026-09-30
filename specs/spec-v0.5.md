@@ -1,12 +1,13 @@
 # Okular Language Specification
 
-**Version:** 0.4 (pointers & manual memory)
+**Version:** 0.5 (structs)
 **Status:** Evolving draft
 **Implementation:** bootstrap compiler in C (`bootstrap/`)
 
-> 0.4 adds the pointer system — `ptr<T>` types, `&`/`*`, pointer
-> arithmetic and indexing, `alloc`/`release`, `null`, and a real heap
-> allocator (§12) — on top of 0.3. See the changelog in §23.
+> 0.5 adds **structs** — named record types with predictable layout,
+> positional literals, field access (with pointer auto-deref), value
+> semantics, nesting, arrays of structs, and structs on the heap (§8.3) —
+> on top of 0.4's pointers. See the changelog in §23.
 
 > This specification is the source of truth for the Okular language.
 > When the implementation changes the language, this document changes with it.
@@ -279,6 +280,7 @@ The compiler distinguishes, per §7 of the engineering brief:
 | `int8` / `int16` / `int32` | signed fixed-width integers | 1 / 2 / 4 bytes |
 | `uint8` / `uint16` / `uint32` / `uint64` | unsigned fixed-width integers | 1 / 2 / 4 / 8 bytes |
 | `array<T, N>` | N elements of type T, laid out contiguously | N × size(T) |
+| struct types | named records (§8.3) | sum of fields + padding |
 
 Array types are written `type.array<type.number, 5>` (§8.4).
 
@@ -576,19 +578,60 @@ function.<name>(<typeRef>.<param>, ...) [-> <typeRef>] { body }
   single register value. Since 0.4 the pointer route works: return
   `ptr<array<T, N>>` (heap- or global-backed).
 
-### 8.3 Structs (designed; not implemented in 0.1)
+### 8.3 Structs (implemented in 0.5)
+
+A struct is a named record type: fields in declaration order, natural
+alignment, explicit size:
 
 ```ok
 struct.Packet = {
     type.uint32 length
     type.uint8 flags
 }.end
+
+type.Packet p = {120, 0xFF}
+p.length = 124
+write(p.flags)
 ```
 
-Fields use the standard declaration grammar (without initializers). Methods,
-nested structs, arrays-in-structs, explicit layout/alignment attributes, and
-value vs reference semantics are designed in `docs/roadmap.md`. The keyword is
-reserved and the column-style shape above is the committed direction.
+* **Declaration** `struct.Name = { fields }.end` at the top of a file or
+  inside a column. Struct names form one flat type namespace across the
+  project (a documented bootstrap simplification), and forward references
+  are legal — a two-phase loader lexes every file before parsing any.
+* **Fields** use the standard declaration grammar *without initializers*
+  (explicit construction instead of silent defaults). Every field type is
+  legal: scalars, fixed-width integers, `text`, arrays, nested structs,
+  pointers (including `ptr` to the struct itself — linked structures).
+  A struct may not contain itself, directly or through a cycle.
+* **Layout** is predictable: fields sit at their natural alignment in
+  declaration order; the struct's alignment is its largest field's
+  alignment; the size is rounded up to that alignment (tail padding).
+  `struct.Mixed = { int8 a; int32 b; int16 c }` occupies 12 bytes with
+  `a` at 0, padding 1–3, `b` at 4, `c` at 8. Explicit layout control
+  (packed/offset attributes) is designed, not implemented.
+* **Literals** are positional: `type.Name v = { f1, f2, ... }` with one
+  initializer per field in declaration order, each following the
+  assignment rules (safe widening, fitting literals). Nested literals
+  nest (`{{1, 2}, {3, 4}}`). Literals only initialize declarations.
+* **Field access** is `value.field` — on variables (`p.length`), through
+  namespaces (`config.center.x`), on array elements (`pts[i].x`), and on
+  pointers with **auto-deref** (`ptr.length` means `(*ptr).length`,
+  null-checked). Assignment `value.field = expr` stores; whole
+  struct-valued fields copy.
+* **Value semantics.** Assignment, initialization, and parameter passing
+  copy the contents (arrays and structs alike). Mutating a copy never
+  touches the original. Reference-style access goes through `ptr<Name>`
+  (§12).
+* **Parameters** pass by value (caller-owned copy, one register — the
+  same ABI shape as arrays). **Functions cannot return structs directly**
+  (single-register return ABI): return `ptr<Name>` or write through a
+  pointer parameter.
+* **Globals** may be structs with constant field initializers, emitted
+  into `.data` with explicit padding. Arrays of structs, structs in
+  arrays, `array<Name, N>` and `ptr<Name>` all compose.
+* Structs are not comparable (`==` is an error — compare fields), not
+  writable as a whole, and not convertible (no casts between struct
+  types).
 
 ### 8.4 Arrays
 
@@ -649,7 +692,7 @@ Precedence, loosest to tightest:
 | 4 | `+  -` | left |
 | 5 | `*  /  %` | left |
 | 6 | unary `not`, unary `-` | prefix |
-| 7 | call `f(x)`, member `a.b`, index `a[i]`, literals, names, `( expr )` | — |
+| 7 | call `f(x)`, member `a.b` (struct fields, §8.3), index `a[i]`, literals, names, `( expr )` | — |
 
 * `+` on `text` concatenates. `+` on `number`/`decimal` adds. There is no
   `+` between `text` and `number` (planned explicit conversion builtins).
@@ -1091,7 +1134,7 @@ An implementation claiming "Okular 0.1" must:
 | `type.text=1` gate | §5 | implemented |
 | Variables, scoping, reassignment | §8.1 | implemented |
 | Functions, recursion, return checking | §8.2 | implemented |
-| Structs | §8.3 | NOT IMPLEMENTED (reserved) |
+| Structs (layout, literals, fields, value copies) | §8.3 | implemented (explicit layout attributes planned) |
 | Expressions, precedence, constant folding | §9 | implemented |
 | `when`/`else` | §10 | implemented |
 | `else when` chains | §10 | implemented |
@@ -1114,6 +1157,25 @@ An implementation claiming "Okular 0.1" must:
 ---
 
 ## 23. Changelog
+
+### 0.5
+
+* **Structs** (§8.3): `struct.Name = { fields }.end` with natural-alignment
+  layout (offsets, padding, size documented per type), positional literals
+  `{ ... }` (nested; same rules as array literals), field access
+  `value.field` on variables, namespace paths, array elements, and pointers
+  (auto-deref, null-checked), field assignment, whole-value copies, struct
+  parameters by value, global structs in `.data` with explicit padding,
+  arrays of structs, structs in arrays, `ptr<Name>`, and self-referential
+  pointer fields (linked structures).
+* Struct names are one flat type namespace across the project; forward
+  references work because the loader now lexes every file before parsing
+  any (two-phase load). Cycles and unknown field types are diagnosed.
+* Functions cannot return structs directly (single-register return ABI):
+  return `ptr<Name>` or write through a pointer parameter.
+* IR: `I_ADDOFF` (field offsets); struct expressions evaluate to addresses
+  exactly like arrays; struct literals store field-by-field in place.
+* Tests: 301 → 343 checks; example `examples/structs`.
 
 ### 0.4
 

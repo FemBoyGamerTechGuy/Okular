@@ -149,7 +149,7 @@ static void gen_function(Buf *out, IrModule *im, IrFunc *f, size_t seq) {
         FuncInfo *cfi = (FuncInfo *)f->insts[i].sym;
         size_t need = 0;
         for (size_t k = 0; k < (size_t)f->insts[i].nargs && k < cfi->nparams; k++)
-            if (ty_kind(cfi->param_types[k]) == OK_ARRAY)
+            if (ty_kind(cfi->param_types[k]) == OK_ARRAY || ty_kind(cfi->param_types[k]) == OK_STRUCT)
                 need += ty_bytes(cfi->param_types[k]);
         if (need > scratch) scratch = need;
     }
@@ -165,7 +165,7 @@ static void gen_function(Buf *out, IrModule *im, IrFunc *f, size_t seq) {
     /* store parameters into their slots (params are slots 0..n-1) */
     for (size_t k = 0; k < f->fi->nparams && k < 6; k++) {
         size_t o = fc.offsets[k];
-        if (ty_kind(f->fi->param_types[k]) == OK_ARRAY) {
+        if (ty_kind(f->fi->param_types[k]) == OK_ARRAY || ty_kind(f->fi->param_types[k]) == OK_STRUCT) {
             /* the register holds the caller's copy: adopt it by value */
             buf_printf(out, "    mov rsi, %s\n", arg_regs[k]);
             buf_printf(out, "    lea rdi, [rbp-%zu]\n", o);
@@ -213,7 +213,7 @@ static void emit_call(FnCtx *fc, IrInst *in) {
     for (size_t k = 0; k < n && k < 16; k++) arr_off[k] = 0;
     for (size_t k = 0; k < n; k++) {
         OkType t = (k < fi->nparams) ? fi->param_types[k] : ty_number;
-        if (ty_kind(t) == OK_ARRAY) {
+        if (ty_kind(t) == OK_ARRAY || ty_kind(t) == OK_STRUCT) {
             size_t bytes = ty_bytes(t);
             buf_printf(o, "    mov rax, [rsp+%zu]\n", stack_off);
             buf_puts(o, "    mov rsi, rax\n");
@@ -242,7 +242,7 @@ static void emit_call(FnCtx *fc, IrInst *in) {
     for (size_t k = 0; k < n && k < 6; k++) {
         OkType t = (k < fi->nparams) ? fi->param_types[k] : ty_number;
         size_t oa = fc->oa_base - k * 16;
-        if (ty_kind(t) == OK_ARRAY) {
+        if (ty_kind(t) == OK_ARRAY || ty_kind(t) == OK_STRUCT) {
             buf_printf(o, "    lea %s, [rbp-%zu]\n", arg_regs[k],
                        fc->scratch_base - arr_off[k]);
             continue;
@@ -606,8 +606,8 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         call_aligned(o, "rt_print");
         break;
     case I_RETURN:
-        if (ty_kind(in->type) == OK_ARRAY)
-            OK_ICE("RETURN of array type at %zu:%zu (sema should have rejected it)", in->line, in->col);
+        if (ty_kind(in->type) == OK_ARRAY || ty_kind(in->type) == OK_STRUCT)
+            OK_ICE("RETURN of aggregate type at %zu:%zu (sema should have rejected it)", in->line, in->col);
         if (ty_is_integer(in->type) || in->type == ty_bool || ty_is_ptr(in->type)
             || in->type == ty_null) {
             pop_rax(o);
@@ -745,6 +745,13 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         push_rax(o);
         break;
     }
+    case I_ADDOFF: {
+        /* pop addr (rax); push addr + field offset (spec §8.3) */
+        buf_puts(o, "    pop rax\n");
+        if (in->i) buf_printf(o, "    add rax, %llu\n", (unsigned long long)in->i);
+        push_rax(o);
+        break;
+    }
     default:
         OK_ICE("unhandled IR kind %d at %zu:%zu", (int)in->kind, in->line, in->col);
     }
@@ -783,6 +790,24 @@ static void emit_const_elems(GlobCtx *g, const char *label, OkType t, ConstVal *
             }
             emit_const_elems(g, NULL, t->elem, ev);
         }
+        return;
+    }
+    if (ty_kind(t) == OK_STRUCT) {
+        size_t cur = 0;
+        for (size_t k = 0; k < t->nsfields; k++) {
+            StructField *f = &t->sfields[k];
+            if (f->offset > cur)
+                buf_printf(g->data, "    .zero %zu\n", f->offset - cur); /* padding */
+            ConstVal *ev = (cv && k < cv->nelems) ? &cv->elems[k] : NULL;
+            if (!ev || !ev->valid) {
+                buf_printf(g->data, "    .zero %zu\n", ty_bytes(f->type) ? ty_bytes(f->type) : 8);
+            } else {
+                emit_const_elems(g, NULL, f->type, ev);
+            }
+            cur = f->offset + ty_bytes(f->type);
+        }
+        if (t->count > cur)
+            buf_printf(g->data, "    .zero %zu\n", t->count - cur); /* tail padding */
         return;
     }
     switch (ty_kind(t)) {
@@ -841,7 +866,7 @@ bool codegen_module(IrModule *im, const char *out_path) {
     Buf o;
     buf_init(&o);
 
-    buf_puts(&o, "# Okular 0.4 bootstrap — x86-64 Linux assembly\n");
+    buf_puts(&o, "# Okular 0.5 bootstrap — x86-64 Linux assembly\n");
     buf_puts(&o, "# module: ");
     buf_puts(&o, im->mod->name);
     buf_puts(&o, "\n    .intel_syntax noprefix\n\n    .text\n");
@@ -866,7 +891,12 @@ bool codegen_module(IrModule *im, const char *out_path) {
             buf_printf(&data, "    .balign 8\n%s: .zero %zu\n", s->mangled, bytes);
             continue;
         }
-        buf_printf(&data, "    .balign 8\n");
+        {
+            size_t al = ty_align(s->type);
+            if (al < 1) al = 1;
+            if (al > 8) al = 8;
+            buf_printf(&data, "    .balign %zu\n", al);
+        }
         emit_const_elems(&gc, s->mangled, s->type, &s->cval);
     }
 

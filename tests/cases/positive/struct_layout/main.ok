@@ -1,0 +1,72 @@
+type.text=1
+
+struct.Mixed = {
+    type.int8 a
+    type.int32 b
+    type.int16 c
+}.end
+
+struct.Tiny = {
+    type.uint8 lo
+    type.uint8 hi
+}.end
+
+struct.Wide = {
+    type.uint64 big
+    type.uint8 tag
+}.end
+
+function.run() -> number {
+    type.Mixed m = {1, 2000000000, -300}
+    write(m.a)
+    print
+    write(m.b)
+    print
+    write(m.c)
+    print
+
+    m.a = -128
+    m.b = -1
+    m.c = 32767
+    write(m.a)
+    print
+    write(m.b)
+    print
+    write(m.c)
+    print
+
+    type.Tiny t = {17, 239}
+    write(t.lo)
+    print
+    write(t.hi)
+    print
+
+    type.Wide w = {18446744073709551615, 9}
+    write(w.big)
+    print
+    write(w.tag)
+    print
+
+    type.array<type.Tiny, 3> ts = {{1, 2}, {3, 4}, {5, 6}}
+    write(ts[2].lo)
+    print
+    write(ts[2].hi)
+    print
+    ts[1].lo = 100
+    ts[1].hi = 200
+    write(ts[1].lo)
+    print
+    write(ts[1].hi)
+    print
+    write(ts[0].lo)
+    print
+
+    type.array<type.Mixed, 2> ms = {{1, 2, 3}, {4, 5, 6}}
+    write(ms[1].b)
+    print
+    write(ms[1].c)
+    print
+    return 0
+}
+
+run()

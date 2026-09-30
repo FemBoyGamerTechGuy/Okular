@@ -1,0 +1,66 @@
+type.text=1
+
+struct.Point = {
+    type.number x
+    type.number y
+}.end
+
+struct.Pair = {
+    type.int8 first
+    type.int8 second
+}.end
+
+function.run() -> number {
+    type.array<type.Point, 3> pts = {{1, 2}, {3, 4}, {5, 6}}
+    write(pts[0].x)
+    print
+    write(pts[1].y)
+    print
+    write(pts[2].x + pts[2].y)
+    print
+
+    pts[1].x = 30
+    pts[1].y = 40
+    write(pts[1].x + pts[1].y)
+    print
+
+    type.number sum = 0
+    loop (i from 0 until 3) {
+        sum = sum + pts[i].x
+    }
+    write(sum)
+    print
+
+    type.array<type.Point, 2> more = {{10, 20}, {30, 40}}
+    type.array<type.Point, 2> copy = more
+    copy[0].x = 999
+    write(more[0].x)
+    print
+
+    type.array<type.Pair, 4> ps = {{1, 2}, {3, 4}, {5, 6}, {7, 8}}
+    type.int8 total = 0
+    loop (i from 0 until 4) {
+        total = total + ps[i].first + ps[i].second
+    }
+    write(total)
+    print
+
+    type.array<type.array<type.Point, 2>, 2> grid = {{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}}
+    write(grid[1][0].x)
+    print
+    grid[0][1].y = 99
+    write(grid[0][1].y)
+    print
+
+    type.ptr<type.array<type.Point, 2>> ha = alloc<type.array<type.Point, 2>>(1)
+    ha[0][0].x = 111
+    ha[0][1].y = 222
+    write(ha[0][0].x)
+    print
+    write(ha[0][1].y)
+    print
+    release(ha)
+    return 0
+}
+
+run()

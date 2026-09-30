@@ -1,0 +1,67 @@
+type.text=1
+
+struct.Point = {
+    type.number x
+    type.number y
+}.end
+
+struct.Config = {
+    type.uint32 width
+    type.uint32 height
+    type.uint8 depth
+    type.bool fullscreen
+    type.text title
+}.end
+
+type.Point origin = {0, 0}
+type.Point marker = {-5, 12}
+type.Config default = {1920, 1080, 32, true, "okular"}
+
+config = {
+    type.Point center = {100, 200}
+    type.Config ui = {800, 600, 24, false, "ui"}
+}.end
+
+function.run() -> number {
+    write(origin.x)
+    print
+    write(origin.y)
+    print
+    write(marker.x)
+    print
+    write(marker.y)
+    print
+
+    origin.x = 5
+    write(origin.x)
+    print
+
+    write(default.width)
+    print
+    write(default.height)
+    print
+    write(default.depth)
+    print
+    write(default.fullscreen)
+    print
+    write(default.title)
+    print
+
+    write(config.center.x)
+    print
+    write(config.ui.width)
+    print
+    write(config.ui.title)
+    print
+
+    config.center.y = 300
+    write(config.center.y)
+    print
+
+    type.Point local = origin
+    write(local.x)
+    print
+    return 0
+}
+
+run()

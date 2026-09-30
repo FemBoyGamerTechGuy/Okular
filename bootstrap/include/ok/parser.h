@@ -11,4 +11,8 @@
  * Diagnostics are recorded in `de` with recovery (brief §43). */
 Node *parse_file_tokens(TokList *toks, SourceFile *f, DiagEngine *de, Arena *ar);
 
+/* seed the (process-wide) struct-name registry from one file's tokens;
+ * the project loader calls this for every module before parsing any */
+void parser_register_struct_names(TokList *toks);
+
 #endif /* OK_PARSER_H */

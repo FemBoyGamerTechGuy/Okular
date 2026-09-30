@@ -1,0 +1,4 @@
+struct.Point = {
+    type.number x = 0
+    type.number y
+}.end

@@ -5,20 +5,22 @@ before the test suite proves it.**
 
 ## Where we are
 
-**Okular 0.4 — milestone M2→M3 (systems types).** 0.2 added fixed-length
+**Okular 0.5 — milestone M2→M3 (systems types).** 0.2 added fixed-length
 arrays; 0.3 the fixed-width integer family (`int8`…`uint64`, `byte`,
 aliases) with wrapping arithmetic, the widening lattice, contextual literal
-typing, and the `T.to_U(x)` conversion builtins; 0.4 adds **pointers and
-manual memory** — `ptr<T>`, `&x`, `*p`, `p[i]`, `alloc`/`release` over a
-real free-list heap allocator, `null` checks, and scaled arithmetic. See
-`specs/spec-v0.4.md` §22 for the honest status table.
+typing, and the `T.to_U(x)` conversion builtins; 0.4 pointers and manual
+memory — `ptr<T>`, `&x`, `*p`, `alloc`/`release` over a real free-list heap
+allocator, `null` checks, scaled arithmetic; 0.5 **structs** — predictable
+layout, positional literals, field access with pointer auto-deref, value
+semantics, nesting, arrays of structs, heap structs. See
+`specs/spec-v0.5.md` §22 for the honest status table.
 
 ## Milestones
 
 | ID | Milestone | Status |
 |----|-----------|--------|
 | M1 | C bootstrap compiler; hello-world and small programs run natively | **done (0.1)** |
-| M2 | Language covers substantial normal programs | in progress — arrays (0.2), fixed-width integers (0.3), pointers + heap (0.4) |
+| M2 | Language covers substantial normal programs | in progress — arrays (0.2), fixed-width integers (0.3), pointers + heap (0.4), structs (0.5) |
 | M3 | Okular can compile portions of the compiler itself | not started |
 | M4 | Compiler components rewritten in Okular (lexer first, then runtime shim) | not started |
 | M5 | Okular compiler builds itself | not started |
@@ -29,17 +31,21 @@ real free-list heap allocator, `null` checks, and scaled arithmetic. See
 
 1. ~~**Arrays** — fixed-length~~ **done in 0.2**: `type.array<type.number, 5>`,
    literals, indexing, indexed stores, value-copy semantics, bounds traps,
-   nesting, params, globals (`specs/spec-v0.4.md` §8.4). Dynamic arrays
+   nesting, params, globals (`specs/spec-v0.5.md` §8.4). Dynamic arrays
    wait for the heap milestone.
 2. ~~**Fixed-width integers**~~ **done in 0.3**: `int8`…`uint64` + `byte`/
    `int64`/`f64` aliases, wrapping arithmetic, widening lattice, contextual
    literals, `T.to_U(x)` conversion builtins, checked division
-   (`specs/spec-v0.4.md` §4.2/§4.4).
+   (`specs/spec-v0.5.md` §4.2/§4.4).
 3. ~~**Heap + pointers + manual memory**~~ **done in 0.4**: `ptr<T>`,
    `&x`/`&xs[i]`/`&*p`, `*p` loads and stores, unchecked `p[i]`, scaled
    `p ± n`, element-difference `p - q`, `null`, `alloc<T>(n)`/`release(p)`
-   over a real allocator (`specs/spec-v0.4.md` §12).
-4. **Structs** (`struct.X = { fields }.end`) with explicit layout control.
+   over a real allocator (`specs/spec-v0.5.md` §12).
+4. ~~**Structs**~~ **done in 0.5**: `struct.X = { fields }.end`,
+   natural-alignment layout, positional literals, field access (auto-deref
+   through pointers), value copies, struct params, global structs, arrays
+   of structs (`specs/spec-v0.5.md` §8.3). Explicit packed/offset layout
+   attributes stay designed.
 5. **Unions** — active-member semantics documented, unsafe by declaration.
 6. **`f32`** — true 32-bit float (needs its own ABI/register path).
 7. **Remaining text conversion builtins** — `number.to_text`, `text.to_number`

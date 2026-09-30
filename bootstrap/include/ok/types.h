@@ -26,19 +26,30 @@ typedef enum {
     OK_UINT8, OK_UINT16, OK_UINT32, OK_UINT64,
     OK_PTR,        /* pointer to elem (spec §12)           */
     OK_NULL,       /* the type of the `null` literal        */
+    OK_STRUCT,     /* named record type (spec §8.3, 0.5)    */
+    OK_NAMED,      /* parser placeholder: unresolved struct name */
 } TypeKind;
+
+/* OkType is a pointer to an interned descriptor. */
+typedef struct Type *OkType;
 
 typedef struct Type {
     TypeKind kind;
     struct Type *elem;   /* OK_ARRAY/OK_PTR: element/pointee type */
-    size_t count;        /* OK_ARRAY: element count  */
+    size_t count;        /* OK_ARRAY: element count; OK_STRUCT: total bytes */
     char *name;          /* rendered name, owned     */
     int bits;            /* integer types: 8/16/32/64 (0 otherwise) */
     bool is_signed;      /* integer types: signedness                */
+    struct StructField *sfields; /* OK_STRUCT: fields in declaration order */
+    size_t nsfields;            /* OK_STRUCT: field count                  */
 } Type;
 
-/* OkType is now a pointer to an interned descriptor. */
-typedef struct Type *OkType;
+/* one field of a struct (spec §8.3): natural alignment, declared order */
+typedef struct StructField {
+    char *name;      /* owned */
+    OkType type;
+    size_t offset;   /* byte offset within the struct */
+} StructField;
 
 /* scalar singletons (defined in types.c) */
 extern OkType ty_void, ty_number, ty_decimal, ty_text, ty_bool;
@@ -54,7 +65,19 @@ OkType ty_array(OkType elem, size_t count);
 /* interned pointer type ptr<T> (spec §12); elem must not be void/null */
 OkType ty_ptr(OkType elem);
 
+/* fresh parser placeholder for a named struct type (spec §8.3): starts as
+ * OK_NAMED; sema fills it IN PLACE when the declaration is laid out, so
+ * every reference (including interned arrays of it) resolves together */
+OkType ty_named_placeholder(const char *name);
+
 static inline bool ty_is_ptr(OkType t) { return t && t->kind == OK_PTR; }
+static inline bool ty_is_struct(OkType t) { return t && t->kind == OK_STRUCT; }
+
+/* struct field lookup by name; NULL when absent */
+StructField *ty_field(OkType t, const char *name);
+
+/* natural alignment of a type (1/2/4/8) */
+size_t ty_align(OkType t);
 
 /* "number" (etc.) from a name; false for unknown names or "array".
  * Accepts the fixed-width family and the aliases int64/byte/f64. */

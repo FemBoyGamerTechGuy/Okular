@@ -47,6 +47,7 @@ typedef enum {
     I_PTRCHK,        /* pop ptr, trap if null, push back            */
     I_PTR_SCALE,     /* type: ptr<T>; pop index, pop ptr -> elem addr */
     I_PTR_DIFF,      /* type: ptr<T>; pop q, pop p -> number (p-q)/size(T) */
+    I_ADDOFF,        /* i: offset; pop addr -> addr+offset (struct fields) */
 } IrKind;
 
 typedef struct IrInst {

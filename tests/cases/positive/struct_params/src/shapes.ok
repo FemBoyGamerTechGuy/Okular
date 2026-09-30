@@ -1,0 +1,33 @@
+struct.Point = {
+    type.number x
+    type.number y
+}.end
+
+struct.Rect = {
+    type.Point corner
+    type.uint16 w
+    type.uint16 h
+}.end
+
+function.area(ptr<Rect>.r) -> number {
+    return r.w * r.h
+}
+
+function.area_by_value(type.Rect.r) -> number {
+    return r.w * r.h
+}
+
+function.grow(ptr<Rect>.r, number.dw, number.dh) {
+    r.w = r.w + number.to_uint16(dw)
+    r.h = r.h + number.to_uint16(dh)
+}
+
+function.translate(ptr<Point>.p, number.dx, number.dy) {
+    p.x = p.x + dx
+    p.y = p.y + dy
+}
+
+function.manhattan(type.Point.p) -> number {
+    when (p.x < 0) { }
+    return p.x + p.y
+}

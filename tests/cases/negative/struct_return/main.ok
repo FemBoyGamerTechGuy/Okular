@@ -1,0 +1,7 @@
+struct.Point = {
+    type.number x
+    type.number y
+}.end
+function.origin() -> Point {
+    return 1
+}

@@ -7,20 +7,20 @@
 #define OK_MAX_ARRAY_LEN 65536
 #define OK_MAX_ARRAY_BYTES (1u << 20)
 
-static Type t_void_s   = { OK_VOID,   NULL, 0, "void",     0, false };
-static Type t_number_s = { OK_NUMBER, NULL, 0, "number",  64, true  };
-static Type t_dec_s    = { OK_DECIMAL, NULL, 0, "decimal", 0, false };
-static Type t_text_s   = { OK_TEXT,   NULL, 0, "text",     0, false };
-static Type t_bool_s   = { OK_BOOL,   NULL, 0, "bool",     0, false };
-static Type t_null_s   = { OK_NULL,   NULL, 0, "null",     0, false };
+static Type t_void_s   = { OK_VOID,   NULL, 0, "void",     0, false, NULL, 0 };
+static Type t_number_s = { OK_NUMBER, NULL, 0, "number",  64, true,  NULL, 0 };
+static Type t_dec_s    = { OK_DECIMAL, NULL, 0, "decimal", 0, false, NULL, 0 };
+static Type t_text_s   = { OK_TEXT,   NULL, 0, "text",     0, false, NULL, 0 };
+static Type t_bool_s   = { OK_BOOL,   NULL, 0, "bool",     0, false, NULL, 0 };
+static Type t_null_s   = { OK_NULL,   NULL, 0, "null",     0, false, NULL, 0 };
 
-static Type t_i8_s     = { OK_INT8,   NULL, 0, "int8",     8, true  };
-static Type t_i16_s    = { OK_INT16,  NULL, 0, "int16",   16, true  };
-static Type t_i32_s    = { OK_INT32,  NULL, 0, "int32",   32, true  };
-static Type t_u8_s     = { OK_UINT8,  NULL, 0, "uint8",    8, false };
-static Type t_u16_s    = { OK_UINT16, NULL, 0, "uint16",  16, false };
-static Type t_u32_s    = { OK_UINT32, NULL, 0, "uint32",  32, false };
-static Type t_u64_s    = { OK_UINT64, NULL, 0, "uint64",  64, false };
+static Type t_i8_s     = { OK_INT8,   NULL, 0, "int8",     8, true,  NULL, 0 };
+static Type t_i16_s    = { OK_INT16,  NULL, 0, "int16",   16, true,  NULL, 0 };
+static Type t_i32_s    = { OK_INT32,  NULL, 0, "int32",   32, true,  NULL, 0 };
+static Type t_u8_s     = { OK_UINT8,  NULL, 0, "uint8",    8, false, NULL, 0 };
+static Type t_u16_s    = { OK_UINT16, NULL, 0, "uint16",  16, false, NULL, 0 };
+static Type t_u32_s    = { OK_UINT32, NULL, 0, "uint32",  32, false, NULL, 0 };
+static Type t_u64_s    = { OK_UINT64, NULL, 0, "uint64",  64, false, NULL, 0 };
 
 OkType ty_void    = &t_void_s;
 OkType ty_number  = &t_number_s;
@@ -66,7 +66,36 @@ static size_t scalar_bytes(TypeKind k) {
 size_t ty_bytes(OkType t) {
     if (!t) return 0;
     if (t->kind == OK_ARRAY) return ty_bytes(t->elem) * t->count;
+    if (t->kind == OK_STRUCT) return t->count; /* total size, precomputed */
     return scalar_bytes(t->kind);
+}
+
+/* ---- structs (spec §8.3, 0.5) ---- */
+
+StructField *ty_field(OkType t, const char *name) {
+    if (!ty_is_struct(t)) return NULL;
+    for (size_t i = 0; i < t->nsfields; i++)
+        if (strcmp(t->sfields[i].name, name) == 0) return &t->sfields[i];
+    return NULL;
+}
+
+size_t ty_align(OkType t) {
+    if (!t) return 1;
+    switch (t->kind) {
+    case OK_INT8: case OK_UINT8: case OK_BOOL: return 1;
+    case OK_INT16: case OK_UINT16: return 2;
+    case OK_INT32: case OK_UINT32: return 4;
+    case OK_ARRAY: return ty_align(t->elem);
+    case OK_STRUCT: {
+        size_t a = 1;
+        for (size_t i = 0; i < t->nsfields; i++) {
+            size_t fa = ty_align(t->sfields[i].type);
+            if (fa > a) a = fa;
+        }
+        return a;
+    }
+    default: return 8; /* number, decimal, text (ptr), ptr, null */
+    }
 }
 
 /* ---- pointer interning (spec §12) ---- */
@@ -94,6 +123,14 @@ OkType ty_ptr(OkType elem) {
     e->next = ptr_table[h];
     ptr_table[h] = e;
     return &e->t;
+}
+
+OkType ty_named_placeholder(const char *name) {
+    Type *t = ok_xmalloc(sizeof *t);
+    memset(t, 0, sizeof *t);
+    t->kind = OK_NAMED;
+    t->name = ok_xstrdup(name);
+    return t;
 }
 
 OkType ty_array(OkType elem, size_t count) {
@@ -226,6 +263,8 @@ bool ty_assignable(OkType from, OkType to) {
 OkType ty_common(OkType a, OkType b) {
     if (!a || !b) return NULL;
     if (a == b) return a;
+    /* structs and pointers never mix implicitly */
+    if (a->kind == OK_STRUCT || b->kind == OK_STRUCT) return NULL;
     /* decimal dominates when both sides are numeric */
     if (a == ty_decimal && ty_is_integer(b)) return ty_decimal;
     if (b == ty_decimal && ty_is_integer(a)) return ty_decimal;
@@ -245,6 +284,8 @@ bool ty_convertible(OkType from, OkType to) {
     if (from == to) return true; /* identity is a legal explicit conversion */
     if (from == ty_text || to == ty_text) return false; /* planned, not built */
     if (ty_kind(from) == OK_ARRAY || ty_kind(to) == OK_ARRAY) return false;
+    if (ty_kind(from) == OK_STRUCT || ty_kind(to) == OK_STRUCT) return false;
+    if (ty_kind(from) == OK_NAMED || ty_kind(to) == OK_NAMED) return false;
     if (from == ty_void || to == ty_void) return false;
     /* null -> ptr is a pure representation no-op for IR operand conversion */
     if (from == ty_null && ty_is_ptr(to)) return true;

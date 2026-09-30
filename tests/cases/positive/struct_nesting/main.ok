@@ -1,0 +1,67 @@
+type.text=1
+
+struct.Inner = {
+    type.int32 a
+    type.int8 b
+}.end
+
+struct.Middle = {
+    type.Inner one
+    type.Inner two
+    type.uint16 gap
+}.end
+
+struct.Outer = {
+    type.Middle mid
+    type.array<type.number, 3> vec
+    type.decimal ratio
+}.end
+
+function.run() -> number {
+    type.Inner i = {1, -2}
+    write(i.a)
+    print
+    write(i.b)
+    print
+
+    type.Middle m = {{10, 20}, {30, 40}, 65000}
+    write(m.one.a)
+    print
+    write(m.two.b)
+    print
+    write(m.gap)
+    print
+
+    m.two.a = 99
+    write(m.two.a)
+    print
+
+    type.Outer o = {{{1, 2}, {3, 4}, 500}, {7, 8, 9}, 0.5}
+    write(o.mid.one.a)
+    print
+    write(o.mid.two.b)
+    print
+    write(o.mid.gap)
+    print
+    write(o.vec[0])
+    print
+    write(o.vec[2])
+    print
+    write(o.ratio * 2)
+    print
+
+    o.vec[1] = 80
+    write(o.vec[1])
+    print
+    o.mid.one = m.one
+    write(o.mid.one.a)
+    print
+
+    type.Middle copy = m
+    copy.one.a = 777
+    write(m.one.a)
+    print
+    return 0
+}
+
+run()

@@ -1,0 +1,66 @@
+type.text=1
+
+struct.Point = {
+    type.number x
+    type.number y
+}.end
+
+struct.Rect = {
+    type.Point corner
+    type.uint16 w
+    type.uint16 h
+    type.uint8 flags
+    type.bool active
+}.end
+
+function.run() -> number {
+    type.Point pt = {3, 4}
+    write(pt.x)
+    print
+    write(pt.y)
+    print
+
+    pt.x = 30
+    pt.y = 40
+    write(pt.x + pt.y)
+    print
+
+    type.Point copy = pt
+    copy.x = 999
+    write(pt.x)
+    print
+
+    type.Rect r = {{1, 2}, 10, 20, 7, true}
+    write(r.corner.x)
+    print
+    write(r.corner.y)
+    print
+    write(r.w)
+    print
+    write(r.h)
+    print
+    write(r.flags)
+    print
+    write(r.active)
+    print
+
+    r.corner.y = 22
+    write(r.corner.y)
+    print
+    r.w = 100
+    r.h = 5
+    write(r.w * r.h)
+    print
+
+    r.active = false
+    when (r.active) { write(true) } else { write(false) }
+    print
+
+    type.Point fresh = {0, 0}
+    fresh = pt
+    write(fresh.x)
+    print
+    return 0
+}
+
+run()

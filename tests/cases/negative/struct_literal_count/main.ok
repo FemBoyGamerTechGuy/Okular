@@ -1,0 +1,9 @@
+struct.Point = {
+    type.number x
+    type.number y
+}.end
+function.run() -> number {
+    type.Point p = {1, 2, 3}
+    return 0
+}
+run()

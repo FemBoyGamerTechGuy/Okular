@@ -1,0 +1,6 @@
+struct.A = {
+    type.B inner
+}.end
+struct.B = {
+    type.A inner
+}.end

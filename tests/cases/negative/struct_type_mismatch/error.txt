@@ -1,0 +1,1 @@
+variable `bad` is `Tagged`, but the initializer is `Point`

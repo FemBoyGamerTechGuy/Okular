@@ -1,0 +1,10 @@
+struct.Point = {
+    type.number x
+    type.number y
+}.end
+function.run() -> number {
+    type.Point p = {1, 2}
+    write(p.z)
+    return 0
+}
+run()

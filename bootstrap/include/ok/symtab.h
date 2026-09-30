@@ -8,7 +8,7 @@
 struct Node;
 struct OkModule;
 
-typedef enum { SYM_FUNC, SYM_VAR, SYM_NS } SymKind;
+typedef enum { SYM_FUNC, SYM_VAR, SYM_NS, SYM_TYPE } SymKind;
 
 typedef struct FuncInfo {
     char *name;             /* simple name */
@@ -40,7 +40,7 @@ typedef struct ConstVal {
 typedef struct Symbol {
     char *name;
     SymKind kind;
-    OkType type;            /* SYM_VAR */
+    OkType type;            /* SYM_VAR / SYM_TYPE (the struct descriptor) */
     char *mangled;          /* globals: assembly symbol */
     FuncInfo *func;         /* SYM_FUNC */
     struct Scope *ns;       /* SYM_NS: the namespace scope */

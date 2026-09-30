@@ -63,11 +63,13 @@ static void prescan_columns(TokList *toks, Vec *uses, StrVec *libs) {
     }
 }
 
-/* Lex + parse one module; records diagnostics; sets m->broken.
- * The module stays MOD_LOADING after a successful compile until its
- * dependencies have been expanded — that is what makes cycle detection
- * work (a module still being expanded is "loading"). */
-static void module_compile(OkModule *m, DiagEngine *de) {
+/* Lex one module (phase A of the two-phase load: every file is lexed and
+ * dependency-scanned BEFORE any file is parsed, so struct names declared
+ * anywhere in the project resolve everywhere — spec §8.3 flat type
+ * namespace). Records diagnostics; sets m->broken. The module stays
+ * MOD_LOADING after a successful lex until its dependencies have been
+ * expanded — that is what makes cycle detection work. */
+static void module_lex(OkModule *m, DiagEngine *de) {
     m->err_watermark = de->errors;
     m->src = source_load(m->path, m->display);
     if (!m->src) {
@@ -82,14 +84,19 @@ static void module_compile(OkModule *m, DiagEngine *de) {
         m->broken = true;
         return; /* parser output would be garbage */
     }
+}
+
+/* Parse one module (phase B): the parser's struct-name registry has been
+ * seeded from every module's tokens by the caller. */
+static void module_parse(OkModule *m, DiagEngine *de) {
+    if (m->state == MOD_FAILED || !m->toks) return;
+    size_t mark = de->errors;
     m->arena = arena_new();
     m->ast = parse_file_tokens(m->toks, m->src, de, m->arena);
-
-    if (de->errors > m->err_watermark) {
+    if (de->errors > mark) {
         m->state = MOD_FAILED;
         m->broken = true;
     }
-    /* success: state remains MOD_LOADING until deps expand */
 }
 
 /* Load `name` from src/ recursively; cycle detection via MOD_LOADING. */
@@ -143,7 +150,7 @@ static OkModule *load_source_module(OkProject *p, DiagEngine *de,
     }
 
     OkModule *m = module_new(p, name, full, display, required);
-    module_compile(m, de);
+    module_lex(m, de);
     if (m->state == MOD_LOADING) {
         prescan_columns(m->toks, &m->uses, &p->libs);
         expand_module_deps(p, m, de, downgrade);
@@ -191,7 +198,7 @@ OkProject *project_load(const char *main_path, DiagEngine *de, bool strict) {
 
     OkModule *main_mod = module_new(p, "main", main_path, "main.ok", true);
     p->main_mod = main_mod;
-    module_compile(main_mod, de);
+    module_lex(main_mod, de);
     if (main_mod->state == MOD_LOADING) {
         prescan_columns(main_mod->toks, &main_mod->uses, &p->libs);
         expand_module_deps(p, main_mod, de, false);
@@ -215,6 +222,18 @@ OkProject *project_load(const char *main_path, DiagEngine *de, bool strict) {
         closedir(d);
     }
     free(srcdir);
+
+    /* phase B: seed the parser's struct-name registry from every module's
+     * tokens, then parse all modules (spec §8.3 — struct types form one
+     * flat namespace across files) */
+    for (size_t i = 0; i < p->modules.len; i++) {
+        OkModule *m = p->modules.items[i];
+        if (m->toks) parser_register_struct_names(m->toks);
+    }
+    for (size_t i = 0; i < p->modules.len; i++) {
+        OkModule *m = p->modules.items[i];
+        module_parse(m, de);
+    }
 
     return p;
 }

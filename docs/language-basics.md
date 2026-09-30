@@ -1,7 +1,7 @@
 # Okular Language Basics (0.1)
 
 A tour of what Okular 0.1 does today. The specification
-(`specs/spec-v0.4.md`) is the source of truth; this page is the friendly
+(`specs/spec-v0.5.md`) is the source of truth; this page is the friendly
 version. Everything shown here compiles and runs with the bootstrap
 compiler.
 
@@ -249,13 +249,36 @@ type.array<type.number, 5> copy = {0, 0, 0, 0, 0}
 copy = scores           # whole-array copy
 ```
 
-See `specs/spec-v0.4.md` §8.4 for the complete rules.
+See `specs/spec-v0.5.md` §8.4 for the complete rules.
 
-## What 0.4 does not have (yet)
+## Structs
 
-Structs, unions, pointers, manual heap management, dynamic-length arrays,
-FFI, threads, match expressions, type inference, constants, aliases, and
-visibility modifiers are all **designed** (see `specs/spec-v0.4.md` §20 and
+Records declare named field types with predictable layout (natural
+alignment, declaration order):
+
+```ok
+struct.Rect = {
+    type.Point corner
+    type.uint16 w
+    type.uint16 h
+}.end
+
+type.Rect r = {{1, 2}, 10, 20}   # positional literal
+r.w = 15                         # field assignment
+write(area(&r))                  # pointer parameter writes back
+```
+
+Structs copy by value (assignment, parameters); `value.field` reads
+fields — on variables, through namespaces, on array elements, and on
+pointers (auto-dereferenced and null-checked). Nesting, arrays of
+structs, structs on the heap (`alloc<type.Rect>(2)`), and
+self-referential `ptr` fields all work. See `specs/spec-v0.5.md` §8.3.
+
+## What 0.5 does not have (yet)
+
+Unions, dynamic-length arrays, FFI, threads, match expressions, type
+inference, constants, aliases, and visibility modifiers are all
+**designed** (see `specs/spec-v0.5.md` §20 and
 `docs/roadmap.md`) and **not implemented**. The same goes for `f32` (a true
 32-bit float) and the `text` conversion builtins (`text.to_number`,
 `number.to_text`). The compiler says so plainly
