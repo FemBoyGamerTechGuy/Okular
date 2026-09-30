@@ -1,0 +1,49 @@
+type.text=1
+
+function.run() -> number {
+    type.int8 a = 100
+    type.int16 b = 30000
+    type.int32 c = 2000000000
+    type.int64 d = 9000000000000000000
+    type.uint8 e = 250
+    type.uint16 f = 65000
+    type.uint32 g = 4000000000
+    type.uint64 h = 18000000000000000000
+    type.byte i = 200
+    type.number j = 5
+
+    write(a)
+    write(" ")
+    write(b)
+    write(" ")
+    write(c)
+    write(" ")
+    write(d)
+    print
+
+    write(e)
+    write(" ")
+    write(f)
+    write(" ")
+    write(g)
+    write(" ")
+    write(h)
+    print
+
+    write(i)
+    write(" ")
+    write(j)
+    print
+
+    type.int8 sum = a + 27
+    write(sum)
+    print
+
+    type.uint16 wide = 60000
+    type.number widened = wide
+    write(widened)
+    print
+    return 0
+}
+
+run()

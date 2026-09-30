@@ -1,0 +1,34 @@
+type.text=1
+
+[source.files.use] = {
+    "math"
+}.end
+
+function.run() -> number {
+    type.int8 clamped = math.clamp_int8(50, -100, 100)
+    write(clamped)
+    print
+
+    type.int8 low = math.clamp_int8(-99, -100, 100)
+    write(low)
+    print
+
+    type.int8 mid = math.clamp_int8(42, -100, 100)
+    write(mid)
+    print
+
+    type.uint32 mixed = math.mix(100, 65000, 2000000000, 5000000000)
+    write(mixed)
+    print
+
+    type.int16 w = math.wrap16(20000)
+    write(w)
+    print
+
+    type.int16 w2 = math.wrap16(-20000)
+    write(w2)
+    print
+    return 0
+}
+
+run()

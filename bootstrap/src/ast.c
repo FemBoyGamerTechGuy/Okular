@@ -152,6 +152,10 @@ static void dump_expr(Node *e, int ind) {
         dump_expr(e->a, ind + 2);
         dump_expr(e->b, ind + 2);
         break;
+    case A_CONV:
+        printf("conv -> %s\n", ok_type_name(e->otype));
+        dump_expr(e->a, ind + 2);
+        break;
     default:
         printf("?expr(%d)\n", (int)e->kind);
     }

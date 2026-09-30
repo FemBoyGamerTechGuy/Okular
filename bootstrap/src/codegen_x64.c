@@ -38,6 +38,7 @@ typedef struct {
     size_t scratch_base;    /* array-arg scratch: [rbp-scratch_base, rbp-oa_base) */
     size_t scratch_bytes;
     size_t trap_seq;        /* bounds-trap label sequence */
+    size_t div_seq;         /* division-guard label sequence */
 } FnCtx;
 
 /* lea rax, [rbp ± disp] with sign-aware formatting */
@@ -47,7 +48,12 @@ static void lea_rbp(Buf *o, long disp) {
     else               buf_puts(o, "    mov rax, rbp\n");
 }
 
-static size_t slot_words(IrSlot *s) { return ok_type_words(s->type); }
+static size_t slot_bytes(IrSlot *s) {
+    /* every slot is 8-byte granular: sub-word scalars (bool, int8, ...) are
+     * padded — the padding is never observable through the language */
+    size_t b = ty_bytes(s->type);
+    return (b + 7) & ~(size_t)7;
+}
 
 /* value push/pop macros (emit text) */
 static void push_rax(Buf *o)      { buf_puts(o, "    push rax\n"); }
@@ -63,6 +69,51 @@ static void call_aligned(Buf *o, const char *fn) {
     buf_puts(o, "    push rbx\n    mov rbx, rsp\n    and rsp, -16\n");
     buf_printf(o, "    call %s\n", fn);
     buf_puts(o, "    mov rsp, rbx\n    pop rbx\n");
+}
+
+/* ---- fixed-width integer support (spec §4.2) ----
+ * Invariant: every integer value in a register / on the operand stack is the
+ * 64-bit register representation of its semantic value — sign-extended for
+ * signed types, zero-extended for unsigned ones. Arithmetic runs at 64 bits
+ * and is re-encoded (truncating wrap) to the result type's width. */
+
+/* re-encode rax to type t's width: shl/sar (signed) or shl/shr (unsigned) */
+static void emit_reencode(Buf *o, OkType t) {
+    if (!t || !ty_is_integer(t) || t->bits >= 64) return;
+    int sh = 64 - t->bits;
+    if (t->is_signed) {
+        buf_printf(o, "    shl rax, %d\n    sar rax, %d\n", sh, sh);
+    } else {
+        buf_printf(o, "    shl rax, %d\n    shr rax, %d\n", sh, sh);
+    }
+}
+
+/* load a scalar of type t into rax from [reg] at its natural width */
+static void emit_load_at_rax(Buf *o, OkType t, const char *addr) {
+    switch (ty_kind(t)) {
+    case OK_BOOL:
+    case OK_UINT8:  buf_printf(o, "    movzx rax, BYTE PTR [%s]\n", addr); break;
+    case OK_INT8:   buf_printf(o, "    movsx rax, BYTE PTR [%s]\n", addr); break;
+    case OK_UINT16: buf_printf(o, "    movzx rax, WORD PTR [%s]\n", addr); break;
+    case OK_INT16:  buf_printf(o, "    movsx rax, WORD PTR [%s]\n", addr); break;
+    case OK_UINT32: buf_printf(o, "    mov eax, DWORD PTR [%s]\n", addr); break; /* zero-extends */
+    case OK_INT32:  buf_printf(o, "    movsxd rax, DWORD PTR [%s]\n", addr); break;
+    default:        buf_printf(o, "    mov rax, QWORD PTR [%s]\n", addr); break; /* number/uint64/decimal bits */
+    }
+}
+
+/* store rax into [reg] at type t's natural width */
+static void emit_store_rax_at(Buf *o, OkType t, const char *addr) {
+    switch (ty_kind(t)) {
+    case OK_BOOL:
+    case OK_UINT8:
+    case OK_INT8:   buf_printf(o, "    mov BYTE PTR [%s], al\n", addr); break;
+    case OK_UINT16:
+    case OK_INT16:  buf_printf(o, "    mov WORD PTR [%s], ax\n", addr); break;
+    case OK_UINT32:
+    case OK_INT32:  buf_printf(o, "    mov DWORD PTR [%s], eax\n", addr); break;
+    default:        buf_printf(o, "    mov QWORD PTR [%s], rax\n", addr); break;
+    }
 }
 
 static void emit_inst(FnCtx *fc, IrInst *in);
@@ -81,7 +132,7 @@ static void gen_function(Buf *out, IrModule *im, IrFunc *f, size_t seq) {
     fc.offsets = ok_xmalloc((f->nslots ? f->nslots : 1) * sizeof(size_t));
     size_t off = 0;
     for (size_t i = 0; i < f->nslots; i++) {
-        off += 8 * slot_words(&f->slots[i]);
+        off += slot_bytes(&f->slots[i]);
         fc.offsets[i] = off;
     }
     fc.locals_bytes = off;
@@ -118,8 +169,8 @@ static void gen_function(Buf *out, IrModule *im, IrFunc *f, size_t seq) {
             /* the register holds the caller's copy: adopt it by value */
             buf_printf(out, "    mov rsi, %s\n", arg_regs[k]);
             buf_printf(out, "    lea rdi, [rbp-%zu]\n", o);
-            buf_printf(out, "    mov rcx, %zu\n    rep movsq\n",
-                       ty_bytes(f->fi->param_types[k]) / 8);
+            buf_printf(out, "    mov rcx, %zu\n    rep movsb\n",
+                       ty_bytes(f->fi->param_types[k]));
         } else if (f->fi->param_types[k] == ty_text) {
             /* reg holds the address of a (ptr,len) pair */
             buf_printf(out, "    mov rax, [%s]\n", arg_regs[k]);
@@ -127,6 +178,7 @@ static void gen_function(Buf *out, IrModule *im, IrFunc *f, size_t seq) {
             buf_printf(out, "    mov [rbp-%zu], rax\n", o);
             buf_printf(out, "    mov [rbp-%zu], rdx\n", o + 8);
         } else {
+            /* scalars (any width) travel extended: one full word */
             buf_printf(out, "    mov [rbp-%zu], %s\n", o, arg_regs[k]);
         }
     }
@@ -166,13 +218,14 @@ static void emit_call(FnCtx *fc, IrInst *in) {
             buf_printf(o, "    mov rax, [rsp+%zu]\n", stack_off);
             buf_puts(o, "    mov rsi, rax\n");
             buf_printf(o, "    lea rdi, [rbp-%zu]\n", fc->scratch_base - scratch_off);
-            buf_printf(o, "    mov rcx, %zu\n    rep movsq\n", bytes / 8);
+            buf_printf(o, "    mov rcx, %zu\n    rep movsb\n", bytes);
             if (k < 16) arr_off[k] = scratch_off;
             scratch_off += bytes;
             stack_off += 8; /* the operand was an address */
             continue;
         }
-        size_t w = (size_t)ok_type_words(t) * 8;
+        size_t w = (t == ty_text) ? 16 : 8; /* every scalar occupies one 8-byte
+                                               machine word; text a pair */
         size_t oa = fc->oa_base - k * 16;
         buf_printf(o, "    mov rax, [rsp+%zu]\n", stack_off);
         buf_printf(o, "    mov [rbp-%zu], rax\n", oa);
@@ -206,8 +259,9 @@ static void emit_call(FnCtx *fc, IrInst *in) {
     buf_printf(o, "    call %s\n", fi->mangled);
     buf_puts(o, "    mov rsp, rbx\n    pop rbx\n");
 
-    /* result */
-    if (fi->ret == ty_number || fi->ret == ty_bool) {
+    /* result: every integer result travels extended in rax; decimal as
+     * raw bits in rax; text as the (ptr,len) pair */
+    if (ty_is_integer(fi->ret) || fi->ret == ty_bool) {
         push_rax(o);
     } else if (fi->ret == ty_decimal) {
         buf_puts(o, "    movq xmm0, rax\n");
@@ -287,28 +341,68 @@ static void emit_binop(FnCtx *fc, IrInst *in) {
         return;
     }
 
-    /* integer / bool */
+    /* integer / bool: values on the stack are 64-bit register
+     * representations; arithmetic runs at 64 bits and wraps back to the
+     * type's width (spec §4.2). Comparisons use the type's signedness. */
+    bool is_bool = (in->type == ty_bool);
+    bool is_unsigned = ty_is_integer(in->type) && !in->type->is_signed;
+    bool is_arith = (in->op <= OP_MOD); /* add/sub/mul/div/mod */
     buf_puts(o, "    pop rcx\n    pop rax\n"); /* rcx = right, rax = left */
     switch (in->op) {
     case OP_ADD: buf_puts(o, "    add rax, rcx\n"); break;
     case OP_SUB: buf_puts(o, "    sub rax, rcx\n"); break;
     case OP_MUL: buf_puts(o, "    imul rax, rcx\n"); break;
-    case OP_DIV:
-        buf_puts(o, "    cqo\n    idiv rcx\n");
+    case OP_DIV: case OP_MOD: {
+        /* division by zero is a fatal runtime trap (spec §13, exit 71);
+         * signed INT64_MIN / -1 wraps (idiv would fault #DE) */
+        size_t dv = fc->div_seq++;
+        buf_printf(o, "    test rcx, rcx\n    jnz .Ldvk_%zu_%zu\n", fc->func_seq, dv);
+        buf_puts(o, "    call rt_div_trap\n"); /* never returns */
+        buf_printf(o, ".Ldvk_%zu_%zu:\n", fc->func_seq, dv);
+        if (!is_unsigned) {
+            buf_printf(o, "    cmp rcx, -1\n    jne .Ldvo_%zu_%zu\n", fc->func_seq, dv);
+            if (in->op == OP_DIV) {
+                buf_puts(o, "    neg rax\n"); /* INT64_MIN negates to itself */
+            } else {
+                buf_puts(o, "    xor eax, eax\n"); /* INT64_MIN % -1 == 0 */
+            }
+            buf_printf(o, "    jmp .Ldvd_%zu_%zu\n", fc->func_seq, dv);
+            buf_printf(o, ".Ldvo_%zu_%zu:\n", fc->func_seq, dv);
+            buf_puts(o, "    cqo\n    idiv rcx\n");
+            if (in->op == OP_MOD)
+                buf_puts(o, "    mov rax, rdx\n");
+        } else {
+            buf_puts(o, "    xor edx, edx\n    div rcx\n");
+            if (in->op == OP_MOD)
+                buf_puts(o, "    mov rax, rdx\n");
+        }
+        buf_printf(o, ".Ldvd_%zu_%zu:\n", fc->func_seq, dv);
         break;
-    case OP_MOD:
-        buf_puts(o, "    cqo\n    idiv rcx\n    mov rax, rdx\n");
-        break;
+    }
     case OP_AND: buf_puts(o, "    and rax, rcx\n"); break;
     case OP_OR:  buf_puts(o, "    or rax, rcx\n"); break;
     case OP_EQ:  buf_puts(o, "    cmp rax, rcx\n    sete al\n    movzx rax, al\n"); break;
     case OP_NEQ: buf_puts(o, "    cmp rax, rcx\n    setne al\n    movzx rax, al\n"); break;
-    case OP_LT:  buf_puts(o, "    cmp rax, rcx\n    setl al\n    movzx rax, al\n"); break;
-    case OP_LE:  buf_puts(o, "    cmp rax, rcx\n    setle al\n    movzx rax, al\n"); break;
-    case OP_GT:  buf_puts(o, "    cmp rax, rcx\n    setg al\n    movzx rax, al\n"); break;
-    case OP_GE:  buf_puts(o, "    cmp rax, rcx\n    setge al\n    movzx rax, al\n"); break;
+    case OP_LT:
+        if (is_unsigned) buf_puts(o, "    cmp rax, rcx\n    setb al\n    movzx rax, al\n");
+        else             buf_puts(o, "    cmp rax, rcx\n    setl al\n    movzx rax, al\n");
+        break;
+    case OP_LE:
+        if (is_unsigned) buf_puts(o, "    cmp rax, rcx\n    setbe al\n    movzx rax, al\n");
+        else             buf_puts(o, "    cmp rax, rcx\n    setle al\n    movzx rax, al\n");
+        break;
+    case OP_GT:
+        if (is_unsigned) buf_puts(o, "    cmp rax, rcx\n    seta al\n    movzx rax, al\n");
+        else             buf_puts(o, "    cmp rax, rcx\n    setg al\n    movzx rax, al\n");
+        break;
+    case OP_GE:
+        if (is_unsigned) buf_puts(o, "    cmp rax, rcx\n    setae al\n    movzx rax, al\n");
+        else             buf_puts(o, "    cmp rax, rcx\n    setge al\n    movzx rax, al\n");
+        break;
     default: OK_ICE("bad integer binop %d", (int)in->op);
     }
+    if (is_arith && !is_bool)
+        emit_reencode(o, in->type); /* wrap to the result width */
     push_rax(o);
 }
 
@@ -377,7 +471,9 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
             buf_printf(o, "    mov rdx, [rip+%s+8]\n", s->mangled);
             push_pair_rax_rdx(o);
         } else {
-            buf_printf(o, "    mov rax, [rip+%s]\n", s->mangled);
+            char addr[64];
+            snprintf(addr, sizeof addr, "rip+%s", s->mangled);
+            emit_load_at_rax(o, in->type, addr); /* natural width */
             push_rax(o);
         }
         break;
@@ -390,15 +486,42 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
             buf_printf(o, "    mov [rip+%s+8], rdx\n", s->mangled);
         } else {
             pop_rax(o);
-            buf_printf(o, "    mov [rip+%s], rax\n", s->mangled);
+            char addr[64];
+            snprintf(addr, sizeof addr, "rip+%s", s->mangled);
+            emit_store_rax_at(o, in->type, addr); /* natural width */
         }
         break;
     }
-    case I_CONV_NUM_DEC:
-        pop_rax(o);
-        buf_puts(o, "    cvtsi2sd xmm0, rax\n");
-        push_xmm0(o);
+    case I_CONV: {
+        OkType src = in->type, dst = in->type2;
+        if (src == dst) break; /* identity: no code */
+        if (src == ty_decimal) {
+            pop_xmm0(o);
+            buf_puts(o, "    cvttsd2si rax, xmm0\n"); /* NaN/overflow -> INT64_MIN sentinel */
+            emit_reencode(o, dst);
+            push_rax(o);
+        } else if (dst == ty_decimal) {
+            pop_rax(o);
+            if (src == ty_bool) {
+                buf_puts(o, "    cvtsi2sd xmm0, rax\n");
+            } else if (src == ty_uint64) {
+                /* exact uint64 -> double: x/2*2 + x&1 (rounds correctly) */
+                buf_puts(o, "    mov rcx, rax\n    and rcx, 1\n    shr rax, 1\n");
+                buf_puts(o, "    cvtsi2sd xmm0, rax\n    addsd xmm0, xmm0\n");
+                buf_puts(o, "    cvtsi2sd xmm1, rcx\n    addsd xmm0, xmm1\n");
+            } else {
+                /* signed or narrower unsigned: the register rep is the value */
+                buf_puts(o, "    cvtsi2sd xmm0, rax\n");
+            }
+            push_xmm0(o);
+        } else {
+            /* integer -> integer (bool included): truncating wrap */
+            pop_rax(o);
+            emit_reencode(o, dst);
+            push_rax(o);
+        }
         break;
+    }
     case I_BINOP:
         emit_binop(fc, in);
         break;
@@ -410,6 +533,7 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         } else if (in->uop == UN_NEG) {
             pop_rax(o);
             buf_puts(o, "    neg rax\n");
+            emit_reencode(o, in->type); /* wrap (uint8 0 -> 0; int8 -128 -> -128) */
             push_rax(o);
         } else {
             pop_rax(o);
@@ -435,7 +559,21 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         if (ty_kind(in->type) == OK_ARRAY)
             OK_ICE("WRITE of array type at %zu:%zu (sema should have rejected it)", in->line, in->col);
         switch (ty_kind(in->type)) {
+        case OK_UINT64:
+            pop_rax(o);
+            buf_puts(o, "    mov rdi, rax\n");
+            call_aligned(o, "rt_write_uint");
+            break;
+        case OK_BOOL:
+            pop_rax(o);
+            buf_puts(o, "    mov rdi, rax\n");
+            call_aligned(o, "rt_write_bool");
+            break;
         case OK_NUMBER:
+        case OK_INT8: case OK_INT16: case OK_INT32:
+        case OK_UINT8: case OK_UINT16: case OK_UINT32:
+            /* signed print: the register rep is the value (unsigned values
+             * below 2^63 print identically) */
             pop_rax(o);
             buf_puts(o, "    mov rdi, rax\n");
             call_aligned(o, "rt_write_number");
@@ -443,11 +581,6 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         case OK_DECIMAL:
             pop_xmm0(o);
             call_aligned(o, "rt_write_decimal");
-            break;
-        case OK_BOOL:
-            pop_rax(o);
-            buf_puts(o, "    mov rdi, rax\n");
-            call_aligned(o, "rt_write_bool");
             break;
         case OK_TEXT:
             buf_puts(o, "    mov rdi, [rsp]\n    mov rsi, [rsp+8]\n    add rsp, 16\n");
@@ -463,7 +596,7 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
     case I_RETURN:
         if (ty_kind(in->type) == OK_ARRAY)
             OK_ICE("RETURN of array type at %zu:%zu (sema should have rejected it)", in->line, in->col);
-        if (in->type == ty_number || in->type == ty_bool) {
+        if (ty_is_integer(in->type) || in->type == ty_bool) {
             pop_rax(o);
         } else if (in->type == ty_decimal) {
             pop_xmm0(o);
@@ -476,9 +609,9 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         buf_puts(o, "    leave\n    ret\n");
         break;
     case I_POP: {
-        /* arrays travel as 8-byte addresses on the operand stack */
-        size_t w = (ty_kind(in->type) == OK_ARRAY) ? 8
-                 : (ty_bytes(in->type) ? ty_bytes(in->type) : 8);
+        /* operand-stack widths: text is a 16-byte pair; every scalar is one
+         * 8-byte word (extended); arrays travel as 8-byte addresses */
+        size_t w = (in->type == ty_text) ? 16 : 8;
         buf_printf(o, "    add rsp, %zu\n", w);
         break;
     }
@@ -521,17 +654,12 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
     }
     case I_LOAD_AT: {
         buf_puts(o, "    pop rax\n"); /* address */
-        switch (ty_kind(in->type)) {
-        case OK_NUMBER: case OK_BOOL: case OK_DECIMAL:
-            buf_puts(o, "    mov rax, [rax]\n"); /* decimal: raw bits */
-            push_rax(o);
-            break;
-        case OK_TEXT:
+        if (in->type == ty_text) {
             buf_puts(o, "    mov rdx, [rax+8]\n    mov rax, [rax]\n");
             push_pair_rax_rdx(o);
-            break;
-        default:
-            OK_ICE("LOAD_AT of %s at %zu:%zu", ok_type_name(in->type), in->line, in->col);
+        } else {
+            emit_load_at_rax(o, in->type, "rax"); /* natural width */
+            push_rax(o);
         }
         break;
     }
@@ -541,17 +669,18 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
             buf_puts(o, "    pop rcx\n"); /* address */
             buf_puts(o, "    mov [rcx], rax\n    mov [rcx+8], rdx\n");
         } else {
-            pop_rax(o);      /* value (or decimal bits) */
+            pop_rax(o);      /* value (or decimal bits) at natural width */
             buf_puts(o, "    pop rcx\n"); /* address */
-            buf_puts(o, "    mov [rcx], rax\n");
+            emit_store_rax_at(o, in->type, "rcx");
         }
         break;
     }
     case I_COPY: {
-        /* pop src (rsi), pop dst (rdi); copy i bytes as 8-byte words */
+        /* pop src (rsi), pop dst (rdi); copy i bytes exactly (sub-word
+         * element sizes make qword copies wrong — spec §8.4 layout) */
         buf_puts(o, "    pop rsi\n    pop rdi\n");
-        buf_printf(o, "    mov rcx, %llu\n    rep movsq\n",
-                   (unsigned long long)(in->i / 8));
+        buf_printf(o, "    mov rcx, %llu\n    rep movsb\n",
+                   (unsigned long long)in->i);
         break;
     }
     default:
@@ -599,7 +728,28 @@ static void emit_const_elems(GlobCtx *g, const char *label, OkType t, ConstVal *
         buf_printf(g->data, "    .quad %llu\n", (unsigned long long)cv->i);
         break;
     case OK_BOOL:
-        buf_printf(g->data, "    .quad %d\n", cv->b ? 1 : 0);
+        buf_printf(g->data, "    .byte %d\n", cv->b ? 1 : 0);
+        break;
+    case OK_INT8:
+        buf_printf(g->data, "    .byte %u\n", (unsigned)(cv->i & 0xFF));
+        break;
+    case OK_UINT8:
+        buf_printf(g->data, "    .byte %u\n", (unsigned)(cv->i & 0xFF));
+        break;
+    case OK_INT16:
+        buf_printf(g->data, "    .value %u\n", (unsigned)(cv->i & 0xFFFF));
+        break;
+    case OK_UINT16:
+        buf_printf(g->data, "    .value %u\n", (unsigned)(cv->i & 0xFFFF));
+        break;
+    case OK_INT32:
+        buf_printf(g->data, "    .long %llu\n", (unsigned long long)(cv->i & 0xFFFFFFFF));
+        break;
+    case OK_UINT32:
+        buf_printf(g->data, "    .long %llu\n", (unsigned long long)(cv->i & 0xFFFFFFFF));
+        break;
+    case OK_UINT64:
+        buf_printf(g->data, "    .quad %llu\n", (unsigned long long)cv->i);
         break;
     case OK_DECIMAL: {
         union { double d; uint64_t u; } u;
@@ -624,7 +774,7 @@ bool codegen_module(IrModule *im, const char *out_path) {
     Buf o;
     buf_init(&o);
 
-    buf_puts(&o, "# Okular 0.2 bootstrap — x86-64 Linux assembly\n");
+    buf_puts(&o, "# Okular 0.3 bootstrap — x86-64 Linux assembly\n");
     buf_puts(&o, "# module: ");
     buf_puts(&o, im->mod->name);
     buf_puts(&o, "\n    .intel_syntax noprefix\n\n    .text\n");

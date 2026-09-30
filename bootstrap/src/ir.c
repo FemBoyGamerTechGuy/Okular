@@ -54,14 +54,17 @@ typedef struct {
 
 static void build_expr(Ctx *c, Node *e);
 
-/* build operand and widen number->decimal if the parent needs decimal */
+/* build operand and convert to `want` when a conversion exists (implicit
+ * widening, or the literal rule sema already approved — both lower to the
+ * same I_CONV; explicit A_CONV nodes come through build_expr) */
 static void build_operand_conv(Ctx *c, Node *operand, OkType want) {
     build_expr(c, operand);
-    if (want == ty_decimal && operand->rtype == ty_number) {
-        IrInst inst = { .kind = I_CONV_NUM_DEC, .type = ty_decimal,
-                        .line = operand->line, .col = operand->col };
-        emit(c->f, inst);
-    }
+    OkType have = operand->rtype;
+    if (!have || have == want) return;
+    if (!ty_convertible(have, want)) return; /* recovery path; sema reported */
+    IrInst inst = { .kind = I_CONV, .type = have, .type2 = want,
+                    .line = operand->line, .col = operand->col };
+    emit(c->f, inst);
 }
 
 static void build_store(Ctx *c, Symbol *sym) {
@@ -167,14 +170,16 @@ static void build_expr(Ctx *c, Node *e) {
         break;
     }
     case A_INDEX: {
-        /* base[index]: base evaluates to an address, index to a number;
-         * I_INDEX bounds-checks and scales (spec §9) */
+        /* base[index]: base evaluates to an address, index to an integer;
+         * I_INDEX bounds-checks and scales (spec §9). The index's 64-bit
+         * register representation is already the correct unsigned key —
+         * negative values are huge unsigned numbers and trap (spec §8.4). */
         OkType base_ty = e->a->rtype;
         if (!base_ty || ty_kind(base_ty) != OK_ARRAY) {
             OK_ICE("A_INDEX with non-array base at %zu:%zu", e->line, e->col);
         }
         build_expr(c, e->a);            /* base address */
-        build_operand_conv(c, e->b, ty_number);
+        build_expr(c, e->b);            /* index: bits are the compare key */
         IrInst ix = { .kind = I_INDEX, .type = base_ty,
                       .line = e->line, .col = e->col };
         emit(c->f, ix);
@@ -184,6 +189,17 @@ static void build_expr(Ctx *c, Node *e) {
             emit(c->f, ld);
         }
         /* array elements that are themselves arrays stay as addresses */
+        break;
+    }
+    case A_CONV: {
+        /* explicit conversion builtin `T.to_U(x)` (spec §4.4) */
+        build_expr(c, e->a);
+        OkType have = e->a->rtype;
+        if (have && have != e->otype && ty_convertible(have, e->otype)) {
+            IrInst inst = { .kind = I_CONV, .type = have, .type2 = e->otype,
+                            .line = e->line, .col = e->col };
+            emit(c->f, inst);
+        }
         break;
     }
     case A_CALL: {
@@ -208,12 +224,14 @@ static void build_expr(Ctx *c, Node *e) {
         break;
     }
     case A_BIN: {
-        /* operand type after widening: decimal if either side is decimal */
-        OkType want_l = (e->b->rtype == ty_decimal) ? ty_decimal : e->a->rtype;
-        OkType want_r = (e->a->rtype == ty_decimal) ? ty_decimal : e->b->rtype;
-        build_operand_conv(c, e->a, want_l);
-        build_operand_conv(c, e->b, want_r);
-        OkType ot = (want_l == ty_decimal || want_r == ty_decimal) ? ty_decimal : want_l;
+        /* operand type after literal adaptation + widening: sema stashed
+         * the common type on the node (e->otype); recompute as fallback
+         * for recovery paths (spec §4.4) */
+        OkType ot = e->otype;
+        if (!ot) ot = ty_common(e->a->rtype, e->b->rtype);
+        if (!ot) ot = (e->a->rtype ? e->a->rtype : ty_number); /* recovery */
+        build_operand_conv(c, e->a, ot);
+        build_operand_conv(c, e->b, ot);
         IrInst inst = { .kind = I_BINOP, .op = e->op, .type = ot,
                         .line = e->line, .col = e->col };
         emit(c->f, inst);
@@ -299,7 +317,7 @@ static void build_stmt(StmtCtx *sc, Node *s) {
         }
         OkType elem = base_ty->elem;
         build_expr(c, s->a);                 /* base address */
-        build_operand_conv(c, s->b, ty_number);
+        build_expr(c, s->b);                 /* index (bits are the key) */
         IrInst ix = { .kind = I_INDEX, .type = base_ty,
                       .line = s->line, .col = s->col };
         emit(f, ix);
@@ -584,40 +602,118 @@ void ir_fold(IrFunc *f) {
         default: break;
         }
 
+        if (in.kind == I_CONV && sp >= 1 && stack[sp - 1].known) {
+            FoldVal a = stack[sp - 1];
+            OkType src = in.type, dst = in.type2;
+            if (a.type == src && ty_convertible(src, dst)) {
+                FoldVal res = { .known = true };
+                if (src == dst) {
+                    res = a;
+                } else if (src == ty_decimal && ty_is_integer(dst)) {
+                    res.type = dst; res.i = ty_dec_to_int(a.d, dst);
+                } else if (src == ty_decimal && dst == ty_decimal) {
+                    res = a;
+                } else if (ty_is_integer(src) && dst == ty_decimal) {
+                    res.type = ty_decimal; res.d = ty_int_to_dec(a.i, src);
+                } else if (ty_is_integer(src) && ty_is_integer(dst)) {
+                    res.type = dst; res.i = ty_reencode(a.i, dst);
+                } else if (src == ty_bool && ty_is_integer(dst)) {
+                    res.type = dst; res.i = a.b ? 1 : 0;
+                } else if (src == ty_bool && dst == ty_decimal) {
+                    res.type = ty_decimal; res.d = a.b ? 1.0 : 0.0;
+                } else {
+                    res.known = false;
+                }
+                if (res.known) {
+                    sp--;
+                    stack[sp++] = res;
+                    /* the source constant was already emitted in a previous
+                     * iteration; drop it so the folded value replaces it
+                     * exactly (the abstract stack guarantees the producing
+                     * instruction is the immediately previous one) */
+                    if (on > 0) on--;
+                    IrInst ci;
+                    memset(&ci, 0, sizeof ci);
+                    ci.line = in.line; ci.col = in.col;
+                    if (res.type == ty_decimal) { ci.kind = I_CONST_DEC; ci.d = res.d; ci.type = ty_decimal; }
+                    else { ci.kind = I_CONST_INT; ci.i = res.i; ci.type = res.type; }
+                    out[on++] = ci;
+                    continue;
+                }
+            }
+        }
+
         if (in.kind == I_BINOP && sp >= 2 && stack[sp - 1].known && stack[sp - 2].known) {
             FoldVal r = stack[sp - 1], l = stack[sp - 2];
             FoldVal res = { .known = true };
             bool ok = true;
-            if (l.type == ty_number && r.type == ty_number) {
-                res.type = ty_number;
-                switch (in.op) {
-                case OP_ADD: res.i = l.i + r.i; break;
-                case OP_SUB: res.i = l.i - r.i; break;
-                case OP_MUL: res.i = l.i * r.i; break;
-                case OP_DIV: if (r.i == 0) { ok = false; break; } res.i = l.i / r.i; break;
-                case OP_MOD: if (r.i == 0) { ok = false; break; } res.i = l.i % r.i; break;
-                default:
-                    res.type = ty_bool;
-                    switch (in.op) {
-                    case OP_EQ: res.b = l.i == r.i; break;
-                    case OP_NEQ: res.b = l.i != r.i; break;
-                    case OP_LT: res.b = l.i < r.i; break;
-                    case OP_LE: res.b = l.i <= r.i; break;
-                    case OP_GT: res.b = l.i > r.i; break;
-                    case OP_GE: res.b = l.i >= r.i; break;
-                    default: ok = false;
-                    }
-                }
-            } else if (l.type == ty_decimal && r.type == ty_decimal) {
+            bool is_cmp = (in.op >= OP_EQ && in.op <= OP_GE);
+            if (in.type == ty_decimal && l.type == ty_decimal && r.type == ty_decimal) {
                 res.type = ty_decimal;
                 switch (in.op) {
                 case OP_ADD: res.d = l.d + r.d; break;
                 case OP_SUB: res.d = l.d - r.d; break;
                 case OP_MUL: res.d = l.d * r.d; break;
                 case OP_DIV: res.d = l.d / r.d; break;
-                default: ok = false;
+                default: ok = false; break;
                 }
-            } else if (l.type == ty_bool && r.type == ty_bool) {
+            } else if (ty_is_integer(in.type) && l.type == in.type && r.type == in.type) {
+                /* integer arithmetic with the operands already converted to
+                 * the common type: fold with the type's signedness, then
+                 * re-encode to the type's width (wrap semantics, spec §4.2) */
+                res.type = is_cmp ? ty_bool : in.type;
+                uint64_t a = l.i, b = r.i;
+                if (in.type->is_signed) {
+                    int64_t sa = (int64_t)a, sb = (int64_t)b;
+                    switch (in.op) {
+                    case OP_ADD: res.i = a + b; break;
+                    case OP_SUB: res.i = a - b; break;
+                    case OP_MUL: res.i = a * b; break;
+                    case OP_DIV:
+                        if (b == 0) { ok = false; break; }        /* runtime trap */
+                        if (sa == INT64_MIN && sb == -1) res.i = (uint64_t)INT64_MIN;
+                        else res.i = (uint64_t)(sa / sb);
+                        break;
+                    case OP_MOD:
+                        if (b == 0) { ok = false; break; }
+                        if (sa == INT64_MIN && sb == -1) res.i = 0;
+                        else res.i = (uint64_t)(sa % sb);
+                        break;
+                    default:
+                        switch (in.op) {
+                        case OP_EQ: res.b = sa == sb; break;
+                        case OP_NEQ: res.b = sa != sb; break;
+                        case OP_LT: res.b = sa < sb; break;
+                        case OP_LE: res.b = sa <= sb; break;
+                        case OP_GT: res.b = sa > sb; break;
+                        case OP_GE: res.b = sa >= sb; break;
+                        default: ok = false;
+                        }
+                        break;
+                    }
+                } else {
+                    switch (in.op) {
+                    case OP_ADD: res.i = a + b; break;
+                    case OP_SUB: res.i = a - b; break;
+                    case OP_MUL: res.i = a * b; break;
+                    case OP_DIV: if (b == 0) { ok = false; break; } res.i = a / b; break;
+                    case OP_MOD: if (b == 0) { ok = false; break; } res.i = a % b; break;
+                    default:
+                        switch (in.op) {
+                        case OP_EQ: res.b = a == b; break;
+                        case OP_NEQ: res.b = a != b; break;
+                        case OP_LT: res.b = a < b; break;   /* unsigned (spec §4.2) */
+                        case OP_LE: res.b = a <= b; break;
+                        case OP_GT: res.b = a > b; break;
+                        case OP_GE: res.b = a >= b; break;
+                        default: ok = false;
+                        }
+                        break;
+                    }
+                }
+                if (ok && !is_cmp && in.type->bits < 64)
+                    res.i = ty_reencode(res.i, in.type);
+            } else if (in.type == ty_bool && l.type == ty_bool && r.type == ty_bool) {
                 res.type = ty_bool;
                 if (in.op == OP_AND) res.b = l.b && r.b;
                 else if (in.op == OP_OR) res.b = l.b || r.b;
@@ -635,13 +731,18 @@ void ir_fold(IrFunc *f) {
             if (ok) {
                 sp -= 2;
                 stack[sp++] = res;
+                /* drop the two source constants from the output: folding
+                 * must replace them, not stack the result on top (leaving
+                 * them inserts junk BETWEEN operands of enclosing
+                 * expressions — the M2 `x / -1` bug, fixed in M3) */
+                if (on >= 2) on -= 2;
                 IrInst ci;
                 memset(&ci, 0, sizeof ci);
                 ci.line = in.line; ci.col = in.col;
-                if (res.type == ty_number) { ci.kind = I_CONST_INT; ci.i = res.i; ci.type = ty_number; }
-                else if (res.type == ty_decimal) { ci.kind = I_CONST_DEC; ci.d = res.d; ci.type = ty_decimal; }
+                if (res.type == ty_decimal) { ci.kind = I_CONST_DEC; ci.d = res.d; ci.type = ty_decimal; }
                 else if (res.type == ty_bool) { ci.kind = I_CONST_BOOL; ci.b = res.b; ci.type = ty_bool; }
-                else { ci.kind = I_CONST_TEXT; ci.text_idx = res.text; ci.type = ty_text; }
+                else if (res.type == ty_text) { ci.kind = I_CONST_TEXT; ci.text_idx = res.text; ci.type = ty_text; }
+                else { ci.kind = I_CONST_INT; ci.i = res.i; ci.type = res.type; }
                 out[on++] = ci;
                 continue;
             }
@@ -649,19 +750,23 @@ void ir_fold(IrFunc *f) {
 
         if (in.kind == I_UNOP && sp >= 1 && stack[sp - 1].known) {
             FoldVal a = stack[sp - 1];
-            if (in.uop == UN_NEG && a.type == ty_number) {
-                sp--;
-                FoldVal res = { .known = true, .type = ty_number, .i = (uint64_t)(-(int64_t)a.i) };
-                stack[sp++] = res;
-                IrInst ci = { .kind = I_CONST_INT, .type = ty_number, .i = res.i, .line = in.line, .col = in.col };
-                out[on++] = ci;
-                continue;
-            }
             if (in.uop == UN_NEG && a.type == ty_decimal) {
                 sp--;
                 FoldVal res = { .known = true, .type = ty_decimal, .d = -a.d };
                 stack[sp++] = res;
+                if (on > 0) on--; /* replace the source constant exactly */
                 IrInst ci = { .kind = I_CONST_DEC, .type = ty_decimal, .d = res.d, .line = in.line, .col = in.col };
+                out[on++] = ci;
+                continue;
+            }
+            if (in.uop == UN_NEG && ty_is_integer(a.type)) {
+                /* wrap semantics: -v re-encoded to the operand's width */
+                sp--;
+                uint64_t neg = (uint64_t)(-(int64_t)a.i);
+                FoldVal res = { .known = true, .type = a.type, .i = ty_reencode(neg, a.type) };
+                stack[sp++] = res;
+                if (on > 0) on--; /* replace the source constant exactly */
+                IrInst ci = { .kind = I_CONST_INT, .type = a.type, .i = res.i, .line = in.line, .col = in.col };
                 out[on++] = ci;
                 continue;
             }
@@ -669,6 +774,7 @@ void ir_fold(IrFunc *f) {
                 sp--;
                 FoldVal res = { .known = true, .type = ty_bool, .b = !a.b };
                 stack[sp++] = res;
+                if (on > 0) on--; /* replace the source constant exactly */
                 IrInst ci = { .kind = I_CONST_BOOL, .type = ty_bool, .b = res.b, .line = in.line, .col = in.col };
                 out[on++] = ci;
                 continue;
@@ -682,13 +788,14 @@ void ir_fold(IrFunc *f) {
             v.known = false; v.type = in.type;
             stack[sp++] = v;
             break;
-        case I_CONV_NUM_DEC:
+        case I_CONV:
             if (sp > 0) {
                 FoldVal a = stack[sp - 1];
-                if (a.known && a.type == ty_number) {
-                    sp--;
-                    stack[sp++] = (FoldVal){ .known = true, .type = ty_decimal, .d = (double)a.i };
-                } else stack[sp - 1].type = ty_decimal;
+                if (a.known) {
+                    /* folded above (or unknown source): typed conservatively */
+                    if (a.type != in.type2) stack[sp - 1].known = false;
+                }
+                stack[sp - 1].type = in.type2;
             }
             break;
         case I_BINOP:
@@ -757,7 +864,7 @@ static const char *ir_kind_name(IrKind k) {
     case I_STORE_LOCAL: return "STORE_LOCAL";
     case I_LOAD_GLOBAL: return "LOAD_GLOBAL";
     case I_STORE_GLOBAL: return "STORE_GLOBAL";
-    case I_CONV_NUM_DEC: return "CONV_NUM_DEC";
+    case I_CONV: return "CONV";
     case I_BINOP: return "BINOP";
     case I_UNOP: return "UNOP";
     case I_LABEL: return "LABEL";
@@ -804,6 +911,7 @@ void ir_dump(IrModule *im) {
             case I_LABEL: case I_JMP: case I_JMPF: printf(" L%d", in->label); break;
             case I_BINOP: printf(" %s [%s]", binop_name(in->op), ok_type_name(in->type)); break;
             case I_UNOP: printf(" %s", in->uop == UN_NEG ? "neg" : "not"); break;
+            case I_CONV: printf(" [%s -> %s]", ok_type_name(in->type), ok_type_name(in->type2)); break;
             case I_CALL: printf(" %s nargs=%d", ((FuncInfo *)in->sym)->mangled, in->nargs); break;
             case I_LOAD_GLOBAL: case I_STORE_GLOBAL: printf(" %s", ((Symbol *)in->sym)->mangled); break;
             case I_ADDR_GLOBAL: printf(" %s+%llu", ((Symbol *)in->sym)->mangled,

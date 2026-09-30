@@ -1,0 +1,129 @@
+# fixed_width.ok — the 0.3 fixed-width integer family in one program.
+# Every width, wrapping arithmetic, the conversion lattice, and the
+# T.to_U(x) conversion builtins (specs/spec-v0.3.md §4.2/§4.4).
+
+type.text=1
+
+type.uint64 world_population = 8000000000
+type.array<type.uint8, 4> magic = {0x11, 0x22, 0x33, 0x44}
+
+function.clamp(type.int8.v, type.int8.lo, type.int8.hi) -> int8 {
+    when (v < lo) { return lo }
+    when (v > hi) { return hi }
+    return v
+}
+
+function.leap_packed(type.uint16.year) -> bool {
+    type.uint16 y4 = uint16.to_uint16(year % 4)
+    type.uint16 y100 = uint16.to_uint16(year % 100)
+    type.uint16 y400 = uint16.to_uint16(year % 400)
+    when (y4 == 0) {
+        when (y100 == 0) {
+            when (y400 == 0) { return true }
+            return false
+        }
+        return true
+    }
+    return false
+}
+
+function.run() -> number {
+    write("--- widths and wrapping ---")
+    print
+    type.int8 a = 127
+    a = a + 1
+    write("127 + 1 = ")
+    write(a)
+    print
+
+    type.uint8 b = 255
+    b = b + 1
+    write("255 + 1 = ")
+    write(b)
+    print
+
+    type.int32 c = 2000000000
+    c = c * 2
+    write("2e9 * 2 = ")
+    write(c)
+    print
+
+    type.uint64 d = 18446744073709551615
+    write("uint64 max = ")
+    write(d)
+    print
+
+    write("--- widening lattice (implicit, lossless) ---")
+    print
+    type.int8 small = -100
+    type.number wide = small
+    type.decimal wider = int32.to_decimal(number.to_int32(small))
+    write("int8 -100 widened: ")
+    write(wide)
+    write(" / ")
+    write(wider / 2)
+    print
+
+    write("--- explicit conversions (T.to_U, wrap semantics) ---")
+    print
+    type.number big = 1000
+    type.int8 narrowed = number.to_int8(big)
+    write("1000 as int8 = ")
+    write(narrowed)
+    print
+
+    type.uint16 u = 65000
+    type.uint8 ub = uint16.to_uint8(u)
+    write("65000 as uint8 = ")
+    write(ub)
+    print
+
+    type.decimal e = 3.99
+    write("3.99 truncated = ")
+    write(decimal.to_int32(e))
+    print
+
+    write("--- unsigned arithmetic ---")
+    print
+    type.uint64 p = world_population * 2
+    write("population * 2 = ")
+    write(p)
+    print
+
+    type.uint32 checksum = 4294967295
+    checksum = checksum + 1
+    write("uint32 wrapped = ")
+    write(checksum)
+    print
+
+    write("--- fixed-width arrays ---")
+    print
+    type.uint32 sum = 0
+    loop (i from 0 until 4) {
+        sum = sum + magic[i]
+    }
+    write("magic sum = ")
+    write(sum)
+    print
+
+    write("--- helpers with narrow signatures ---")
+    print
+    write("clamp(50, -100, 100) = ")
+    write(clamp(50, -100, 100))
+    print
+    write("clamp(-99, -100, 100) = ")
+    write(clamp(-99, -100, 100))
+    print
+
+    loop (y from 1896 to 1908) {
+        type.uint16 year = number.to_uint16(y)
+        when (leap_packed(year)) {
+            write(y)
+            write(" ")
+        }
+    }
+    print
+    return 0
+}
+
+run()

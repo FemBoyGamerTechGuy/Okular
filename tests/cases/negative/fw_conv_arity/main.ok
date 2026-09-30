@@ -1,0 +1,2 @@
+type.uint8 a = 5
+type.uint8 b = uint8.to_uint16(a, 1)

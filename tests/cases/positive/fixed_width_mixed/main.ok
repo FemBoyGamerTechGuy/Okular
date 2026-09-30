@@ -1,0 +1,64 @@
+type.text=1
+
+function.run() -> number {
+    type.int8 a = 100
+    type.number promoted = a + 2000000000
+    type.int32 b = number.to_int32(promoted)
+    write(promoted)
+    print
+    write(b)
+    print
+
+    type.uint8 c = 200
+    type.uint16 d = c + 55
+    write(d)
+    print
+
+    type.uint16 e = 65000
+    type.number f = e + 5
+    write(f)
+    print
+
+    type.uint8 g = 250
+    type.int16 h = g + 100
+    write(h)
+    print
+
+    type.int16 i = -5
+    type.uint32 j = 4000000000
+    type.number k = int16.to_number(i) + uint32.to_number(j)
+    write(k)
+    print
+
+    type.int8 m = 10
+    type.int8 n = 3
+    write(m / n)
+    print
+    write(m % n)
+    print
+
+    type.uint8 p = 250
+    type.uint8 q = 10
+    write(p / q)
+    print
+
+    type.int8 r = -7
+    type.int8 s = 2
+    write(r / s)
+    print
+    write(r % s)
+    print
+
+    type.uint8 t = 3
+    type.uint8 u = t * t * t
+    write(u)
+    print
+
+    type.uint16 v = 60000
+    type.uint16 w = v * v
+    write(w)
+    print
+    return 0
+}
+
+run()

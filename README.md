@@ -3,18 +3,26 @@
 A simple, fast programming language designed for building large
 applications with minimal code.
 
-**Status:** Okular 0.2 — milestone M2 (core data model) underway. The C
+**Status:** Okular 0.3 — milestone M3 (systems types) underway. The C
 bootstrap compiler builds and runs real Okular programs natively on
-x86-64 Linux — now with fixed-length arrays: value semantics, nested
-arrays, and always-checked bounds.
+x86-64 Linux — fixed-length arrays with value semantics, and now the
+full fixed-width integer family with wrapping semantics and the
+`T.to_U(x)` conversion builtins.
 
 ```ok
 type.text=1
 
 type.array<type.number, 5> scores = {10, 20, 30, 40, 50}
-
 scores[2] = 99
 write(scores[2])
+print
+
+type.int8 tiny = -100
+type.uint8 mask = 0xFF
+type.uint16 port = 443
+type.uint32 flags = 0x8000_0000
+type.uint64 huge = 18446744073709551615
+write(huge)
 print
 ```
 
@@ -54,25 +62,25 @@ docs/         getting started, language basics, architecture, roadmap
 examples/     runnable Okular programs (HelloProject = full project)
 tests/        the test suite (positive / negative / policy / flags)
 tools/        run_tests.sh and future tooling
-std/          standard library (empty in 0.2 — planned)
+std/          standard library (empty in 0.3 — planned)
 build/        build artifacts
 ```
 
 ## Documentation
 
 * [Getting started](docs/getting-started.md) — build, compile, run
-* [Language basics](docs/language-basics.md) — a tour of Okular 0.2
-* [Specification v0.2](specs/spec-v0.2.md) — the definition, with an
+* [Language basics](docs/language-basics.md) — a tour of Okular 0.3
+* [Specification v0.3](specs/spec-v0.3.md) — the definition, with an
   implementation status table that says exactly what works
 * [Architecture](docs/architecture.md) — how the bootstrap compiler is
   built and how it will self-host
-* [Roadmap](docs/roadmap.md) — milestones M1–M7 and the M2 work list
+* [Roadmap](docs/roadmap.md) — milestones M1–M7 and the M3 work list
 
 ## Tests
 
 ```console
 $ make test
-passed: 113   failed: 0
+passed: 243   failed: 0
 ALL TESTS PASSED
 ```
 

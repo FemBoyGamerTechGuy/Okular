@@ -1,7 +1,7 @@
 # Okular Language Basics (0.1)
 
 A tour of what Okular 0.1 does today. The specification
-(`specs/spec-v0.2.md`) is the source of truth; this page is the friendly
+(`specs/spec-v0.3.md`) is the source of truth; this page is the friendly
 version. Everything shown here compiles and runs with the bootstrap
 compiler.
 
@@ -34,11 +34,26 @@ type.number age = 18          # 64-bit signed integer (the default integer)
 type.decimal height = 1.82    # IEEE-754 binary64 (the default float)
 type.text name = "Alex"       # immutable UTF-8 text
 type.bool active = true       # true / false
+
+type.int8 tiny = -100         # fixed-width integers (0.3)
+type.uint8 mask = 0xFF        # byte is an alias of uint8
+type.uint16 port = 443
+type.uint32 flags = 0x8000_0000
+type.uint64 huge = 18446744073709551615
+type.int64 same_as_number = 1 # aliases; f64 = decimal
 ```
 
-Fixed-width types (`int8`, `uint32`, …) are designed but not implemented
-yet. Assignment must match types exactly, except `number` widens to
-`decimal` (with a warning under `-w` when it isn't a literal).
+Fixed-width arithmetic **wraps** (`int8 127 + 1` is `-128`; `uint8 255 + 1`
+is `0`), comparisons use the type's signedness, and division by zero is a
+runtime trap. Conversions are explicit builtins — `number.to_uint8(300)` is
+`44`, `decimal.to_int32(3.99)` is `3` — and constants fold at compile time.
+
+Assignment widens safely and silently (`int8` → `number`, `uint8` →
+`int16`/`number`, any integer → `decimal` with a `-w` warning when it isn't
+a literal). A literal that fits a narrower type may initialize it
+(`type.int8 x = 100`); one that doesn't is an error naming the range.
+Narrowing, signedness changes, and `uint64` ↔ `number` need explicit
+conversion.
 
 Number literals: `42`, `1_000_000`, `0xFF`. Text literals: `"hi"`,
 escapes `\n \t \r \0 \\ \"`.
@@ -234,12 +249,14 @@ type.array<type.number, 5> copy = {0, 0, 0, 0, 0}
 copy = scores           # whole-array copy
 ```
 
-See `specs/spec-v0.2.md` §8.4 for the complete rules.
+See `specs/spec-v0.3.md` §8.4 for the complete rules.
 
-## What 0.2 does not have (yet)
+## What 0.3 does not have (yet)
 
 Structs, unions, pointers, manual heap management, dynamic-length arrays,
 FFI, threads, match expressions, type inference, constants, aliases, and
-visibility modifiers are all **designed** (see `specs/spec-v0.2.md` §20 and
-`docs/roadmap.md`) and **not implemented**. The compiler says so plainly
+visibility modifiers are all **designed** (see `specs/spec-v0.3.md` §20 and
+`docs/roadmap.md`) and **not implemented**. The same goes for `f32` (a true
+32-bit float) and the `text` conversion builtins (`text.to_number`,
+`number.to_text`). The compiler says so plainly
 when you use a reserved construct — it never pretends.

@@ -151,8 +151,8 @@ static bool parse_type_prefix(Parser *p, OkType *out) {
     }
     if (!ty_from_scalar_name(name->text, out)) {
         Diag *d = perr(p, name, "unknown type `%s`.", name->text);
-        diag_note(d, "the 0.2 types are: number, decimal, text, bool, array<type, count>.");
-        diag_note(d, "fixed-width types like int32/uint8 are designed but not implemented yet (specs/spec-v0.2.md §4.2).");
+        diag_note(d, "the 0.3 types are: number, decimal, text, bool, int8, int16, int32, int64, uint8, uint16, uint32, uint64, byte, array<type, count>.");
+        diag_note(d, "`byte` is an alias of uint8; `int64` of number; `f64` of decimal.");
         return false;
     }
     return true;
@@ -173,7 +173,7 @@ static bool parse_bare_type(Parser *p, OkType *out) {
     advance(p);
     if (!ty_from_scalar_name(name->text, out)) {
         Diag *d = perr(p, name, "unknown type `%s`.", name->text);
-        diag_note(d, "the 0.2 types are: number, decimal, text, bool, array<type, count>.");
+        diag_note(d, "the 0.3 types are: number, decimal, text, bool, int8, int16, int32, int64, uint8, uint16, uint32, uint64, byte, array<type, count>.");
         diag_note(d, "array parameters use the full form: `type.array<type.number, 3>.xs`.");
         return false;
     }

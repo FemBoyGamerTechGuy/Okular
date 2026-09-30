@@ -74,11 +74,38 @@ const char *ok_suggest_name(Scope *s, const char *name) {
 
 /* assignment compatibility (spec §4.4). Types are interned, so pointer
  * equality IS type equality — arrays must match exactly (same element type,
- * same count); only `number` -> `decimal` widens implicitly. */
+ * same count); integers widen safely per the 0.3 lattice (ty_assignable). */
+static bool const_eval(SemaCtx *c, Node *e, ConstVal *out); /* fwd */
+
 static bool assignable(OkType from, OkType to) {
-    if (!from || !to) return false;
-    if (from == to) return true;
-    return from == ty_number && to == ty_decimal;
+    return ty_assignable(from, to);
+}
+
+/* Full assignment decision for a value expression: implicit conversion,
+ * or the integer-literal rule — a literal (or foldable constant) may
+ * initialize a narrower fixed-width type when its value fits (spec §4.2).
+ * This is what makes `type.int8 x = 5` and `type.int8 y = -100` legal
+ * while `type.int8 z = 200` and `type.uint8 u = -1` stay errors. */
+static bool assignable_value(SemaCtx *c, Node *val, OkType from, OkType to) {
+    if (assignable(from, to)) return true;
+    if (!ty_is_integer(to) || !from) return false;
+    /* direct non-negative literal */
+    if (val->kind == A_INT && from == ty_number)
+        return ty_uint_fits(val->ival, to);
+    /* negated literal */
+    if (val->kind == A_UN && val->uop == UN_NEG &&
+        val->a->kind == A_INT && from == ty_number) {
+        uint64_t raw = (uint64_t)(-(int64_t)val->a->ival);
+        return ty_sint_fits((int64_t)raw, to);
+    }
+    /* foldable constant expression: signed interpretation */
+    if (from == ty_number) {
+        size_t mark = c->de->errors;
+        ConstVal cv;
+        if (const_eval(c, val, &cv) && c->de->errors == mark && cv.valid)
+            return ty_sint_fits((int64_t)cv.i, to);
+    }
+    return false;
 }
 
 static const char *path_join_str(char **parts, size_t n) {
@@ -265,9 +292,44 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
         if (e->uop == UN_NEG) {
             if (v.type == ty_number) { out->valid = true; out->type = ty_number; out->i = (uint64_t)(-(int64_t)v.i); return true; }
             if (v.type == ty_decimal) { out->valid = true; out->type = ty_decimal; out->d = -v.d; return true; }
+            if (v.type && ty_is_integer(v.type)) {
+                out->valid = true; out->type = v.type;
+                out->i = ty_reencode((uint64_t)(-(int64_t)v.i), v.type);
+                return true;
+            }
             return false;
         }
         if (v.type == ty_bool) { out->valid = true; out->type = ty_bool; out->b = !v.b; return true; }
+        return false;
+    }
+    case A_CONV: {
+        /* conversion of a constant folds at compile time (spec §4.4) */
+        ConstVal v;
+        if (!const_eval(c, e->a, &v)) return false;
+        if (!v.valid) return false;
+        OkType dst = e->otype;
+        if (v.type == dst) { *out = v; return true; }
+        if (!ty_convertible(v.type, dst)) return false;
+        if (v.type == ty_decimal && ty_is_integer(dst)) {
+            out->valid = true; out->type = dst; out->i = ty_dec_to_int(v.d, dst);
+            return true;
+        }
+        if (ty_is_integer(v.type) && dst == ty_decimal) {
+            out->valid = true; out->type = ty_decimal;
+            out->d = ty_int_to_dec(v.i, v.type);
+            return true;
+        }
+        if (ty_is_integer(v.type) && ty_is_integer(dst)) {
+            out->valid = true; out->type = dst;
+            out->i = ty_reencode(v.i, dst);
+            return true;
+        }
+        if (v.type == ty_bool && (ty_is_integer(dst) || dst == ty_decimal)) {
+            out->valid = true;
+            if (dst == ty_decimal) { out->type = ty_decimal; out->d = v.b ? 1.0 : 0.0; }
+            else { out->type = dst; out->i = v.b ? 1 : 0; }
+            return true;
+        }
         return false;
     }
     case A_BIN: {
@@ -302,7 +364,10 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
                     serr(c, e, "division by zero in a constant expression.");
                     return false;
                 }
-                out->valid = true; out->type = ty_number; out->i = l.i / r.i; return true;
+                int64_t a = (int64_t)l.i, b = (int64_t)r.i;
+                /* INT64_MIN / -1 wraps to INT64_MIN (two's complement, spec §4.2) */
+                out->i = (a == INT64_MIN && b == -1) ? (uint64_t)INT64_MIN : (uint64_t)(a / b);
+                out->valid = true; out->type = ty_number; return true;
             }
             if (l.type == ty_decimal) { out->valid = true; out->type = ty_decimal; out->d = l.d / r.d; return true; }
             return false;
@@ -312,7 +377,9 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
                     serr(c, e, "remainder by zero in a constant expression.");
                     return false;
                 }
-                out->valid = true; out->type = ty_number; out->i = l.i % r.i; return true;
+                int64_t a = (int64_t)l.i, b = (int64_t)r.i;
+                out->i = (a == INT64_MIN && b == -1) ? 0 : (uint64_t)(a % b);
+                out->valid = true; out->type = ty_number; return true;
             }
             return false;
         case OP_AND: if (l.type == ty_bool) { out->valid = true; out->type = ty_bool; out->b = l.b && r.b; return true; } return false;
@@ -321,13 +388,14 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
             out->type = ty_bool;
             bool res = false;
             if (l.type == ty_number) {
+                int64_t a = (int64_t)l.i, b = (int64_t)r.i;  /* number is signed */
                 switch (e->op) {
-                case OP_EQ: res = l.i == r.i; break;
-                case OP_NEQ: res = l.i != r.i; break;
-                case OP_LT: res = l.i < r.i; break;
-                case OP_LE: res = l.i <= r.i; break;
-                case OP_GT: res = l.i > r.i; break;
-                case OP_GE: res = l.i >= r.i; break;
+                case OP_EQ: res = a == b; break;
+                case OP_NEQ: res = a != b; break;
+                case OP_LT: res = a < b; break;
+                case OP_LE: res = a <= b; break;
+                case OP_GT: res = a > b; break;
+                case OP_GE: res = a >= b; break;
                 default: return false;
                 }
             } else if (l.type == ty_decimal) {
@@ -386,13 +454,13 @@ static bool check_array_lit_runtime(SemaCtx *c, Node *lit, OkType atype, const c
             continue;
         }
         OkType et = check_expr(c, el);
-        if (!assignable(et, atype->elem)) {
+        if (!assignable_value(c, el, et, atype->elem)) {
             Diag *d = serr(c, el, "element %zu of %s must be `%s`, but a `%s` value was given.",
                            k + 1, what, ok_type_name(atype->elem), ok_type_name(et));
-            diag_note(d, "only `number` -> `decimal` widening is implicit; everything else must match exactly.");
+            diag_note(d, "safe widening is implicit; everything else converts explicitly (spec §4.4).");
             ok = false;
-        } else if (et != atype->elem && c->opt->warnings && el->kind != A_INT) {
-            swarn(c, el, "element %zu of %s implicitly widens from `number` to `decimal`.",
+        } else if (et != atype->elem && atype->elem == ty_decimal && c->opt->warnings && el->kind != A_INT) {
+            swarn(c, el, "element %zu of %s implicitly widens to `decimal`.",
                   k + 1, what);
         }
     }
@@ -440,14 +508,31 @@ static bool check_array_lit_const(SemaCtx *c, Node *lit, OkType atype, const cha
             ok = false;
             continue;
         }
-        if (!assignable(ev.type, atype->elem)) {
+        if (!assignable_value(c, el, ev.type, atype->elem)) {
             Diag *d = serr(c, el, "element %zu of %s must be `%s`, but a `%s` value was given.",
                            k + 1, what, ok_type_name(atype->elem), ok_type_name(ev.type));
+            if (ty_is_integer(atype->elem) && ev.type == ty_number) {
+                char range[64];
+                if (atype->elem->is_signed)
+                    snprintf(range, sizeof range, "%lld..%lld",
+                             (long long)ty_min_i64(atype->elem),
+                             (long long)ty_max_i64(atype->elem));
+                else
+                    snprintf(range, sizeof range, "0..%llu",
+                             (unsigned long long)((1ull << atype->elem->bits) - 1));
+                diag_note(d, "the value does not fit `%s` (accepts %s).",
+                          ok_type_name(atype->elem), range);
+            }
             (void)d;
             ok = false;
             continue;
         }
-        if (ev.type == ty_number && atype->elem == ty_decimal) {
+        if (ty_is_integer(atype->elem)) {
+            /* literal / constant into an integer element: re-encode the
+             * register representation to the element's semantics */
+            ev.type = atype->elem;
+            ev.i = ty_reencode(ev.i, atype->elem);
+        } else if (ev.type == ty_number && atype->elem == ty_decimal) {
             ev.type = ty_decimal;
             ev.d = (double)ev.i;  /* literal widening stays silent (spec §4.4) */
         }
@@ -456,6 +541,25 @@ static bool check_array_lit_const(SemaCtx *c, Node *lit, OkType atype, const cha
     }
     out->valid = ok;
     return ok;
+}
+
+/* constant global initializer into a typed slot: accepts implicit widening
+ * and the fitting-literal rule, then re-encodes the representation so the
+ * backend emits the right width (spec §4.2/§7). */
+static bool const_into_type(SemaCtx *c, Node *init, ConstVal *cv, OkType to) {
+    if (cv->type == to) return true;
+    if (!assignable_value(c, init, cv->type, to)) return false;
+    if (to == ty_decimal) {
+        cv->type = ty_decimal;
+        cv->d = (double)(int64_t)cv->i;  /* widen silently for .data */
+        return true;
+    }
+    if (ty_is_integer(to)) {
+        cv->type = to;
+        cv->i = ty_reencode(cv->i, to);
+        return true;
+    }
+    return false;
 }
 
 /* ---------------- phase 2: check ---------------- */
@@ -517,7 +621,71 @@ static void require_text_feature(SemaCtx *c, Node *n) {
     }
 }
 
+/* ---------------- conversion builtins (spec §4.4): `T.to_U(value)` ---- */
+
+/* Recognize `<typename>.to_<typename>` call paths. Returns true and fills
+ * `from`/`to` when the path is a conversion builtin. */
+static bool conv_builtin_lookup(char **parts, size_t nparts, OkType *from, OkType *to) {
+    if (nparts != 2) return false;
+    if (strncmp(parts[1], "to_", 3) != 0) return false;
+    OkType src, dst;
+    if (!ty_from_scalar_name(parts[0], &src)) return false;
+    if (!ty_from_scalar_name(parts[1] + 3, &dst)) return false;
+    *from = src;
+    *to = dst;
+    return true;
+}
+
+static OkType check_conv_builtin(SemaCtx *c, Node *n, OkType from, OkType to) {
+    /* copy the name first: path resolution during argument checking would
+     * overwrite the shared static buffer (same trap as check_call) */
+    char full[128];
+    snprintf(full, sizeof full, "%s", path_join_str(n->parts, n->nparts));
+    if (n->args.len != 1) {
+        Diag *d = serr(c, n, "`%s` converts exactly one value, but %zu were given.",
+                       full, n->args.len);
+        diag_note(d, "form: `%s(value)`.", full);
+        return to;
+    }
+    Node *arg = n->args.items[0];
+    OkType at = check_expr(c, arg);
+    if (!ty_convertible(at, to)) {
+        if (at == ty_text || to == ty_text) {
+            Diag *d = serr(c, arg, "text conversions such as `%s` are planned but not implemented yet.",
+                           full);
+            diag_note(d, "they arrive with the text-processing milestone (spec §4.4).");
+        } else if (to == ty_bool) {
+            Diag *d = serr(c, arg, "there is no conversion to `bool` — compare explicitly instead.");
+            diag_note(d, "for example `x != 0` produces the `bool` you probably meant.");
+        } else {
+            serr(c, arg, "`%s` cannot convert a `%s` value.", full, ok_type_name(at));
+        }
+    }
+    /* rewrite the call node as a conversion expression (IR reads otype) */
+    n->kind = A_CONV;
+    n->a = arg;
+    n->otype = to;
+    n->rtype = to;
+    return to;
+}
+
 static OkType check_call(SemaCtx *c, Node *n) {
+    /* conversion builtins (`int32.to_uint8(x)`) are recognized before
+     * scope resolution — the `<type>.to_<type>` path belongs to the
+     * language, not to any namespace (spec §4.4) */
+    {
+        OkType cfrom, cto;
+        if (conv_builtin_lookup(n->parts, n->nparts, &cfrom, &cto)) {
+            /* a user symbol with the same path loses to the builtin */
+            Symbol *clash = scope_lookup(c->cur_scope, n->parts[0]);
+            if (clash && clash->kind == SYM_NS && scope_find_local(clash->ns, n->parts[1])) {
+                Diag *d = serr(c, n, "`%s` is a built-in conversion; `%s.%s` must be renamed.",
+                               path_join_str(n->parts, n->nparts), n->parts[0], n->parts[1]);
+                (void)d;
+            }
+            return check_conv_builtin(c, n, cfrom, cto);
+        }
+    }
     /* path_join_str returns a shared static buffer: copy the call name
      * before checking arguments, whose own path resolution would
      * silently overwrite it (found while testing array diagnostics) */
@@ -551,12 +719,12 @@ static OkType check_call(SemaCtx *c, Node *n) {
         OkType at = check_expr(c, arg);
         if (i < check_n) {
             OkType want = fi->param_types[i];
-            if (!assignable(at, want)) {
+            if (!assignable_value(c, arg, at, want)) {
                 Diag *d = serr(c, arg, "argument %zu of `%s` must be `%s`, but a `%s` value was given.",
                                i + 1, full, ok_type_name(want), ok_type_name(at));
-                diag_note(d, "conversions between text and numbers are explicit builtins (planned; spec §4.4).");
-            } else if (at != want && c->opt->warnings && arg->kind != A_INT) {
-                swarn(c, arg, "argument %zu of `%s` implicitly widens from `number` to `decimal`.",
+                diag_note(d, "conversions are explicit builtins like `int32.to_uint8(x)` (spec §4.4).");
+            } else if (at != want && want == ty_decimal && c->opt->warnings && arg->kind != A_INT) {
+                swarn(c, arg, "argument %zu of `%s` implicitly widens to `decimal`.",
                       i + 1, full);
             }
         }
@@ -582,9 +750,34 @@ static OkType check_write(SemaCtx *c, Node *n) {
     return ty_void;
 }
 
+/* contextual literal typing (spec §4.2): an integer literal (or negated
+ * literal) whose value fits the OTHER operand's integer type participates
+ * as that type — `int32big * 2` stays `int32`, `uint64max - 1` stays
+ * `uint64`. Literals that do not fit keep `number` semantics. */
+static OkType literal_as(Node *e, OkType other) {
+    if (!other || !ty_is_integer(other)) return NULL;
+    if (e->rtype != ty_number) return NULL;
+    if (e->kind == A_INT && ty_uint_fits(e->ival, other)) return other;
+    if (e->kind == A_UN && e->uop == UN_NEG && e->a->kind == A_INT) {
+        int64_t v = -(int64_t)e->a->ival;
+        if (ty_sint_fits(v, other)) return other;
+    }
+    return NULL;
+}
+
 static OkType check_bin(SemaCtx *c, Node *e) {
     OkType lt = check_expr(c, e->a);
     OkType rt = check_expr(c, e->b);
+
+    /* operand type after literal adaptation + widening (spec §4.4);
+     * stashed on the node for IR to reuse — comparisons store it too,
+     * their rtype is `bool` and would otherwise lose the operand type */
+    OkType lt_eff = literal_as(e->a, rt);
+    if (!lt_eff) lt_eff = lt;
+    OkType rt_eff = literal_as(e->b, lt);
+    if (!rt_eff) rt_eff = rt;
+    OkType ct = ty_common(lt_eff, rt_eff);
+    e->otype = ct;
 
     switch (e->op) {
     case OP_AND: case OP_OR: {
@@ -605,9 +798,10 @@ static OkType check_bin(SemaCtx *c, Node *e) {
         }
         if (lt == ty_text && rt == ty_text) { e->rtype = ty_bool; return ty_bool; }
         if (lt == ty_bool && rt == ty_bool) { e->rtype = ty_bool; return ty_bool; }
-        if (assignable(lt, rt) || assignable(rt, lt)) {
+        if (ct) {
             if (lt != rt && c->opt->warnings && !(e->a->kind == A_INT) && !(e->b->kind == A_INT))
-                swarn(c, e, "comparison mixes `number` and `decimal` — the `number` side widens.");
+                swarn(c, e, "comparison mixes `%s` and `%s` — the narrower operand widens.",
+                      ok_type_name(lt), ok_type_name(rt));
             e->rtype = ty_bool;
             return ty_bool;
         }
@@ -617,9 +811,16 @@ static OkType check_bin(SemaCtx *c, Node *e) {
         return ty_bool;
     }
     case OP_LT: case OP_LE: case OP_GT: case OP_GE: {
-        if ((lt == ty_number || lt == ty_decimal) && (rt == ty_number || rt == ty_decimal)) {
+        if (ct && ct != ty_decimal) {
             if (lt != rt && c->opt->warnings && !(e->a->kind == A_INT) && !(e->b->kind == A_INT))
-                swarn(c, e, "comparison mixes `number` and `decimal` — the `number` side widens.");
+                swarn(c, e, "comparison mixes `%s` and `%s` — the narrower operand widens.",
+                      ok_type_name(lt), ok_type_name(rt));
+            e->rtype = ty_bool;
+            return ty_bool;
+        }
+        if (ct == ty_decimal) {
+            if (lt != rt && c->opt->warnings && !(e->a->kind == A_INT) && !(e->b->kind == A_INT))
+                swarn(c, e, "comparison mixes an integer and `decimal` — the integer side widens.");
             e->rtype = ty_bool;
             return ty_bool;
         }
@@ -646,11 +847,14 @@ static OkType check_bin(SemaCtx *c, Node *e) {
         goto arith;
     }
     case OP_MOD: {
-        if (lt == ty_number && rt == ty_number) { e->rtype = ty_number; return ty_number; }
-        if (lt == ty_decimal || rt == ty_decimal) {
-            serr(c, e, "remainder (`%%`) is defined for `number` only in 0.1; a decimal remainder builtin is planned.");
+        if (ct && ct != ty_decimal && ty_is_integer(ct)) {
+            e->rtype = ct;
+            return ct;
+        }
+        if (ct == ty_decimal || lt == ty_decimal || rt == ty_decimal) {
+            serr(c, e, "remainder (`%%`) is defined for integer types only in 0.3; a decimal remainder builtin is planned.");
         } else {
-            serr(c, e, "`%%` needs `number` operands, but `%s` and `%s` were given.",
+            serr(c, e, "`%%` needs integer operands, but `%s` and `%s` were given.",
                  ok_type_name(lt), ok_type_name(rt));
         }
         e->rtype = ty_number;
@@ -658,24 +862,26 @@ static OkType check_bin(SemaCtx *c, Node *e) {
     }
     }
 arith: ;
-    bool numnum = lt == ty_number && rt == ty_number;
-    bool numdec = (lt == ty_number && rt == ty_decimal) || (lt == ty_decimal && rt == ty_number);
-    bool decdec = lt == ty_decimal && rt == ty_decimal;
-    if (numnum) { e->rtype = ty_number; return ty_number; }
-    if (numdec || decdec) {
-        if (numdec && c->opt->warnings) {
+    if (ct) {
+        if (ct == ty_decimal && lt != ty_decimal && c->opt->warnings) {
             /* literal number in a decimal context is silent (spec §4.4) */
-            if (!(e->a->kind == A_INT && lt == ty_number) && !(e->b->kind == A_INT && rt == ty_number))
-                swarn(c, e, "arithmetic mixes `number` and `decimal` — the `number` operand widens to `decimal`.");
+            if (!(e->a->kind == A_INT) && !(e->b->kind == A_INT))
+                swarn(c, e, "arithmetic mixes an integer and `decimal` — the integer operand widens to `decimal`.");
+        } else if (ct != ty_decimal && lt != rt && c->opt->warnings &&
+                   !(e->a->kind == A_INT) && !(e->b->kind == A_INT)) {
+            swarn(c, e, "arithmetic mixes `%s` and `%s` — the narrower operand widens to `%s`.",
+                  ok_type_name(lt), ok_type_name(rt), ok_type_name(ct));
         }
-        e->rtype = ty_decimal;
-        return ty_decimal;
+        e->rtype = ct;
+        return ct;
     }
     if (lt == ty_bool || rt == ty_bool) {
         serr(c, e, "`bool` values do not take arithmetic (use `and`/`or`/`not`).");
     } else {
-        serr(c, e, "`%s` and `%s` do not combine arithmetically.",
-             ok_type_name(lt), ok_type_name(rt));
+        Diag *d = serr(c, e, "`%s` and `%s` do not combine arithmetically.",
+                       ok_type_name(lt), ok_type_name(rt));
+        if (ty_is_integer(lt) && ty_is_integer(rt))
+            diag_note(d, "mixed signedness or widths that do not widen safely need an explicit conversion (for example `int32.to_uint8(x)`).");
     }
     e->rtype = ty_number;
     return ty_number;
@@ -696,6 +902,13 @@ static OkType check_expr(SemaCtx *c, Node *e) {
         return s->type;
     }
     case A_CALL:  return check_call(c, e);
+    case A_CONV:
+        /* sema rewrote a conversion builtin into this node; rechecking
+         * (e.g. from an enclosing expression after recovery) re-validates
+         * the operand only */
+        check_expr(c, e->a);
+        e->rtype = e->otype;
+        return e->otype;
     case A_WRITE: return check_write(c, e);
     case A_BIN:   return check_bin(c, e);
     case A_ARRAYLIT: {
@@ -708,15 +921,15 @@ static OkType check_expr(SemaCtx *c, Node *e) {
         OkType bt = check_expr(c, e->a);
         if (!bt || ty_kind(bt) != OK_ARRAY) {
             Diag *d = serr(c, e, "this value is a `%s` — only arrays can be indexed.", ok_type_name(bt));
-            diag_note(d, "array indexing is `name[index]`; the index must be a `number` (spec §9).");
+            diag_note(d, "array indexing is `name[index]`; the index must be an integer type (spec §9).");
             check_expr(c, e->b); /* still check the index */
             e->rtype = ty_number;
             return ty_number;
         }
         OkType it = check_expr(c, e->b);
-        if (it != ty_number) {
-            Diag *d = serr(c, e->b, "the array index must be `number`, but `%s` was given.", ok_type_name(it));
-            diag_note(d, "indices are whole numbers; out-of-bounds access is a runtime trap (spec §8.4).");
+        if (!ty_is_integer(it)) {
+            Diag *d = serr(c, e->b, "the array index must be an integer type, but `%s` was given.", ok_type_name(it));
+            diag_note(d, "out-of-bounds access (including negative indices) is a runtime trap (spec §8.4).");
         }
         e->rtype = bt->elem;
         return bt->elem;
@@ -724,8 +937,8 @@ static OkType check_expr(SemaCtx *c, Node *e) {
     case A_UN: {
         OkType t = check_expr(c, e->a);
         if (e->uop == UN_NEG) {
-            if (t != ty_number && t != ty_decimal)
-                serr(c, e, "unary `-` needs a `number` or `decimal`, but `%s` was given.", ok_type_name(t));
+            if (!ty_is_integer(t) && t != ty_decimal)
+                serr(c, e, "unary `-` needs an integer or `decimal`, but `%s` was given.", ok_type_name(t));
             e->rtype = t;
             return t;
         }
@@ -836,12 +1049,12 @@ static void check_stmt(SemaCtx *c, Node *s) {
             break;
         }
         OkType it = check_expr(c, s->a);
-        if (!assignable(it, s->otype)) {
+        if (!assignable_value(c, s->a, it, s->otype)) {
             Diag *d = serr(c, s, "variable `%s` is `%s`, but the initializer is `%s`.",
                            s->name, ok_type_name(s->otype), ok_type_name(it));
-            diag_note(d, "only `number` -> `decimal` widening is implicit; everything else must match exactly.");
-        } else if (it != s->otype && c->opt->warnings && s->a->kind != A_INT) {
-            swarn(c, s, "initializer implicitly widens from `number` to `decimal` for `%s`.", s->name);
+            diag_note(d, "safe widening is implicit; narrowing and signedness changes use explicit conversions like `int32.to_uint8(x)` (spec §4.4).");
+        } else if (it != s->otype && s->otype == ty_decimal && c->opt->warnings && s->a->kind != A_INT) {
+            swarn(c, s, "initializer implicitly widens to `decimal` for `%s`.", s->name);
         }
         Symbol *ex = scope_insert(c->cur_scope, s->name, SYM_VAR, s->line, s->col);
         if (ex->decl && ex->decl != s) {
@@ -870,11 +1083,11 @@ static void check_stmt(SemaCtx *c, Node *s) {
             }
             break;
         }
-        if (!assignable(vt, target->type)) {
+        if (!assignable_value(c, s->a, vt, target->type)) {
             serr(c, s, "cannot assign a `%s` value to `%s`, which is `%s`.",
                  ok_type_name(vt), path_join_str(s->parts, s->nparts), ok_type_name(target->type));
-        } else if (vt != target->type && c->opt->warnings && s->a->kind != A_INT) {
-            swarn(c, s, "assignment implicitly widens from `number` to `decimal`.");
+        } else if (vt != target->type && target->type == ty_decimal && c->opt->warnings && s->a->kind != A_INT) {
+            swarn(c, s, "assignment implicitly widens to `decimal`.");
         }
         break;
     }
@@ -889,8 +1102,8 @@ static void check_stmt(SemaCtx *c, Node *s) {
             break;
         }
         OkType it = check_expr(c, s->b);
-        if (it != ty_number) {
-            Diag *d = serr(c, s->b, "the array index must be `number`, but `%s` was given.", ok_type_name(it));
+        if (!ty_is_integer(it)) {
+            Diag *d = serr(c, s->b, "the array index must be an integer type, but `%s` was given.", ok_type_name(it));
             diag_note(d, "out-of-bounds access is a runtime trap (spec §8.4).");
         }
         OkType elem = bt->elem;
@@ -903,12 +1116,12 @@ static void check_stmt(SemaCtx *c, Node *s) {
             }
             break;
         }
-        if (!assignable(vt, elem)) {
+        if (!assignable_value(c, s->c, vt, elem)) {
             Diag *d = serr(c, s->c, "the array elements are `%s`, but a `%s` value was given.",
                            ok_type_name(elem), ok_type_name(vt));
-            diag_note(d, "only `number` -> `decimal` widening is implicit; everything else must match exactly.");
-        } else if (vt != elem && c->opt->warnings && s->c->kind != A_INT) {
-            swarn(c, s, "element assignment implicitly widens from `number` to `decimal`.");
+            diag_note(d, "safe widening is implicit; everything else converts explicitly (spec §4.4).");
+        } else if (vt != elem && elem == ty_decimal && c->opt->warnings && s->c->kind != A_INT) {
+            swarn(c, s, "element assignment implicitly widens to `decimal`.");
         }
         break;
     }
@@ -994,11 +1207,11 @@ static void check_stmt(SemaCtx *c, Node *s) {
             if (rt == ty_void) {
                 Diag *d = serr(c, s, "this function returns nothing, so `return` must not carry a value.");
                 diag_found(d, "returned a `%s` value.", ok_type_name(vt));
-            } else if (!assignable(vt, rt)) {
+            } else if (!assignable_value(c, s->a, vt, rt)) {
                 serr(c, s, "this function must return `%s`, but `return` gives `%s`.",
                      ok_type_name(rt), ok_type_name(vt));
-            } else if (vt != rt && c->opt->warnings && s->a->kind != A_INT) {
-                swarn(c, s, "return value implicitly widens from `number` to `decimal`.");
+            } else if (vt != rt && rt == ty_decimal && c->opt->warnings && s->a->kind != A_INT) {
+                swarn(c, s, "return value implicitly widens to `decimal`.");
             }
         } else {
             if (rt != ty_void && !c->cur_func->is_entry) {
@@ -1063,19 +1276,23 @@ static void check_column(SemaCtx *c, Node *col, Scope *ns) {
             size_t mark = c->de->errors;
             bool okc = const_eval(c, mem->a, &cv);
             if (!okc) {
+                c->cur_scope = ns;
+                check_expr(c, mem->a); /* validate (+ rewrite conversion builtins) */
+                if (mem->a->kind == A_CONV && c->de->errors == mark) {
+                    mark = c->de->errors;
+                    okc = const_eval(c, mem->a, &cv); /* retry as a folded conversion */
+                }
+            }
+            if (!okc) {
                 if (c->de->errors == mark) {
                     Diag *d = serr(c, mem, "the initializer of `%s.%s` is not a compile-time constant.",
                                    col->name, mem->name);
                     diag_note(d, "global initializers must be literal or foldable values in 0.1 (spec §7); use main.ok top-level statements for computed setup.");
                 }
-                c->cur_scope = ns;
-                check_expr(c, mem->a);
             } else {
-                if (!assignable(cv.type, mem->otype)) {
+                if (!const_into_type(c, mem->a, &cv, mem->otype)) {
                     serr(c, mem, "`%s.%s` is `%s`, but the initializer is `%s`.",
                          col->name, mem->name, ok_type_name(mem->otype), ok_type_name(cv.type));
-                } else if (cv.type == ty_number && mem->otype == ty_decimal) {
-                    cv.type = ty_decimal; cv.d = (double)cv.i;
                 }
                 if (mem->sym) mem->sym->cval = cv;
             }
@@ -1128,19 +1345,24 @@ static void check_module(SemaCtx *c, OkModule *m, Scope *scope) {
             size_t mark = c->de->errors;
             bool okc = const_eval(c, n->a, &cv);
             if (!okc) {
+                c->cur_scope = scope;
+                check_expr(c, n->a); /* validate (+ rewrite conversion builtins) */
+                /* a conversion builtin is now an A_CONV node: retry folding */
+                if (n->a->kind == A_CONV && c->de->errors == mark) {
+                    mark = c->de->errors;
+                    okc = const_eval(c, n->a, &cv);
+                }
+            }
+            if (!okc) {
                 if (c->de->errors == mark) {
                     Diag *d = serr(c, n, "the initializer of global `%s` is not a compile-time constant.",
                                    n->name);
                     diag_note(d, "global initializers must be literal or foldable values in 0.1 (spec §7); use main.ok top-level statements for computed setup.");
                 }
-                c->cur_scope = scope;
-                check_expr(c, n->a); /* still type-check it for more diagnostics */
             } else {
-                if (!assignable(cv.type, n->otype)) {
+                if (!const_into_type(c, n->a, &cv, n->otype)) {
                     serr(c, n, "variable `%s` is `%s`, but the initializer is `%s`.",
                          n->name, ok_type_name(n->otype), ok_type_name(cv.type));
-                } else if (cv.type == ty_number && n->otype == ty_decimal) {
-                    cv.type = ty_decimal; cv.d = (double)cv.i; /* widen silently for .data */
                 }
                 if (n->sym) n->sym->cval = cv;
             }

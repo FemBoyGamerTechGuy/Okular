@@ -1,0 +1,26 @@
+type.text=1
+
+type.uint64 max = 18446744073709551615
+type.uint64 big = 9223372036854775808
+type.uint64 mid = 4294967296
+type.uint64 small = 18446744073709551614
+
+function.run() -> number {
+    write(max)
+    print
+    write(big)
+    print
+    write(mid)
+    print
+    write(small)
+    print
+    type.uint64 sum = big + big
+    write(sum)
+    print
+    type.uint64 diff = max - mid
+    write(diff)
+    print
+    return 0
+}
+
+run()

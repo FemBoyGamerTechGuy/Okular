@@ -11,10 +11,11 @@
  *   rt_exit(code)
  *   rt_write_number(long)        rt_write_decimal(double)
  *   rt_write_text(ptr, len)      rt_write_bool(int)
- *   rt_print()
+ *   rt_write_uint(u64)           rt_print()
  *   rt_concat(out16, lptr, llen, rptr, rlen)
  *   rt_text_eq(lptr, llen, rptr, rlen) -> bool
  *   rt_bounds_trap(index, length)  array index out of bounds (spec §8.4)
+ *   rt_div_trap()                  integer division by zero (spec §13)
  *   rt_trap(msg, len, code)      fatal runtime error (spec §13)
  */
 
@@ -94,6 +95,18 @@ void rt_write_number(i64 v) {
         outbuf[outlen++] = (u8)tmp[i];
 }
 
+void rt_write_uint(u64 v) {
+    char tmp[24];
+    int i = 24;
+    do {
+        tmp[--i] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v != 0);
+    out_reserve((u64)(24 - i));
+    for (; i < 24; i++)
+        outbuf[outlen++] = (u8)tmp[i];
+}
+
 void rt_write_decimal(double x) {
     /* documented v0.1 approximation: fixed 6 fractional digits, integer-only
      * for |x| >= 1e15 (spec §11 + docs). NaN/Inf named. */
@@ -145,6 +158,15 @@ b32 rt_text_eq(const u8 *lp, u64 ll, const u8 *rp, u64 rl) {
     for (u64 i = 0; i < ll; i++)
         if (lp[i] != rp[i]) return 0;
     return 1;
+}
+
+/* spec §13: integer division by zero is a fatal runtime trap (exit 71).
+ * The guard is emitted at every divide/remainder site; wrapping overflow
+ * (INT64_MIN / -1) is NOT a trap — it wraps per spec §4.2. */
+void rt_div_trap(void) {
+    sys_write(2, "okular runtime error: ", 22);
+    sys_write(2, "integer division by zero\n", 26);
+    sys_exit(71);
 }
 
 /* spec §8.4: array indexing is always bounds-checked; a violation is a

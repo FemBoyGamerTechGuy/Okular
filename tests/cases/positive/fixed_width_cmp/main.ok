@@ -1,0 +1,53 @@
+type.text=1
+
+function.run() -> number {
+    type.int8 s = -5
+    type.int8 t = 5
+    when (s < t) { write(1) }
+    print
+    when (s > t) { write(1) } else { write(0) }
+    print
+
+    type.uint8 u = 200
+    type.uint8 v = 100
+    when (u > v) { write(1) }
+    print
+
+    type.uint8 a = 0
+    type.uint8 b = 255
+    when (a < b) { write(1) }
+    print
+
+    type.int32 c = -2000000000
+    type.int32 d = 2000000000
+    when (c < d) { write(1) }
+    print
+
+    type.uint32 e = 4000000000
+    type.uint32 f = 500000000
+    when (e > f) { write(1) }
+    print
+
+    type.uint64 g = 18446744073709551615
+    when (g > 18000000000000000000) { write(1) }
+    print
+
+    type.int8 h = -1
+    when (h == -1) { write(1) }
+    print
+    when (h != 0) { write(1) }
+    print
+
+    type.uint8 i = 5
+    type.int16 j = i + 0
+    when (j == 5) { write(1) }
+    print
+
+    when (s <= -5) { write(1) }
+    print
+    when (b >= 255) { write(1) }
+    print
+    return 0
+}
+
+run()

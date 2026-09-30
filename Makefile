@@ -2,7 +2,7 @@
 CC      := cc
 CFLAGS  := -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter -Ibootstrap/include
 RTFLAGS := -O2 -ffreestanding -nostdlib -fno-pie -fno-stack-protector \
-           -fno-builtin -fno-asynchronous-unwind-tables -fno-asynchronous-unwind-tables
+           -fno-builtin -fno-asynchronous-unwind-tables
 
 SRCS := $(wildcard bootstrap/src/*.c)
 OBJS := $(patsubst bootstrap/src/%.c,build/bootstrap/%.o,$(SRCS))
@@ -12,6 +12,10 @@ HDRS := $(wildcard bootstrap/include/ok/*.h)
 # headers define its ABI (types, IR, AST) — a stale object after a header
 # change silently corrupts the build (found the hard way in M2)
 $(OBJS): $(HDRS)
+
+# the dependency rule above must not become the default goal (found in M3:
+# bare `make` built exactly one object and stopped)
+.DEFAULT_GOAL := all
 
 .PHONY: all test clean
 

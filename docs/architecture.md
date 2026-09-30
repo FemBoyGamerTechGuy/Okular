@@ -1,6 +1,6 @@
 # Okular Bootstrap Compiler — Architecture
 
-**Version:** 0.2
+**Version:** 0.3
 **Applies to:** `bootstrap/` (the C implementation)
 
 > The C implementation is scaffolding. It exists because Okular does not yet
@@ -156,9 +156,20 @@ x86-64, Linux, freestanding:
 * Expression evaluation uses an operand stack on the machine stack
   (`push`/`pop` with `rax`/`rcx`/`xmm0`). Correctness before speed — the
   optimization milestone will lower through registers properly.
-* Locals live at `rbp`-relative slots; every slot is 8 bytes for scalars,
-  16 for `text` (ptr+len pair), and `N × elem-size` for arrays. Slots are
-  typed and number-checked.
+* Locals live at `rbp`-relative slots; every slot is rounded up to a
+  multiple of 8 bytes for scalars (sub-word values are padded — the padding
+  is unobservable), 16 for `text` (ptr+len pair), and the array's total
+  bytes for arrays. Slots are typed and number-checked.
+* **Fixed-width integers (0.3)**: values travel **extended** in 64-bit
+  registers and operand-stack words — sign-extended for signed types,
+  zero-extended for unsigned — and arithmetic runs at 64 bits then
+  re-encodes (`shl`/`sar` or `shl`/`shr`) to the operand type's width.
+  Memory uses natural widths: `movsx/movzx`/`movsxd`/`mov eax` loads and
+  byte/word/dword stores for globals and array elements; `.data` emits
+  `.byte`/`.value`/`.long`/`.quad` per type. Comparisons pick `setl`-family
+  (signed) or `setb`-family (unsigned) from the operand type. Division is
+  guarded: zero divisors call `rt_div_trap` (exit 71); `INT64_MIN / -1`
+  wraps instead of raising `#DE`. `uint64` printing uses `rt_write_uint`.
 * Globals live in `.data`/`.bss` under mangled names (`ok_<module>_<name>`).
 * Calling convention: **Okular internal ABI v1** — up to 6 arguments in
   `rdi, rsi, rdx, rcx, r8, r9` (integer registers only), return in `rax`,
@@ -171,7 +182,8 @@ x86-64, Linux, freestanding:
   operand stack (`ADDR_LOCAL/GLOBAL`, `INDEX`, `LOAD_AT`, `STORE_AT`,
   `COPY`). Indexing scales by the element size after an unsigned bounds
   comparison; violations call `rt_bounds_trap` (exit 70). Whole-array
-  assignment and parameter passing lower to `COPY` (`rep movsq`). Array
+  assignment and parameter passing lower to `COPY` (`rep movsb`, byte-
+  exact for sub-word element types). Array
   arguments: the caller copies the array into a per-frame scratch block
   (sized to the largest single call site's array bytes) and passes the
   copy's address in a register; the callee's prologue copies it into its
@@ -193,8 +205,9 @@ x86-64, Linux, freestanding:
 -nostdlib -fno-stack-protector -fno-builtin`) provides:
 
 * output buffer management (`rt_write_*`, `rt_print`)
-* integer/decimal formatting, `text` concatenation via a static bump arena
-* runtime traps (`rt_trap`: message + exit code 70)
+* integer/decimal/unsigned formatting, `text` concatenation via a static
+  bump arena
+* runtime traps (`rt_trap`: message + exit code 70; `rt_div_trap`: exit 71)
 
 It is scaffolding in the same sense the C compiler is: milestone M4 rewrites
 it in Okular against the syscall module. The *language* depends on none of

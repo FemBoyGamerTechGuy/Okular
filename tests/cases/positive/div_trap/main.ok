@@ -1,0 +1,12 @@
+type.text=1
+type.number k = 7
+
+function.run() -> number {
+    type.number x = 42
+    type.number y = 0
+    write(x / y)
+    print
+    return 0
+}
+
+run()

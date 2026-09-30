@@ -1,0 +1,27 @@
+type.text=1
+
+type.f64 epsilon = 0.5
+type.byte b = 255
+type.int64 i = -17
+type.uint8 same = 250
+
+type.byte convb = number.to_byte(515)
+type.f64 convd = int32.to_f64(21)
+
+function.run() -> number {
+    write(epsilon + 1)
+    print
+    write(b)
+    print
+    write(i)
+    print
+    write(same)
+    print
+    write(convb)
+    print
+    write(convd * 2)
+    print
+    return 0
+}
+
+run()

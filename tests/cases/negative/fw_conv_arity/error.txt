@@ -1,0 +1,1 @@
+`uint8.to_uint16` converts exactly one value, but 2 were given

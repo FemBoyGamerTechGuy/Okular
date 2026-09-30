@@ -1,0 +1,19 @@
+function.clamp_int8(int8.v, int8.lo, int8.hi) -> int8 {
+    when (v < lo) { return lo }
+    when (v > hi) { return hi }
+    return v
+}
+
+function.mix(int8.a, uint16.b, int32.c, uint64.d) -> uint32 {
+    type.number wide = int32.to_number(c) + int8.to_number(a)
+    type.uint32 u = number.to_uint32(wide)
+    type.uint16 trunc = uint32.to_uint16(b)
+    u = u + number.to_uint32(uint16.to_number(trunc))
+    u = u + number.to_uint32(uint64.to_number(d))
+    return u
+}
+
+function.wrap16(int16.v) -> int16 {
+    type.int16 doubled = v * 2
+    return doubled
+}

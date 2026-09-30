@@ -1,0 +1,36 @@
+type.text=1
+
+function.run() -> number {
+    type.number m = -9223372036854775808
+    write(m / -1)
+    print
+    write(m % -1)
+    print
+    type.number a = -7
+    type.number b = 2
+    write(a / b)
+    print
+    write(a % b)
+    print
+    type.int8 c = -7
+    type.int8 d = 2
+    write(c / d)
+    print
+    write(c % d)
+    print
+    type.uint8 e = 200
+    type.uint8 f = 3
+    write(e / f)
+    print
+    write(e % f)
+    print
+    type.number g = 100
+    type.number h = -3
+    write(g / h)
+    print
+    write(g % h)
+    print
+    return 0
+}
+
+run()

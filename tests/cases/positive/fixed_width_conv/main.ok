@@ -1,0 +1,69 @@
+type.text=1
+
+function.run() -> number {
+    type.number n = 300
+    type.uint8 u = number.to_uint8(n)
+    write(u)
+    print
+
+    type.int8 s = number.to_int8(-5)
+    write(s)
+    print
+
+    type.uint8 a = 255
+    type.uint16 aw = uint8.to_uint16(a)
+    write(aw)
+    print
+
+    type.int16 b = -300
+    type.uint8 bt = int16.to_uint8(b)
+    write(bt)
+    print
+
+    type.number c = 1000
+    type.int8 ct = number.to_int8(c)
+    write(ct)
+    print
+
+    type.decimal d = int32.to_decimal(2000000000)
+    write(d / 2)
+    print
+
+    type.decimal e = 3.99
+    type.number ef = decimal.to_int32(e)
+    write(ef)
+    print
+
+    type.decimal f = -3.99
+    type.number ff = decimal.to_int32(f)
+    write(ff)
+    print
+
+    type.uint64 g = 18000000000000000000
+    type.decimal gd = uint64.to_decimal(g)
+    write(gd / 1000000000000000000)
+    print
+
+    type.number h = 5
+    type.decimal hd = number.to_decimal(h)
+    write(hd + 0.5)
+    print
+
+    type.bool flag = true
+    type.number fn = bool.to_number(flag)
+    write(fn)
+    print
+
+    type.int32 wide = 65536
+    type.int16 narrow = int32.to_int16(wide)
+    write(narrow)
+    print
+
+    type.uint64 big = 18446744073709551615
+    type.uint8 bite = uint64.to_uint8(big)
+    write(bite)
+    print
+    return 0
+}
+
+run()

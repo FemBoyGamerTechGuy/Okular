@@ -1,0 +1,61 @@
+type.text=1
+
+function.run() -> number {
+    type.int8 a = 127
+    a = a + 1
+    write(a)
+    print
+
+    type.int8 b = -128
+    b = b - 1
+    write(b)
+    print
+
+    type.uint8 c = 255
+    c = c + 1
+    write(c)
+    print
+
+    type.uint8 d = 0
+    d = d - 1
+    write(d)
+    print
+
+    type.int16 e = 32767
+    e = e + 1
+    write(e)
+    print
+
+    type.uint16 f = 65535
+    f = f + 1
+    write(f)
+    print
+
+    type.int32 g = 2000000000
+    g = g * 2
+    write(g)
+    print
+
+    type.uint32 h = 4000000000
+    h = h + 1000000000
+    write(h)
+    print
+
+    type.uint64 i = 18446744073709551615
+    i = i + 1
+    write(i)
+    print
+
+    type.int8 m = -128
+    type.int8 mm = m * m
+    write(mm)
+    print
+
+    type.uint8 n = 200
+    type.uint8 nn = n * n
+    write(nn)
+    print
+    return 0
+}
+
+run()

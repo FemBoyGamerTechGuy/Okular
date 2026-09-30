@@ -1,1 +1,1 @@
-the array index must be `number`, but `decimal` was given
+the array index must be an integer type, but `decimal` was given

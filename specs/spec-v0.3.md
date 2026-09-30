@@ -1,11 +1,12 @@
 # Okular Language Specification
 
-**Version:** 0.2 (arrays)
+**Version:** 0.3 (fixed-width integers)
 **Status:** Evolving draft
 **Implementation:** bootstrap compiler in C (`bootstrap/`)
 
-> 0.2 adds fixed-length arrays (value semantics, bounds-checked indexing)
-> on top of 0.1. See the changelog in §23.
+> 0.3 adds the fixed-width integer family with wrapping semantics, the
+> implicit widening lattice, and the `T.to_U(x)` conversion builtins
+> (§4.2/§4.4) on top of 0.2. See the changelog in §23.
 
 > This specification is the source of truth for the Okular language.
 > When the implementation changes the language, this document changes with it.
@@ -266,7 +267,7 @@ The compiler distinguishes, per §7 of the engineering brief:
 
 ## 4. Types
 
-### 4.1 Types in 0.1
+### 4.1 Built-in types
 
 | Okular type | Meaning | Size |
 |---|---|---|
@@ -274,6 +275,8 @@ The compiler distinguishes, per §7 of the engineering brief:
 | `decimal` | floating point, the approachable default | IEEE-754 binary64 |
 | `text` | immutable UTF-8 text (pointer + length) | 16 bytes |
 | `bool` | `true` / `false` | 1 byte |
+| `int8` / `int16` / `int32` | signed fixed-width integers | 1 / 2 / 4 bytes |
+| `uint8` / `uint16` / `uint32` / `uint64` | unsigned fixed-width integers | 1 / 2 / 4 / 8 bytes |
 | `array<T, N>` | N elements of type T, laid out contiguously | N × size(T) |
 
 Array types are written `type.array<type.number, 5>` (§8.4).
@@ -282,7 +285,7 @@ Array types are written `type.array<type.number, 5>` (§8.4).
 *default* types a beginner reaches for, sized by the platform for the era
 (64-bit), while the explicit fixed-width types below are the *systems* names.
 
-### 4.2 Fixed-width types (designed; not implemented in 0.1)
+### 4.2 Fixed-width types (implemented in 0.3)
 
 ```
 int8   int16   int32   int64
@@ -291,8 +294,32 @@ f32    f64
 byte   (alias of uint8)
 ```
 
-These share the declaration grammar (`type.uint32 flags = 0xFF`) and convert
-explicitly. They arrive with the memory-management milestone.
+* `int64` is **`number`'s systems name** — the same type. `f64` is
+  `decimal`'s. `byte` is `uint8`. Aliases exist so systems code reads the
+  way systems programmers think; they add no new semantics.
+* `f32` remains designed-not-implemented (a true 32-bit float needs its own
+  ABI path; it arrives with the float milestone).
+* All share the declaration grammar (`type.uint32 flags = 0xFF`) and the
+  dotted parameter/return forms (`int32.x`, `-> uint16`).
+* **Arithmetic wraps** — two's-complement, modulo 2^N, at the operand type:
+  `int8 127 + 1 == -128`, `uint8 255 + 1 == 0`, `uint16 60000 * 60000 ==
+  41984`. Overflow is never undefined behavior; it is silent wrap. (An
+  opt-in overflow diagnostic is future work.)
+* **Division truncates toward zero** and `INT64_MIN / -1` wraps to
+  `INT64_MIN` rather than faulting. Division or remainder by **zero is a
+  fatal runtime trap** (§13, exit 71).
+* **Comparisons use the operand type's signedness**: `uint8 200 > 100` is
+  `true`; `-1 < 1` is `true` for signed types. Mixing signed and unsigned
+  values of incompatible widths is a compile error (§4.4), so the
+  signedness of every comparison is always statically known.
+* **Literals are contextually typed**: an integer literal (or negated
+  literal) whose value fits the *other* operand's type participates as that
+  type — `int32_big * 2` stays `int32`; `uint64_max - 1` stays `uint64`.
+  A literal that does not fit promotes to `number` semantics.
+* Storage: exact width in arrays and globals (packed from the storage
+  start); local slots round up to 8 bytes with unobservable padding.
+  Register representation: values travel sign- or zero-extended in 64-bit
+  registers and re-encode (wrap) after arithmetic.
 
 ### 4.3 Type grammar
 
@@ -313,14 +340,51 @@ of lookahead after `type.<name>`:
 
 ### 4.4 Conversions
 
-* `number` → `decimal`: **implicit widening** allowed in mixed arithmetic
-  (emits a warning under `-w`; see §14).
-* All other mixes are compile errors. No silent conversions. No
-  `text`↔`number` coercion — explicit conversion builtins are planned
-  (`text.to_number`, `number.to_text`).
-* Array types convert never: `array<number, 3>` and `array<number, 2>` are
-  different types, and element types must match exactly (widening applies
-  per element in literals only, §8.4).
+**Implicit** (assignment, arguments, returns, array elements, operands):
+
+* **Safe widening only** — the value is representable in the target:
+  * signed → wider signed (`int8` → `int16`/`int32`/`number`)
+  * unsigned → wider unsigned (`uint8` → `uint16`/`uint32`/`uint64`)
+  * unsigned → strictly-wider signed (`uint8` → `int16`…`number`,
+    `uint32` → `number`; never `uint32` → `int32`, never `uint64` →
+    `number`)
+  * any integer → `decimal` (warning under `-w`, silent for literals)
+* **Literal rule** — an integer literal (or negated literal, or foldable
+  constant) may initialize a narrower type when its value fits:
+  `type.int8 x = 100` and `type.int8 y = -100` are legal;
+  `type.int8 z = 200` and `type.uint8 u = -1` are errors naming the range.
+* Everything else is a compile error — no silent narrowing, no
+  signedness changes, no `bool`↔number coercion, no `text` coercion.
+
+**Mixed arithmetic** uses the common type: the wider of two safely-
+convertible types, `decimal` when either side is `decimal`. Pairs with no
+common type (`int8 + uint8`, `number + uint64`) are compile errors with a
+conversion suggestion. `number` and `decimal` interconvert exactly as in
+0.2 (implicit widening with `-w` warning).
+
+**Explicit** — the conversion builtins, one per ordered type pair:
+
+```ok
+type.uint8 u = number.to_uint8(300)     # 44 — wrap (truncate to width)
+type.int8  s = int16.to_int8(-300)      # 44 — wrap
+type.decimal d = uint64.to_decimal(h)   # exact when representable
+type.number n = decimal.to_int32(3.99)  # 3 — truncate toward zero
+type.number b = bool.to_number(true)    # 1
+```
+
+* `T.to_U(x)` — `T` and `U` are any scalar type names (aliases included:
+  `number.to_byte(515)`).
+* Integer → integer **wraps** (reinterpret at the target width); widening
+  conversions via the builtin are the explicit form of the implicit rule.
+* `decimal` → integer truncates toward zero; out-of-range/NaN results wrap
+  deterministically (the hardware `INT64_MIN` sentinel, then the target
+  width).
+* Conversions of constants fold at compile time — including global
+  initializers (`type.byte convb = number.to_byte(515)`).
+* `text` conversions (`text.to_number`, `number.to_text`) are designed but
+  **not implemented** — the compiler says so plainly. `T.to_bool` does not
+  exist: compare explicitly (`x != 0`).
+* Array types never convert.
 
 ---
 
@@ -543,7 +607,8 @@ Rules:
 * **Literals only initialize declarations** — `= { ... }` after a declaration.
   Assignment copies whole arrays from other arrays of the exact same type;
   a literal in assignment position is a compile error.
-* **Element rules**: literal elements must each be assignable to T (`number`
+* **Element rules**: literal elements must each be assignable to T (safe
+  widening, or the fitting-literal rule for fixed-width integers — `number`
   literals widen to `decimal` elements); the element count must match exactly.
   Nested literals follow the nested element type.
 * **Value semantics.** Assignment (`a = b`), initialization from another array,
@@ -551,7 +616,8 @@ Rules:
   the original; a function that mutates its parameter mutates only its own
   copy. (Reference-style access arrives with pointers, §12.)
 * **Indexing** is `name[index]` (§9); `name[index] = value` stores. Indices
-  are `number`. Indexing chains nest for array-of-array types (`grid[1][2]`).
+  are any integer type (`number`, `int8`…`uint64`). Indexing chains nest
+  for array-of-array types (`grid[1][2]`).
 * **Bounds are always checked** — in every mode, at every index operation.
   An out-of-bounds index (including a negative one) is a fatal runtime trap
   naming the index and the array's length, exit code 70 (§13). The
@@ -588,9 +654,11 @@ Precedence, loosest to tightest:
   division. `%` is remainder, `number` only.
 * Constant expressions (literals folded at compile time) are required for
   global initializers (§7) and are folded by the IR constant-folding pass.
-* `xs[i]` requires an array base and a `number` index; its type is the
-  element type. Bounds are checked at runtime (§8.4). `xs[i] = v` is the
-  indexed store form; chained indices (`grid[i][j]`) walk element types.
+* `xs[i]` requires an array base and an integer index (any width — the
+  register representation doubles as the unsigned bounds key, so negative
+  indices trap); its type is the element type. Bounds are checked at
+  runtime (§8.4). `xs[i] = v` is the indexed store form; chained indices
+  (`grid[i][j]`) walk element types.
 
 ---
 
@@ -723,9 +791,10 @@ heap machinery is honestly marked NOT IMPLEMENTED in §22.
 
 * **Compile-time errors** — precise diagnostics (§15), build fails, no
   executable is produced from required code.
-* **Runtime fatal errors** — traps with a message (e.g. output buffer
-  overflow, array index out of bounds) and a nonzero exit code (70).
-  Implemented for the cases the runtime can hit.
+* **Runtime fatal errors** — traps with a message and a nonzero exit code:
+  array bounds and text-arena exhaustion exit 70; **integer division by zero
+  (0.3) exits 71**; output-buffer overflow exits 74; internal runtime errors
+  use 75+. Implemented for the cases the runtime can hit.
 * **Recoverable errors** — designed model: valued functions can signal
   failure through a `guard`/`fail` mechanism with explicit propagation:
 
@@ -987,7 +1056,9 @@ An implementation claiming "Okular 0.1" must:
 | Array literals (nested), indexed load/store | §8.4/9 | implemented |
 | Array value semantics (copy on assign/pass) | §8.4 | implemented |
 | Bounds checks + runtime trap | §8.4/13 | implemented |
-| Fixed-width integers | §4.2 | NOT IMPLEMENTED (reserved) |
+| Fixed-width integers (all widths, wrap, lattice) | §4.2 | implemented |
+| Conversion builtins `T.to_U(x)` | §4.4 | implemented (text pairs planned) |
+| `f32` | §4.2 | NOT IMPLEMENTED (float milestone) |
 | `type.text=1` gate | §5 | implemented |
 | Variables, scoping, reassignment | §8.1 | implemented |
 | Functions, recursion, return checking | §8.2 | implemented |
@@ -1000,7 +1071,7 @@ An implementation claiming "Okular 0.1" must:
 | `write`/`print` buffer model | §11 | implemented |
 | Pointers, manual memory | §12 | NOT IMPLEMENTED |
 | Recoverable errors (`guard`/`fail`) | §13 | NOT IMPLEMENTED |
-| Runtime traps (buffer overflow, array bounds) | §13 | implemented |
+| Runtime traps (buffer overflow, array bounds, div by zero) | §13 | implemented |
 | Diagnostics: format, multi-error recovery | §14 | implemented |
 | `-w`, `-xw`, `-s`, `-l` flags | §14 | implemented (no legacy constructs exist yet) |
 | x86-64 freestanding native codegen | §15 | implemented |
@@ -1014,6 +1085,35 @@ An implementation claiming "Okular 0.1" must:
 ---
 
 ## 23. Changelog
+
+### 0.3
+
+* **Fixed-width integers** (§4.2): `int8`/`int16`/`int32`, `uint8`/`uint16`/
+  `uint32`/`uint64`, with aliases `byte`=`uint8`, `int64`=`number`,
+  `f64`=`decimal`. Wrapping two's-complement arithmetic; signedness-correct
+  comparisons; contextual literal typing; exact-width storage in arrays,
+  globals, and parameters. `f32` stays designed.
+* **Conversion builtins** (§4.4): `T.to_U(x)` for every integer/decimal/bool
+  pair — integer→integer wraps, `decimal`→integer truncates, constants fold
+  (including global initializers). `text` conversions documented as planned.
+* **Implicit widening lattice** (§4.4): signed→wider-signed,
+  unsigned→wider-unsigned, unsigned→strictly-wider-signed, integer→`decimal`;
+  the fitting-literal rule for declarations; `int8 + uint8` and
+  `number + uint64` are compile errors suggesting an explicit conversion.
+* **Division is checked** (§13): division/remainder by zero traps with exit
+  71 (was a raw SIGFPE); `INT64_MIN / -1` wraps instead of faulting.
+* **`bool` storage is 1 byte** as the type table always claimed (locals keep
+  8-byte padded slots; the padding is unobservable).
+* Fixes found while testing: constant folding compared and divided signed
+  `number` values as unsigned (so `-1 < 1` folded to `false`, and folded
+  division of negatives was wrong); folding a negated literal left its
+  source constant on the machine stack, corrupting enclosing expressions
+  (`x / -1` computed `1 / -1`); bare `make` built one object and stopped
+  (the dependency rule was the Makefile's first target).
+* Runtime: `rt_write_uint` for unsigned printing; `rt_div_trap`.
+* IR: `I_CONV` (typed source→destination) replaces `I_CONV_NUM_DEC`; folding
+  is signedness-aware and re-encodes to the operand width.
+* Compiler: 243 checks; example `examples/fixed_width`.
 
 ### 0.2
 

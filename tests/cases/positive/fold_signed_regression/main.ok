@@ -1,0 +1,33 @@
+type.text=1
+
+function.run() -> number {
+    when (-1 < 1) { write(true) }
+    print
+    when (-5 >= -5) { write(true) }
+    print
+    when (-2 > -1) { write(true) } else { write(false) }
+    print
+    when (-10 <= -9) { write(true) }
+    print
+    type.number x = -10
+    write(x / 2)
+    print
+    write(x % 3)
+    print
+    write(-6 / 2)
+    print
+    write(-7 % 3)
+    print
+    write(2 - 5)
+    print
+    type.number y = 8
+    write(y / -2)
+    print
+    write(1 - 2)
+    print
+    write(-1 + -1)
+    print
+    return 0
+}
+
+run()

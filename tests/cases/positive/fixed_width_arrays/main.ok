@@ -1,0 +1,71 @@
+type.text=1
+
+type.array<type.int8, 5> gdata = {10, -20, 30, -40, 50}
+type.array<type.uint16, 3> gports = {80, 443, 8080}
+
+function.sum(type.array<type.int8, 5>.xs) -> int8 {
+    type.int8 total = 0
+    loop (i from 0 until 5) {
+        total = total + xs[i]
+    }
+    return total
+}
+
+function.run() -> number {
+    type.array<type.int8, 4> xs = {1, 2, 3, 4}
+    write(xs[0])
+    write(" ")
+    write(xs[3])
+    print
+
+    xs[0] = -100
+    xs[1] = 100
+    write(xs[0] + xs[1])
+    print
+
+    type.array<type.uint16, 3> ports = {80, 443, 8080}
+    write(ports[2])
+    print
+    ports[2] = ports[2] + 1
+    write(ports[2])
+    print
+
+    type.array<type.array<type.int16, 2>, 2> grid = {{1000, 2000}, {-3000, 4000}}
+    write(grid[0][1])
+    print
+    write(grid[1][0])
+    print
+    grid[1][1] = 32767
+    write(grid[1][1])
+    print
+
+    type.array<type.uint8, 3> rgb = {200, 150, 100}
+    type.array<type.uint8, 3> copy = rgb
+    copy[0] = 0
+    write(rgb[0])
+    write(" ")
+    write(copy[0])
+    print
+
+    type.int8 total = sum(gdata)
+    write(total)
+    print
+
+    write(gports[1])
+    print
+
+    type.int16 gsum = grid[0][0] + grid[1][0]
+    write(gsum)
+    print
+
+    type.array<type.uint8, 4> bytes = {0, 128, 200, 255}
+    type.uint8 acc = 0
+    loop (i from 0 to 3) {
+        acc = acc + bytes[i]
+    }
+    write(acc)
+    print
+    return 0
+}
+
+run()

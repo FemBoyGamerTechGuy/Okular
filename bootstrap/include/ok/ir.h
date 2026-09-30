@@ -21,7 +21,7 @@ typedef enum {
     I_STORE_LOCAL,   /* slot  (pops)                            */
     I_LOAD_GLOBAL,   /* sym: Symbol*          -> type        */
     I_STORE_GLOBAL,  /* sym: Symbol* (pops)                     */
-    I_CONV_NUM_DEC,  /* pops number -> decimal                 */
+    I_CONV,          /* type=src, type2=dst; pops 1 -> converted */
     I_BINOP,         /* op + type; pops 2 -> result            */
     I_UNOP,          /* uop + type                             */
     I_LABEL,         /* label id                               */
@@ -46,6 +46,7 @@ typedef enum {
 typedef struct IrInst {
     IrKind kind;
     OkType type;        /* operand/result type where relevant */
+    OkType type2;       /* I_CONV: destination type            */
     uint64_t i;
     double d;
     bool b;

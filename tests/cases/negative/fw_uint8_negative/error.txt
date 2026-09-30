@@ -1,0 +1,1 @@
+variable `u` is `uint8`, but the initializer is `number`

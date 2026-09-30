@@ -1,0 +1,57 @@
+type.text=1
+
+type.int8 gi8 = -100
+type.int16 gi16 = 32000
+type.int32 gi32 = -2000000000
+type.uint8 gu8 = 250
+type.uint16 gu16 = 65000
+type.uint32 gu32 = 4000000000
+type.uint64 gu64 = 18446744073709551615
+type.byte gbyte = 128
+type.bool gflag = true
+
+stats = {
+    type.int8 base = 40
+    type.uint16 limit = 65535
+
+    function.doubled(int8.v) -> int16 {
+        type.int16 w = v + v
+        return w
+    }
+}.end
+
+function.run() -> number {
+    write(gi8)
+    print
+    write(gi16)
+    print
+    write(gi32)
+    print
+    write(gu8)
+    print
+    write(gu16)
+    print
+    write(gu32)
+    print
+    write(gu64)
+    print
+    write(gbyte)
+    print
+    write(gflag)
+    print
+
+    write(stats.doubled(stats.base))
+    print
+    write(stats.limit)
+    print
+
+    gi8 = gi8 - 1
+    write(gi8)
+    print
+    gu8 = gu8 + 1
+    write(gu8)
+    print
+    return 0
+}
+
+run()

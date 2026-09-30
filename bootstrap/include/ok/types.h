@@ -4,8 +4,10 @@
  * and two types are the same type exactly when their pointers are equal.
  * Scalars are singletons; array types are interned per (element, count).
  *
- * This is the M2 refactor that makes arrays possible and the later pointer
- * and struct milestones natural (brief §7: "a serious Okular type system").
+ * 0.3 adds the fixed-width integer family (spec §4.2): int8/16/32,
+ * uint8/16/32/64 and the `byte` alias. `int64` is `number`'s systems
+ * name (same descriptor), `f64` is `decimal`'s — the defaults keep their
+ * approachable names while systems code can be width-explicit.
  */
 #ifndef OK_TYPES_H
 #define OK_TYPES_H
@@ -14,11 +16,14 @@
 
 typedef enum {
     OK_VOID = 0,   /* internal: valueless function results */
-    OK_NUMBER,     /* 64-bit signed integer                */
-    OK_DECIMAL,    /* IEEE-754 binary64                    */
+    OK_NUMBER,     /* 64-bit signed integer (systems name: int64) */
+    OK_DECIMAL,    /* IEEE-754 binary64 (systems name: f64)      */
     OK_TEXT,       /* immutable UTF-8 text (ptr, len)      */
-    OK_BOOL,       /* true / false                         */
+    OK_BOOL,       /* true / false, 1 byte                 */
     OK_ARRAY,      /* fixed-length array of elem           */
+    /* fixed-width integers (spec §4.2); int64 == number above */
+    OK_INT8, OK_INT16, OK_INT32,
+    OK_UINT8, OK_UINT16, OK_UINT32, OK_UINT64,
 } TypeKind;
 
 typedef struct Type {
@@ -26,6 +31,8 @@ typedef struct Type {
     struct Type *elem;   /* OK_ARRAY: element type   */
     size_t count;        /* OK_ARRAY: element count  */
     char *name;          /* rendered name, owned     */
+    int bits;            /* integer types: 8/16/32/64 (0 otherwise) */
+    bool is_signed;      /* integer types: signedness                */
 } Type;
 
 /* OkType is now a pointer to an interned descriptor. */
@@ -33,20 +40,71 @@ typedef struct Type *OkType;
 
 /* scalar singletons (defined in types.c) */
 extern OkType ty_void, ty_number, ty_decimal, ty_text, ty_bool;
+extern OkType ty_int8, ty_int16, ty_int32;
+extern OkType ty_uint8, ty_uint16, ty_uint32, ty_uint64;
 
 static inline TypeKind ty_kind(OkType t) { return t ? t->kind : OK_VOID; }
 
 /* interned array type; count must be 1..OK_MAX_ARRAY_LEN */
 OkType ty_array(OkType elem, size_t count);
 
-/* "number" (etc.) from a name; false for unknown names or "array" */
+/* "number" (etc.) from a name; false for unknown names or "array".
+ * Accepts the fixed-width family and the aliases int64/byte/f64. */
 bool ty_from_scalar_name(const char *s, OkType *out);
 
-/* bytes of storage one value occupies (text = 16, array = elem bytes * n) */
+/* bytes of storage one value occupies
+ * (bool = 1, int8/uint8 = 1, int16/uint16 = 2, int32/uint32 = 4,
+ *  number/int64/uint64/decimal = 8, text = 16, array = elem bytes * n) */
 size_t ty_bytes(OkType t);
 
 /* words of 8 bytes (legacy helper used by slot layout) */
-static inline int ok_type_words(OkType t) { return (int)(ty_bytes(t) / 8); }
+static inline int ok_type_words(OkType t) { return (int)((ty_bytes(t) + 7) / 8); }
+
+/* ---- integer classification (spec §4.2) ---- */
+static inline bool ty_is_fixed_int(OkType t) {
+    return t && t->bits > 0 && t->kind != OK_NUMBER;
+}
+static inline bool ty_is_integer(OkType t) {
+    /* number is the 64-bit signed integer; int64 is its alias */
+    return t && (t->kind == OK_NUMBER || t->bits > 0);
+}
+static inline bool ty_is_signed(OkType t) { return t && t->is_signed; }
+static inline int ty_bits(OkType t) { return t ? t->bits : 0; }
+
+/* min/max of an integer type as int64 (uint64 max reported as -1 sentinel) */
+int64_t ty_min_i64(OkType t);
+int64_t ty_max_i64(OkType t);
+/* does a non-negative literal value fit the type? (number always fits) */
+bool ty_uint_fits(uint64_t v, OkType t);
+/* does a signed constant value fit the type? (number always fits) */
+bool ty_sint_fits(int64_t v, OkType t);
+
+/* implicit conversion (assignment compatibility, spec §4.4): exact match,
+ * safe widening (signed->wider signed, unsigned->wider unsigned,
+ * unsigned->strictly-wider signed, any integer->decimal). */
+bool ty_assignable(OkType from, OkType to);
+
+/* common type for mixed integer/decimal arithmetic (spec §4.4): the
+ * wider operand's type when one converts implicitly, decimal if either
+ * side is decimal, NULL when the pair must convert explicitly. */
+OkType ty_common(OkType a, OkType b);
+
+/* explicit conversion (the `T.to_U(x)` builtins, spec §4.4): any integer
+ * to any integer (wrap semantics), integer<->decimal, bool->number-ish.
+ * text conversions are planned, not implemented. */
+bool ty_convertible(OkType from, OkType to);
+
+/* re-encode a 64-bit register representation from one integer type's
+ * semantics to another's (truncating wrap; spec §4.2). Identity when
+ * from == to. Value conventions per `bits`/`is_signed`. */
+uint64_t ty_reencode(uint64_t v, OkType to);
+
+/* ---- constant conversion helpers (used by sema and ir folding) ---- */
+/* integer rep -> double (unsigned 64 converted exactly-when-possible) */
+double ty_int_to_dec(uint64_t v, OkType from);
+/* double -> integer rep of `to` (truncate toward zero, wrap on overflow;
+ * NaN/out-of-range become the INT64_MIN sentinel, then wrap) */
+uint64_t ty_dec_to_int(double d, OkType to);
 
 /* rendered name ("number", "array<number, 5>"); stable, owned by the type */
 const char *ok_type_name(OkType t);

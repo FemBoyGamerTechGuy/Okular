@@ -1,0 +1,3 @@
+type.uint64 u = 5
+type.number n = 10
+type.number bad = u + n

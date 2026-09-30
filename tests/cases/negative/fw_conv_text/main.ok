@@ -1,0 +1,2 @@
+type.text s = "42"
+type.number n = text.to_number(s)

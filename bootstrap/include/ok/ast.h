@@ -20,6 +20,7 @@ typedef enum {
     A_UN,            /* unary operator (not / -) */
     A_ARRAYLIT,      /* { e1, e2, ... } array literal (declaration initializers) */
     A_INDEX,         /* base[index] (base in a, index in b) */
+    A_CONV,          /* explicit conversion builtin T.to_U(x) (a = value, otype = target) */
     /* statements */
     A_VARDECL,       /* type.<T> name = init (init may be A_ARRAYLIT) */
     A_ASSIGN,        /* path = value */
@@ -77,7 +78,7 @@ struct Node {
     Vec args;            /* Node* call arguments */
     Vec items;           /* char* language-column string items */
 
-    OkType otype;        /* vardecl type / function return type */
+    OkType otype;        /* vardecl type / function return type / A_CONV target type */
     Param *params;       /* function parameters (owned array) */
     size_t nparams;
 
