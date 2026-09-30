@@ -1,0 +1,13 @@
+type.text=1
+
+type.array<type.text, 3> names = {"Ada", "Grace", "Linus"}
+write(names[1])
+print
+
+type.array<type.array<type.text, 2>, 2> pairs = {{"alpha", "beta"}, {"gamma", "delta"}}
+write(pairs[1][0])
+print
+
+names[2] = "RMS"
+write(names[2])
+print

@@ -7,7 +7,7 @@
 
 | Group | Verifies |
 |---|---|
-| `positive/` | programs compile, run, and produce the exact expected stdout and exit codes |
+| `positive/` | programs compile, run, and produce the exact expected stdout and exit codes — including **runtime-trap cases** (`arrays_bounds_trap`, `arrays_neg_index_trap`) whose programs die with the trap exit code 70 after printing their partial stdout |
 | `negative/` | invalid programs fail with the expected error text **and no executable is produced** |
 | `policy/` | the optional-source matrix (spec §2.1): broken-unused sources warn and are skipped; broken-used sources fail; `--strict` makes everything fatal |
 | `flags/` | `-w` warnings fire (unused variables, unreachable code) |

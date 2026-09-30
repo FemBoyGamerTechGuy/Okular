@@ -1,0 +1,2 @@
+type.text=1
+type.array<type.text, 2> x = {1, 2}

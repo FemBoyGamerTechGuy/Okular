@@ -6,6 +6,12 @@ RTFLAGS := -O2 -ffreestanding -nostdlib -fno-pie -fno-stack-protector \
 
 SRCS := $(wildcard bootstrap/src/*.c)
 OBJS := $(patsubst bootstrap/src/%.c,build/bootstrap/%.o,$(SRCS))
+HDRS := $(wildcard bootstrap/include/ok/*.h)
+
+# every object depends on every header: the compiler is small and the
+# headers define its ABI (types, IR, AST) — a stale object after a header
+# change silently corrupts the build (found the hard way in M2)
+$(OBJS): $(HDRS)
 
 .PHONY: all test clean
 

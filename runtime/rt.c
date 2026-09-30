@@ -14,6 +14,7 @@
  *   rt_print()
  *   rt_concat(out16, lptr, llen, rptr, rlen)
  *   rt_text_eq(lptr, llen, rptr, rlen) -> bool
+ *   rt_bounds_trap(index, length)  array index out of bounds (spec §8.4)
  *   rt_trap(msg, len, code)      fatal runtime error (spec §13)
  */
 
@@ -144,4 +145,42 @@ b32 rt_text_eq(const u8 *lp, u64 ll, const u8 *rp, u64 rl) {
     for (u64 i = 0; i < ll; i++)
         if (lp[i] != rp[i]) return 0;
     return 1;
+}
+
+/* spec §8.4: array indexing is always bounds-checked; a violation is a
+ * fatal runtime trap naming the index and the array length. */
+void rt_bounds_trap(i64 index, u64 length) {
+    char msg[96];
+    u64 n = 0;
+
+    const char *pre = "array index ";
+    for (const char *c = pre; *c; c++) msg[n++] = *c;
+
+    /* print the offending index (negative indices are reported signed) */
+    u64 u;
+    if (index < 0) {
+        msg[n++] = '-';
+        u = (u64)(-(index + 1)) + 1; /* INT64_MIN-safe */
+    } else {
+        u = (u64)index;
+    }
+    char tmp[24];
+    int i = 24;
+    do { tmp[--i] = (char)('0' + (u % 10)); u /= 10; } while (u != 0);
+    for (; i < 24; i++) msg[n++] = tmp[i];
+
+    const char *mid = " is out of bounds (length ";
+    for (const char *c = mid; *c; c++) msg[n++] = *c;
+
+    u = length;
+    i = 24;
+    do { tmp[--i] = (char)('0' + (u % 10)); u /= 10; } while (u != 0);
+    for (; i < 24; i++) msg[n++] = tmp[i];
+
+    msg[n++] = ')';
+    msg[n++] = '\n';
+
+    sys_write(2, "okular runtime error: ", 22);
+    sys_write(2, msg, n);
+    sys_exit(70);
 }

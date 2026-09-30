@@ -1,0 +1,20 @@
+type.text=1
+
+function.bump(type.array<type.number, 3>.xs) {
+    xs[0] = 1000
+}
+
+type.array<type.number, 3> a = {7, 8, 9}
+type.array<type.number, 3> b = {0, 0, 0}
+
+b = a
+b[0] = 777
+
+write(b[0])
+write(" ")
+write(a[0])
+print
+
+bump(a)
+write(a[0])
+print

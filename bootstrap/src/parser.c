@@ -104,59 +104,66 @@ static void skip_column_region(Parser *p) {
 /* ---- paths ---- */
 
 /* IDENT (T_DOT IDENT)*  -> parts array */
-static char **parse_path(Parser *p, size_t *out_n) {
-    Tok *t = expect(p, T_IDENT, "a name");
-    if (!t) { *out_n = 0; sync_stmt(p); return NULL; }
-    Vec parts; vec_init(&parts);
-    vec_push(&parts, ok_xstrdup(t->text));
-    while (is(p, T_DOT) && isk(p, 1, T_IDENT)) {
-        advance(p);
-        vec_push(&parts, ok_xstrdup(cur(p)->text));
-        advance(p);
-    }
-    *out_n = parts.len;
-    return (char **)parts.items;
-}
-
-static void free_path(char **parts, size_t n) {
-    for (size_t i = 0; i < n; i++) free(parts[i]);
-    free(parts);
-}
-
 /* ---- types ---- */
 
-static bool type_from_name(const char *s, OkType *out) {
-    if (strcmp(s, "number") == 0) { *out = OK_NUMBER; return true; }
-    if (strcmp(s, "decimal") == 0) { *out = OK_DECIMAL; return true; }
-    if (strcmp(s, "text") == 0)    { *out = OK_TEXT; return true; }
-    if (strcmp(s, "bool") == 0)    { *out = OK_BOOL; return true; }
-    return false;
-}
+static Node *parse_expr(Parser *p); /* fwd: array literals contain exprs */
 
-/* `type.<T>` used by variable declarations; error mentions known types. */
+/* `type.<T>` / `type.array<T, N>` used by variable declarations (spec §8).
+ * Returns false (with a diagnostic) on unknown types or malformed arrays. */
 static bool parse_type_prefix(Parser *p, OkType *out) {
-    Tok *t = cur(p);
     if (!expect(p, T_KW_TYPE, "`type`")) return false;
     if (!expect(p, T_DOT, "`.` after `type` (as in `type.number`)")) return false;
     Tok *name = cur(p);
     if (!is(p, T_IDENT)) {
-        perr(p, name, "expected a type name after `type.` (number, decimal, text, bool), but found %s.",
+        perr(p, name, "expected a type name after `type.` (number, decimal, text, bool, array<...>), but found %s.",
              tok_kind_name(name->kind));
         return false;
     }
     advance(p);
-    if (!type_from_name(name->text, out)) {
+    if (strcmp(name->text, "array") == 0) {
+        /* type.array<type.number, 5> (spec §8.4) */
+        if (!expect(p, T_LT, "`<` after `array` (as in `type.array<type.number, 5>`)"))
+            return false;
+        OkType elem;
+        if (!parse_type_prefix(p, &elem)) return false;
+        if (!expect(p, T_COMMA, "`,` between the element type and the length")) return false;
+        Tok *cnt = cur(p);
+        if (!is(p, T_INT)) {
+            perr(p, cnt, "the array length must be a whole number of elements, but found %s.",
+                 tok_kind_name(cnt->kind));
+            return false;
+        }
+        advance(p);
+        if (!expect(p, T_GT, "`>` to close the array type")) return false;
+        if (cnt->ival == 0 || cnt->ival > 65536) {
+            Diag *d = perr(p, cnt, "the array length must be between 1 and 65536 in this compiler, but %llu was given.",
+                           (unsigned long long)cnt->ival);
+            diag_note(d, "the limit is a documented bootstrap restriction (spec §8.4); it lifts with the memory milestone.");
+            return false;
+        }
+        OkType arr = ty_array(elem, (size_t)cnt->ival);
+        if (!arr) {
+            perr(p, cnt, "this array type is too large (more than 1 MiB of storage).");
+            return false;
+        }
+        *out = arr;
+        return true;
+    }
+    if (!ty_from_scalar_name(name->text, out)) {
         Diag *d = perr(p, name, "unknown type `%s`.", name->text);
-        diag_note(d, "the 0.1 types are: number, decimal, text, bool.");
-        diag_note(d, "fixed-width types like int32/uint8 are designed but not implemented yet (specs/spec-v0.1.md §4.2).");
+        diag_note(d, "the 0.2 types are: number, decimal, text, bool, array<type, count>.");
+        diag_note(d, "fixed-width types like int32/uint8 are designed but not implemented yet (specs/spec-v0.2.md §4.2).");
         return false;
     }
-    (void)t;
     return true;
 }
 
-/* bare type name for function params / return types (`number.a`, `-> number`) */
+/* bare type name for function params / return types (`number.a`, `-> number`);
+ * also accepts the full `type.`-prefixed form, which arrays require:
+ *   type.array<type.number, 3>.xs      (spec §8.4) */
 static bool parse_bare_type(Parser *p, OkType *out) {
+    if (is(p, T_KW_TYPE))
+        return parse_type_prefix(p, out);
     Tok *name = cur(p);
     if (!is(p, T_IDENT)) {
         perr(p, name, "expected a type name (number, decimal, text, bool), but found %s.",
@@ -164,12 +171,40 @@ static bool parse_bare_type(Parser *p, OkType *out) {
         return false;
     }
     advance(p);
-    if (!type_from_name(name->text, out)) {
+    if (!ty_from_scalar_name(name->text, out)) {
         Diag *d = perr(p, name, "unknown type `%s`.", name->text);
-        diag_note(d, "the 0.1 types are: number, decimal, text, bool.");
+        diag_note(d, "the 0.2 types are: number, decimal, text, bool, array<type, count>.");
+        diag_note(d, "array parameters use the full form: `type.array<type.number, 3>.xs`.");
         return false;
     }
     return true;
+}
+
+/* { e1, e2, ... } array literal (declaration initializers only, spec §8.4) */
+static Node *parse_arraylit(Parser *p) {
+    Tok *t = cur(p);
+    Node *n = node_new(p->ar, A_ARRAYLIT, t->line, t->col);
+    advance(p); /* { */
+    vec_init(&n->args);
+    for (;;) {
+        skip_nl(p);
+        if (is(p, T_RBRACE)) { advance(p); return n; }
+        Node *el = is(p, T_LBRACE) ? parse_arraylit(p) : parse_expr(p);
+        if (!el) return n;
+        vec_push(&n->args, el);
+        skip_nl(p);
+        if (is(p, T_COMMA)) { advance(p); continue; }
+        if (is(p, T_RBRACE)) { advance(p); return n; }
+        perr(p, cur(p), "expected `,` or `}` in the array literal, but found %s.",
+             tok_kind_name(cur(p)->kind));
+        return n;
+    }
+}
+
+/* initializer after `=` in a declaration: array literal or expression */
+static Node *parse_initializer(Parser *p) {
+    if (is(p, T_LBRACE)) return parse_arraylit(p);
+    return parse_expr(p);
 }
 
 /* ---- expressions (spec §9 precedence) ---- */
@@ -222,7 +257,7 @@ static Node *parse_primary(Parser *p) {
         advance(p);
         return NULL;
     case T_KW_RESERVED:
-        perr(p, t, "`%s` is reserved for a future Okular feature and is not available in 0.1 (specs/spec-v0.1.md §20).", t->text);
+        perr(p, t, "`%s` is reserved for a future Okular feature and is not available in 0.2 (specs/spec-v0.2.md §20).", t->text);
         advance(p);
         return NULL;
     case T_IDENT: {
@@ -276,10 +311,22 @@ static Node *parse_postfix(Parser *p) {
         call->parts = e->parts;
         call->nparts = e->nparts;
         call->args = args->args;
-        return call;
+        e = call;
+    }
+    /* array indexing: base[index] (spec §9); chains nest (m[i][j]) */
+    while (is(p, T_LBRACKET)) {
+        Tok *t = cur(p);
+        advance(p); /* [ */
+        Node *idx = parse_expr(p);
+        if (!idx) return e;
+        if (!expect(p, T_RBRACKET, "`]` to close the array index")) return e;
+        Node *ix = node_new(p->ar, A_INDEX, t->line, t->col);
+        ix->a = e;
+        ix->b = idx;
+        e = ix;
     }
     if (is(p, T_DOT)) {
-        perr(p, cur(p), "member access after a value arrives with structs (planned); paths only in 0.1.");
+        perr(p, cur(p), "member access after a value arrives with structs (planned); paths only in 0.2.");
         sync_stmt(p);
         return e;
     }
@@ -407,11 +454,17 @@ static Node *parse_when(Parser *p) {
     if (!expect(p, T_RPAREN, "`)` after the `when` condition")) { sync_stmt(p); return n; }
     vec_init(&n->body);
     if (!parse_stmt_list(p, &n->body, T_RBRACE)) return n;
+    /* `else` may sit on the next line — peek past newlines, but restore the
+     * position when there is no `else`, so the caller still sees its own
+     * statement separator (top-level loops demand the newline stays). */
+    size_t mark = p->pos;
     skip_nl(p);
     if (is(p, T_KW_ELSE)) {
         advance(p);
         vec_init(&n->body_else);
         if (!parse_stmt_list(p, &n->body_else, T_RBRACE)) return n;
+    } else {
+        p->pos = mark;
     }
     return n;
 }
@@ -495,11 +548,11 @@ static Node *parse_stmt(Parser *p) {
         n->otype = ty;
         n->name = ok_xstrdup(cur(p)->text);
         advance(p);
-        if (!expect(p, T_EQ, "`=` and an initializer (Okular 0.1 requires explicit initialization)")) {
+        if (!expect(p, T_EQ, "`=` and an initializer (Okular requires explicit initialization)")) {
             free(n->name);
             return NULL;
         }
-        n->a = parse_expr(p);
+        n->a = parse_initializer(p);
         if (!n->a) { free(n->name); return NULL; }
         return n;
     }
@@ -532,43 +585,50 @@ static Node *parse_stmt(Parser *p) {
         return n;
     }
     case T_KW_STRUCT: {
-        Diag *d = perr(p, t, "structs are designed but not implemented in Okular 0.1 (specs/spec-v0.1.md §8.3).");
+        Diag *d = perr(p, t, "structs are designed but not implemented in Okular 0.2 (specs/spec-v0.2.md §8.3).");
         diag_note(d, "the planned shape is `struct.Name = { fields }.end`.");
         advance(p);
         skip_column_region(p);
         return NULL;
     }
     case T_KW_RESERVED:
-        perr(p, t, "`%s` is reserved for a future Okular feature and is not available in 0.1 (specs/spec-v0.1.md §20).", t->text);
+        perr(p, t, "`%s` is reserved for a future Okular feature and is not available in 0.2 (specs/spec-v0.2.md §20).", t->text);
         advance(p);
         sync_stmt(p);
         return NULL;
     case T_IDENT: {
-        /* assignment (path = expr) or call statement (path(args)) */
-        size_t np; char **parts = parse_path(p, &np);
-        if (!parts) return NULL;
+        /* assignment (path = expr, base[i] = expr) or call statement */
+        Node *e = parse_postfix(p);
+        if (!e) return NULL;
         if (is(p, T_EQ)) {
             advance(p);
-            Node *n = node_new(p->ar, A_ASSIGN, t->line, t->col);
-            n->parts = parts; n->nparts = np;
-            n->a = parse_expr(p);
-            if (!n->a) { free_path(parts, np); return NULL; }
-            return n;
+            Node *val = parse_expr(p);
+            if (!val) return NULL;
+            if (e->kind == A_PATH) {
+                Node *n = node_new(p->ar, A_ASSIGN, t->line, t->col);
+                n->parts = e->parts; n->nparts = e->nparts;
+                n->a = val;
+                return n;
+            }
+            if (e->kind == A_INDEX) {
+                /* base[i] = value  (m[i][j] = v nests: e->a is the inner index) */
+                Node *n = node_new(p->ar, A_INDEXASSIGN, t->line, t->col);
+                n->a = e->a;
+                n->b = e->b;
+                n->c = val;
+                return n;
+            }
+            Diag *d = perr(p, t, "the left side of `=` must be a name or an array element, not this expression.");
+            diag_note(d, "to store a value use `name = value` or `array[index] = value`.");
+            return NULL;
         }
-        if (is(p, T_LPAREN)) {
-            Node *args = parse_call_args(p);
-            if (!args) { free_path(parts, np); return NULL; }
-            Node *call = node_new(p->ar, A_CALL, t->line, t->col);
-            call->parts = parts; call->nparts = np;
-            call->args = args->args;
+        if (e->kind == A_CALL) {
             Node *n = node_new(p->ar, A_EXPRSTMT, t->line, t->col);
-            n->a = call;
+            n->a = e;
             return n;
         }
-        Diag *d = perr(p, cur(p), "a statement that starts with a name must be a call or an assignment, but found %s after `%s`.",
-                       tok_kind_name(cur(p)->kind), parts[np - 1]);
-        diag_note(d, "expression statements must be calls like `greeting.greet()`; to store a value use `name = value`.");
-        free_path(parts, np);
+        Diag *d = perr(p, cur(p), "a statement that starts with a name must be a call or an assignment.");
+        diag_note(d, "expression statements must be calls like `greeting.greet()`; to store a value use `name = value` or `array[index] = value`.");
         sync_stmt(p);
         return NULL;
     }
@@ -715,7 +775,7 @@ static Node *parse_devcol(Parser *p) {
             v->name = ok_xstrdup(cur(p)->text);
             advance(p);
             if (!expect(p, T_EQ, "`=` and an initializer")) { free(v->name); continue; }
-            v->a = parse_expr(p);
+            v->a = parse_initializer(p);
             if (v->a) vec_push(&n->body, v);
             continue;
         }
@@ -729,8 +789,13 @@ static Node *parse_devcol(Parser *p) {
             if (m) vec_push(&n->body, m);
             continue;
         }
-        perr(p, cur(p), "columns contain declarations (variables, functions, nested columns), but found %s.",
-             tok_kind_name(cur(p)->kind));
+        {
+            TokKind k = cur(p)->kind;
+            Diag *d = perr(p, cur(p), "columns contain declarations (variables, functions, nested columns), but found %s.",
+                 tok_kind_name(k));
+            if (k == T_INT || k == T_DEC || k == T_TEXT || k == T_KW_TRUE || k == T_KW_FALSE)
+                diag_note(d, "this looks like an array literal — literals only initialize declarations: `type.array<type.number, 2> xs = {1, 2}` (spec §8.4).");
+        }
         sync_stmt(p);
         if (p->pos == before) advance(p);
     }
@@ -797,9 +862,15 @@ static Node *parse_toplevel_function(Parser *p) {
         advance(p);
         OkType ty;
         if (!parse_bare_type(p, &ty)) { sync_stmt(p); return n; }
-        n->otype = ty;
+        if (ty && ty_kind(ty) == OK_ARRAY) {
+            Diag *d = perr(p, cur(p), "functions cannot return arrays in Okular 0.2.");
+            diag_note(d, "return an element, or pass a destination array when pointers arrive (spec §12).");
+            n->otype = ty_number; /* recover as number */
+        } else {
+            n->otype = ty;
+        }
     } else {
-        n->otype = OK_VOID;
+        n->otype = ty_void;
     }
 
     /* body */
@@ -851,7 +922,7 @@ static Node *parse_toplevel(Parser *p) {
         n->name = ok_xstrdup(cur(p)->text);
         advance(p);
         if (!expect(p, T_EQ, "`=` and an initializer")) { free(n->name); return NULL; }
-        n->a = parse_expr(p);
+        n->a = parse_initializer(p);
         if (!n->a) { free(n->name); return NULL; }
         return n;
     }
@@ -860,7 +931,7 @@ static Node *parse_toplevel(Parser *p) {
     case T_KW_FUNCTION:
         return parse_toplevel_function(p);
     case T_KW_STRUCT: {
-        Diag *d = perr(p, t, "structs are designed but not implemented in Okular 0.1 (specs/spec-v0.1.md §8.3).");
+        Diag *d = perr(p, t, "structs are designed but not implemented in Okular 0.2 (specs/spec-v0.2.md §8.3).");
         diag_note(d, "the planned shape is `struct.Name = { fields }.end`.");
         advance(p);
         skip_column_region(p);

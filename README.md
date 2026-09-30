@@ -3,13 +3,18 @@
 A simple, fast programming language designed for building large
 applications with minimal code.
 
-**Status:** Okular 0.1 — bootstrap milestone M1. The C bootstrap compiler
-builds and runs real Okular programs natively on x86-64 Linux.
+**Status:** Okular 0.2 — milestone M2 (core data model) underway. The C
+bootstrap compiler builds and runs real Okular programs natively on
+x86-64 Linux — now with fixed-length arrays: value semantics, nested
+arrays, and always-checked bounds.
 
 ```ok
 type.text=1
 
-write("Hello Okular")
+type.array<type.number, 5> scores = {10, 20, 30, 40, 50}
+
+scores[2] = 99
+write(scores[2])
 print
 ```
 
@@ -49,15 +54,15 @@ docs/         getting started, language basics, architecture, roadmap
 examples/     runnable Okular programs (HelloProject = full project)
 tests/        the test suite (positive / negative / policy / flags)
 tools/        run_tests.sh and future tooling
-std/          standard library (empty in 0.1 — planned)
+std/          standard library (empty in 0.2 — planned)
 build/        build artifacts
 ```
 
 ## Documentation
 
 * [Getting started](docs/getting-started.md) — build, compile, run
-* [Language basics](docs/language-basics.md) — a tour of Okular 0.1
-* [Specification v0.1](specs/spec-v0.1.md) — the definition, with an
+* [Language basics](docs/language-basics.md) — a tour of Okular 0.2
+* [Specification v0.2](specs/spec-v0.2.md) — the definition, with an
   implementation status table that says exactly what works
 * [Architecture](docs/architecture.md) — how the bootstrap compiler is
   built and how it will self-host

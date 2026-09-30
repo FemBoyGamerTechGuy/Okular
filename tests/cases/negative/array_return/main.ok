@@ -1,0 +1,4 @@
+type.text=1
+function.f() -> type.array<type.number, 2> {
+    return {1, 2}
+}

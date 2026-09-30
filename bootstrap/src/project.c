@@ -184,7 +184,7 @@ OkProject *project_load(const char *main_path, DiagEngine *de, bool strict) {
     if (strcmp(base, "main.ok") != 0) {
         Diag *d = diag_error_noloc(de,
             "the entry point must be `main.ok`, but `%s` was given.", base);
-        diag_note(d, "Okular projects are rooted at a `main.ok` file (specs/spec-v0.1.md §2).");
+        diag_note(d, "Okular projects are rooted at a `main.ok` file (specs/spec-v0.2.md §2).");
         free(p->root); free(p->main_path); free(p);
         return NULL;
     }
@@ -265,9 +265,9 @@ void project_check_libs(OkProject *p, DiagEngine *de, bool strict) {
             Diag *dg = strict
                 ? diag_error_noloc(de, "library `%s` was not found (searched: libs/, deps/, standard library).", name)
                 : diag_warn_noloc(de, "library `%s` was not found (searched: libs/, deps/, standard library) — ignored.", name);
-            diag_note(dg, "library binding is not implemented in Okular 0.1; entries are validated only (specs/spec-v0.1.md §6.3).");
+            diag_note(dg, "library binding is not implemented in Okular 0.2; entries are validated only (specs/spec-v0.2.md §6.3).");
         } else {
-            Diag *dg = diag_warn_noloc(de, "library `%s` resolved, but library binding is NOT IMPLEMENTED in 0.1 — symbols will not be available.", name);
+            Diag *dg = diag_warn_noloc(de, "library `%s` resolved, but library binding is NOT IMPLEMENTED in 0.2 — symbols will not be available.", name);
             (void)dg;
         }
     }

@@ -13,33 +13,14 @@
 #include <stdbool.h>
 #include <stdarg.h>
 
-#define OK_VERSION "0.1"
+#define OK_VERSION "0.2"
 #define OK_MAX_ERRORS 50
 #define OK_OUTBUF_BYTES 65536
 #define OK_TEXT_ARENA_BYTES (1 << 20)
 
 /* ---- Okular types (spec §4) ---- */
-typedef enum {
-    OK_VOID = 0,   /* internal: valueless function results */
-    OK_NUMBER,     /* 64-bit signed integer                */
-    OK_DECIMAL,    /* IEEE-754 binary64                    */
-    OK_TEXT,       /* immutable UTF-8 text (ptr, len)      */
-    OK_BOOL,       /* true / false                         */
-} OkType;
-
-static inline const char *ok_type_name(OkType t) {
-    switch (t) {
-    case OK_VOID:   return "void";
-    case OK_NUMBER: return "number";
-    case OK_DECIMAL: return "decimal";
-    case OK_TEXT:   return "text";
-    case OK_BOOL:   return "bool";
-    }
-    return "?";
-}
-
-/* words per value slot in memory (text is a 16-byte pair) */
-static inline int ok_type_words(OkType t) { return t == OK_TEXT ? 2 : 1; }
+/* OkType (the interned type descriptors) is defined in types.h, which this
+ * file includes at the bottom. */
 
 /* ---- compile-time feature directives (spec §5) ---- */
 enum { OK_FEATURE_TEXT = 0, OK_FEATURE_COUNT };
@@ -65,5 +46,9 @@ void *ok_xmalloc(size_t n);
 void *ok_xrealloc(void *p, size_t n);
 char *ok_xstrdup(const char *s);
 char *ok_xstrndup(const char *s, size_t n);
+
+/* type descriptors: must come after the declarations above so types.h can
+ * itself include ok.h under its include guard */
+#include "ok/types.h"
 
 #endif /* OK_H */

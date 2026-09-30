@@ -18,9 +18,12 @@ typedef enum {
     A_WRITE,         /* write(args[0]) builtin call */
     A_BIN,           /* binary operator */
     A_UN,            /* unary operator (not / -) */
+    A_ARRAYLIT,      /* { e1, e2, ... } array literal (declaration initializers) */
+    A_INDEX,         /* base[index] (base in a, index in b) */
     /* statements */
-    A_VARDECL,       /* type.<T> name = init */
+    A_VARDECL,       /* type.<T> name = init (init may be A_ARRAYLIT) */
     A_ASSIGN,        /* path = value */
+    A_INDEXASSIGN,   /* base[index] = value (base a, index b, value c) */
     A_EXPRSTMT,      /* expression statement (calls / write only, checked in sema) */
     A_WHEN,          /* when (cond) { } else { } */
     A_LOOP_COUNT,    /* loop (i from a to/until b) { } */
@@ -67,7 +70,8 @@ struct Node {
     size_t nparts;
 
     /* children */
-    Node *a, *b, *c;     /* generic: cond / lhs / init / from ... */
+    Node *a, *b, *c;     /* generic: cond / lhs / init / from ...
+                            A_INDEXASSIGN: a=base, b=index, c=value */
     Vec body;            /* Node* statement list (func/when/loop bodies, devcol members) */
     Vec body_else;       /* Node* else-body of when */
     Vec args;            /* Node* call arguments */

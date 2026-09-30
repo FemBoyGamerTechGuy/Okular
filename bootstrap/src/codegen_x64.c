@@ -1,13 +1,21 @@
 /* codegen_x64.c — x86-64 Linux backend (brief §34, docs/architecture.md §3.5).
  *
- * Okular Internal ABI v0:
+ * Okular Internal ABI v1 (v0 + arrays, spec §8.4):
  *   - args 1..6 in rdi, rsi, rdx, rcx, r8, r9 (integer registers)
  *   - `decimal` travels as raw bits in integer registers/stack slots,
  *     computed in xmm0/xmm1 locally
  *   - `text` args: address of a 16-byte (ptr, len) pair in one register
+ *   - `array` args: the CALLER copies the array into its private scratch
+ *     block and passes the copy's address in one register (value semantics);
+ *     the callee's prologue copies from that address into its own slot
  *   - returns: scalar/decimal-bits in rax; text pair in rax (ptr) + rdx (len)
  *   - rbx, r12..r15 callee-saved; rbx is the alignment scratch across calls
  *   - calls align rsp to 16 via `mov rbx,rsp / and rsp,-16 / mov rsp,rbx`
+ *
+ * Frame layout (rbp-relative, growing downward):
+ *   [rbp] frame link        [rbp-locals)   local slots (arrays included)
+ *   outgoing arg area 96B   [rbp-oa_base, rbp-oa_base+96)
+ *   array-arg scratch       [rbp-scratch_base, rbp-oa_base)
  *
  * The emitted program is freestanding: no libc, entry `_start` (runtime/),
  * syscalls only. Correctness before speed (spec §15): the operand stack is
@@ -27,7 +35,17 @@ typedef struct {
     size_t *offsets;        /* slot i -> rbp-relative byte offset (negative) */
     size_t locals_bytes;
     size_t oa_base;         /* outgoing-arg area: [rbp-oa_base, rbp-oa_base+96) */
+    size_t scratch_base;    /* array-arg scratch: [rbp-scratch_base, rbp-oa_base) */
+    size_t scratch_bytes;
+    size_t trap_seq;        /* bounds-trap label sequence */
 } FnCtx;
+
+/* lea rax, [rbp ± disp] with sign-aware formatting */
+static void lea_rbp(Buf *o, long disp) {
+    if (disp < 0)      buf_printf(o, "    lea rax, [rbp-%ld]\n", -disp);
+    else if (disp > 0) buf_printf(o, "    lea rax, [rbp+%ld]\n", disp);
+    else               buf_puts(o, "    mov rax, rbp\n");
+}
 
 static size_t slot_words(IrSlot *s) { return ok_type_words(s->type); }
 
@@ -53,6 +71,7 @@ static void emit_inst(FnCtx *fc, IrInst *in);
 
 static void gen_function(Buf *out, IrModule *im, IrFunc *f, size_t seq) {
     FnCtx fc;
+    memset(&fc, 0, sizeof fc);
     fc.out = out;
     fc.im = im;
     fc.f = f;
@@ -67,8 +86,25 @@ static void gen_function(Buf *out, IrModule *im, IrFunc *f, size_t seq) {
     }
     fc.locals_bytes = off;
     fc.oa_base = off + 96; /* 6 outgoing arg slots x 16 bytes */
+    fc.scratch_base = fc.oa_base + 96;
 
-    size_t frame = fc.oa_base;
+    /* array-arg scratch: the largest total of array bytes any single call
+     * site passes. One shared block is sound: a copy is written immediately
+     * before its call, and inner calls have finished by then (their copies
+     * are dead); two arrays in one call are laid out back to back. */
+    size_t scratch = 0;
+    for (size_t i = 0; i < f->n; i++) {
+        if (f->insts[i].kind != I_CALL) continue;
+        FuncInfo *cfi = (FuncInfo *)f->insts[i].sym;
+        size_t need = 0;
+        for (size_t k = 0; k < (size_t)f->insts[i].nargs && k < cfi->nparams; k++)
+            if (ty_kind(cfi->param_types[k]) == OK_ARRAY)
+                need += ty_bytes(cfi->param_types[k]);
+        if (need > scratch) scratch = need;
+    }
+    fc.scratch_bytes = scratch;
+
+    size_t frame = fc.scratch_base + fc.scratch_bytes;
     frame = (frame + 15) & ~(size_t)15;
 
     buf_printf(out, "\n    .globl %s\n%s:\n", f->fi->mangled, f->fi->mangled);
@@ -78,7 +114,13 @@ static void gen_function(Buf *out, IrModule *im, IrFunc *f, size_t seq) {
     /* store parameters into their slots (params are slots 0..n-1) */
     for (size_t k = 0; k < f->fi->nparams && k < 6; k++) {
         size_t o = fc.offsets[k];
-        if (f->fi->param_types[k] == OK_TEXT) {
+        if (ty_kind(f->fi->param_types[k]) == OK_ARRAY) {
+            /* the register holds the caller's copy: adopt it by value */
+            buf_printf(out, "    mov rsi, %s\n", arg_regs[k]);
+            buf_printf(out, "    lea rdi, [rbp-%zu]\n", o);
+            buf_printf(out, "    mov rcx, %zu\n    rep movsq\n",
+                       ty_bytes(f->fi->param_types[k]) / 8);
+        } else if (f->fi->param_types[k] == ty_text) {
             /* reg holds the address of a (ptr,len) pair */
             buf_printf(out, "    mov rax, [%s]\n", arg_regs[k]);
             buf_printf(out, "    mov rdx, [%s+8]\n", arg_regs[k]);
@@ -108,15 +150,33 @@ static void emit_call(FnCtx *fc, IrInst *in) {
      * outgoing-arg slots live below the locals at depth
      *   oa_base - k*16   (slot k, 16 bytes each, max 6)
      * and hold text pairs contiguously: [slot]=ptr, [slot-8]=len,
-     * so `lea reg,[rbp-oa]` gives the callee a (ptr,len) pair pointer. */
-    size_t stack_off = 0; /* byte offset from rsp of arg1's slot */
+     * so `lea reg,[rbp-oa]` gives the callee a (ptr,len) pair pointer.
+     *
+     * array args arrive as an 8-byte SOURCE ADDRESS on the machine stack:
+     * copy the array into this frame's scratch block (value semantics) and
+     * hand the callee the copy's address (ABI v1, docs/architecture.md). */
+    size_t stack_off = 0;  /* byte offset from rsp of arg1's slot */
+    size_t scratch_off = 0; /* cumulative array-copy offset in the scratch */
+    size_t arr_off[16];
+    for (size_t k = 0; k < n && k < 16; k++) arr_off[k] = 0;
     for (size_t k = 0; k < n; k++) {
-        OkType t = (k < fi->nparams) ? fi->param_types[k] : OK_NUMBER;
+        OkType t = (k < fi->nparams) ? fi->param_types[k] : ty_number;
+        if (ty_kind(t) == OK_ARRAY) {
+            size_t bytes = ty_bytes(t);
+            buf_printf(o, "    mov rax, [rsp+%zu]\n", stack_off);
+            buf_puts(o, "    mov rsi, rax\n");
+            buf_printf(o, "    lea rdi, [rbp-%zu]\n", fc->scratch_base - scratch_off);
+            buf_printf(o, "    mov rcx, %zu\n    rep movsq\n", bytes / 8);
+            if (k < 16) arr_off[k] = scratch_off;
+            scratch_off += bytes;
+            stack_off += 8; /* the operand was an address */
+            continue;
+        }
         size_t w = (size_t)ok_type_words(t) * 8;
         size_t oa = fc->oa_base - k * 16;
         buf_printf(o, "    mov rax, [rsp+%zu]\n", stack_off);
         buf_printf(o, "    mov [rbp-%zu], rax\n", oa);
-        if (t == OK_TEXT) {
+        if (t == ty_text) {
             buf_printf(o, "    mov rdx, [rsp+%zu]\n", stack_off + 8);
             buf_printf(o, "    mov [rbp-%zu], rdx\n", oa - 8);
         }
@@ -125,11 +185,16 @@ static void emit_call(FnCtx *fc, IrInst *in) {
     if (stack_off)
         buf_printf(o, "    add rsp, %zu\n", stack_off);
 
-    /* load argument registers from the outgoing area */
+    /* load argument registers from the outgoing area / scratch */
     for (size_t k = 0; k < n && k < 6; k++) {
-        OkType t = (k < fi->nparams) ? fi->param_types[k] : OK_NUMBER;
+        OkType t = (k < fi->nparams) ? fi->param_types[k] : ty_number;
         size_t oa = fc->oa_base - k * 16;
-        if (t == OK_TEXT)
+        if (ty_kind(t) == OK_ARRAY) {
+            buf_printf(o, "    lea %s, [rbp-%zu]\n", arg_regs[k],
+                       fc->scratch_base - arr_off[k]);
+            continue;
+        }
+        if (t == ty_text)
             buf_printf(o, "    lea %s, [rbp-%zu]\n", arg_regs[k], oa);
         else
             buf_printf(o, "    mov %s, [rbp-%zu]\n", arg_regs[k], oa);
@@ -142,12 +207,12 @@ static void emit_call(FnCtx *fc, IrInst *in) {
     buf_puts(o, "    mov rsp, rbx\n    pop rbx\n");
 
     /* result */
-    if (fi->ret == OK_NUMBER || fi->ret == OK_BOOL) {
+    if (fi->ret == ty_number || fi->ret == ty_bool) {
         push_rax(o);
-    } else if (fi->ret == OK_DECIMAL) {
+    } else if (fi->ret == ty_decimal) {
         buf_puts(o, "    movq xmm0, rax\n");
         push_xmm0(o);
-    } else if (fi->ret == OK_TEXT) {
+    } else if (fi->ret == ty_text) {
         push_pair_rax_rdx(o);
     }
 }
@@ -155,7 +220,7 @@ static void emit_call(FnCtx *fc, IrInst *in) {
 static void emit_binop(FnCtx *fc, IrInst *in) {
     Buf *o = fc->out;
 
-    if (in->type == OK_TEXT) {
+    if (in->type == ty_text) {
         /* only `+` (concat) reaches here; == / != also possible */
         if (in->op == OP_ADD) {
             pop_pair_rax_rdx(o); /* rax = right.ptr, rdx = right.len */
@@ -186,7 +251,7 @@ static void emit_binop(FnCtx *fc, IrInst *in) {
         return;
     }
 
-    if (in->type == OK_DECIMAL) {
+    if (in->type == ty_decimal) {
         pop_xmm0(o); /* right */
         buf_puts(o, "    movsd xmm1, xmm0\n");
         pop_xmm0(o); /* left -> xmm0 */
@@ -283,7 +348,7 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         break;
     case I_LOAD_LOCAL: {
         size_t off = fc->offsets[in->slot];
-        if (in->type == OK_TEXT) {
+        if (in->type == ty_text) {
             buf_printf(o, "    mov rax, [rbp-%zu]\n", off);
             buf_printf(o, "    mov rdx, [rbp-%zu]\n", off + 8);
             push_pair_rax_rdx(o);
@@ -295,7 +360,7 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
     }
     case I_STORE_LOCAL: {
         size_t off = fc->offsets[in->slot];
-        if (in->type == OK_TEXT) {
+        if (in->type == ty_text) {
             pop_pair_rax_rdx(o);
             buf_printf(o, "    mov [rbp-%zu], rax\n", off);
             buf_printf(o, "    mov [rbp-%zu], rdx\n", off + 8);
@@ -307,7 +372,7 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
     }
     case I_LOAD_GLOBAL: {
         Symbol *s = (Symbol *)in->sym;
-        if (in->type == OK_TEXT) {
+        if (in->type == ty_text) {
             buf_printf(o, "    mov rax, [rip+%s]\n", s->mangled);
             buf_printf(o, "    mov rdx, [rip+%s+8]\n", s->mangled);
             push_pair_rax_rdx(o);
@@ -319,7 +384,7 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
     }
     case I_STORE_GLOBAL: {
         Symbol *s = (Symbol *)in->sym;
-        if (in->type == OK_TEXT) {
+        if (in->type == ty_text) {
             pop_pair_rax_rdx(o);
             buf_printf(o, "    mov [rip+%s], rax\n", s->mangled);
             buf_printf(o, "    mov [rip+%s+8], rdx\n", s->mangled);
@@ -338,7 +403,7 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         emit_binop(fc, in);
         break;
     case I_UNOP:
-        if (in->uop == UN_NEG && in->type == OK_DECIMAL) {
+        if (in->uop == UN_NEG && in->type == ty_decimal) {
             pop_xmm0(o);
             buf_puts(o, "    movq rax, xmm0\n    mov rcx, 0x8000000000000000\n    xor rax, rcx\n    movq xmm0, rax\n");
             push_xmm0(o);
@@ -367,7 +432,9 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         emit_call(fc, in);
         break;
     case I_WRITE:
-        switch (in->type) {
+        if (ty_kind(in->type) == OK_ARRAY)
+            OK_ICE("WRITE of array type at %zu:%zu (sema should have rejected it)", in->line, in->col);
+        switch (ty_kind(in->type)) {
         case OK_NUMBER:
             pop_rax(o);
             buf_puts(o, "    mov rdi, rax\n");
@@ -394,12 +461,14 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         call_aligned(o, "rt_print");
         break;
     case I_RETURN:
-        if (in->type == OK_NUMBER || in->type == OK_BOOL) {
+        if (ty_kind(in->type) == OK_ARRAY)
+            OK_ICE("RETURN of array type at %zu:%zu (sema should have rejected it)", in->line, in->col);
+        if (in->type == ty_number || in->type == ty_bool) {
             pop_rax(o);
-        } else if (in->type == OK_DECIMAL) {
+        } else if (in->type == ty_decimal) {
             pop_xmm0(o);
             buf_puts(o, "    movq rax, xmm0\n");
-        } else if (in->type == OK_TEXT) {
+        } else if (in->type == ty_text) {
             pop_pair_rax_rdx(o);
         } else {
             buf_puts(o, "    xor eax, eax\n");
@@ -407,8 +476,82 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         buf_puts(o, "    leave\n    ret\n");
         break;
     case I_POP: {
-        size_t w = (in->type == OK_TEXT) ? 16 : 8;
+        /* arrays travel as 8-byte addresses on the operand stack */
+        size_t w = (ty_kind(in->type) == OK_ARRAY) ? 8
+                 : (ty_bytes(in->type) ? ty_bytes(in->type) : 8);
         buf_printf(o, "    add rsp, %zu\n", w);
+        break;
+    }
+    case I_ADDR_LOCAL: {
+        /* slot storage starts at [rbp-offsets[slot]] and grows toward rbp */
+        size_t base = fc->offsets[in->slot];
+        long disp = (long)in->i - (long)base;
+        lea_rbp(o, disp);
+        push_rax(o);
+        break;
+    }
+    case I_ADDR_GLOBAL: {
+        Symbol *sym = (Symbol *)in->sym;
+        buf_printf(o, "    lea rax, [rip+%s]\n", sym->mangled);
+        if (in->i) buf_printf(o, "    add rax, %llu\n", (unsigned long long)in->i);
+        push_rax(o);
+        break;
+    }
+    case I_INDEX: {
+        /* pop index (rcx), pop base (rax); unsigned bounds check; scale */
+        size_t count = in->type ? in->type->count : 0;
+        size_t esz = in->type ? ty_bytes(in->type->elem) : 8;
+        buf_puts(o, "    pop rcx\n    pop rax\n");
+        buf_printf(o, "    cmp rcx, %zu\n", count);
+        buf_printf(o, "    jb .Lbok_%zu_%zu\n", fc->func_seq, fc->trap_seq);
+        /* out of bounds: rt_bounds_trap(index, count) never returns */
+        buf_puts(o, "    mov rdi, rcx\n");
+        buf_printf(o, "    mov rsi, %zu\n", count);
+        call_aligned(o, "rt_bounds_trap");
+        buf_printf(o, ".Lbok_%zu_%zu:\n", fc->func_seq, fc->trap_seq);
+        fc->trap_seq++;
+        if (esz == 1 || esz == 2 || esz == 4 || esz == 8) {
+            buf_printf(o, "    lea rax, [rax + rcx*%zu]\n", esz);
+        } else {
+            buf_printf(o, "    imul rcx, rcx, %zu\n", esz);
+            buf_puts(o, "    add rax, rcx\n");
+        }
+        push_rax(o);
+        break;
+    }
+    case I_LOAD_AT: {
+        buf_puts(o, "    pop rax\n"); /* address */
+        switch (ty_kind(in->type)) {
+        case OK_NUMBER: case OK_BOOL: case OK_DECIMAL:
+            buf_puts(o, "    mov rax, [rax]\n"); /* decimal: raw bits */
+            push_rax(o);
+            break;
+        case OK_TEXT:
+            buf_puts(o, "    mov rdx, [rax+8]\n    mov rax, [rax]\n");
+            push_pair_rax_rdx(o);
+            break;
+        default:
+            OK_ICE("LOAD_AT of %s at %zu:%zu", ok_type_name(in->type), in->line, in->col);
+        }
+        break;
+    }
+    case I_STORE_AT: {
+        if (in->type == ty_text) {
+            pop_pair_rax_rdx(o); /* rax = ptr, rdx = len */
+            buf_puts(o, "    pop rcx\n"); /* address */
+            buf_puts(o, "    mov [rcx], rax\n    mov [rcx+8], rdx\n");
+        } else {
+            pop_rax(o);      /* value (or decimal bits) */
+            buf_puts(o, "    pop rcx\n"); /* address */
+            buf_puts(o, "    mov [rcx], rax\n");
+        }
+        break;
+    }
+    case I_COPY: {
+        /* pop src (rsi), pop dst (rdi); copy i bytes as 8-byte words */
+        buf_puts(o, "    pop rsi\n    pop rdi\n");
+        buf_printf(o, "    mov rcx, %llu\n    rep movsq\n",
+                   (unsigned long long)(in->i / 8));
         break;
     }
     default:
@@ -427,11 +570,61 @@ static void emit_bytes_as_dotbyte(Buf *o, const char *bytes, size_t len) {
     buf_puts(o, "\n");
 }
 
+/* ---- global data emission (arrays included, spec §8.4) ---- */
+
+typedef struct {
+    Buf *rodata;         /* text bytes of initializers land here */
+    Buf *data;           /* storage words land here */
+    size_t text_seq;     /* .Lgstr label counter */
+} GlobCtx;
+
+/* emit one constant value (or a whole array of them) into the data buffer;
+ * text leaves get .rodata labels first. `label` names the storage start. */
+static void emit_const_elems(GlobCtx *g, const char *label, OkType t, ConstVal *cv) {
+    if (label) buf_printf(g->data, "%s:\n", label);
+    if (ty_kind(t) == OK_ARRAY) {
+        for (size_t k = 0; k < t->count; k++) {
+            ConstVal *ev = (cv && k < cv->nelems) ? &cv->elems[k] : NULL;
+            if (!ev || !ev->valid) {
+                /* broken element: sema reported; zeros keep the layout */
+                buf_printf(g->data, "    .zero %zu\n", ty_bytes(t->elem) ? ty_bytes(t->elem) : 8);
+                continue;
+            }
+            emit_const_elems(g, NULL, t->elem, ev);
+        }
+        return;
+    }
+    switch (ty_kind(t)) {
+    case OK_NUMBER:
+        buf_printf(g->data, "    .quad %llu\n", (unsigned long long)cv->i);
+        break;
+    case OK_BOOL:
+        buf_printf(g->data, "    .quad %d\n", cv->b ? 1 : 0);
+        break;
+    case OK_DECIMAL: {
+        union { double d; uint64_t u; } u;
+        u.d = cv->d;
+        buf_printf(g->data, "    .quad 0x%016llx\n", (unsigned long long)u.u);
+        break;
+    }
+    case OK_TEXT: {
+        char lbl[32];
+        snprintf(lbl, sizeof lbl, ".Lgstr%zu", g->text_seq++);
+        buf_printf(g->rodata, "%s:\n", lbl);
+        emit_bytes_as_dotbyte(g->rodata, cv->t, cv->t_len);
+        buf_printf(g->data, "    .quad %s, %zu\n", lbl, cv->t_len);
+        break;
+    }
+    default:
+        buf_printf(g->data, "    .quad 0\n");
+    }
+}
+
 bool codegen_module(IrModule *im, const char *out_path) {
     Buf o;
     buf_init(&o);
 
-    buf_puts(&o, "# Okular 0.1 bootstrap — x86-64 Linux assembly\n");
+    buf_puts(&o, "# Okular 0.2 bootstrap — x86-64 Linux assembly\n");
     buf_puts(&o, "# module: ");
     buf_puts(&o, im->mod->name);
     buf_puts(&o, "\n    .intel_syntax noprefix\n\n    .text\n");
@@ -439,6 +632,25 @@ bool codegen_module(IrModule *im, const char *out_path) {
     for (size_t i = 0; i < im->funcs.len; i++) {
         IrFunc *f = im->funcs.items[i];
         gen_function(&o, im, f, i);
+    }
+
+    /* global initializers: text bytes to .rodata, words to .data */
+    Buf rodata, data;
+    buf_init(&rodata);
+    buf_init(&data);
+    GlobCtx gc = { &rodata, &data, 0 };
+    for (size_t i = 0; i < im->globals.len; i++) {
+        Symbol *s = im->globals.items[i];
+        size_t bytes = ty_bytes(s->type) ? ty_bytes(s->type) : 8;
+        buf_printf(&data, "    .globl %s\n", s->mangled);
+        if (!s->cval.valid) {
+            /* broken initializer: sema reported; zeroed storage keeps
+             * linking sound for the erroring-module path */
+            buf_printf(&data, "    .balign 8\n%s: .zero %zu\n", s->mangled, bytes);
+            continue;
+        }
+        buf_printf(&data, "    .balign 8\n");
+        emit_const_elems(&gc, s->mangled, s->type, &s->cval);
     }
 
     /* text literals */
@@ -450,57 +662,16 @@ bool codegen_module(IrModule *im, const char *out_path) {
         }
     }
 
-    /* global text initializers need labels too */
-    size_t ngtext = 0;
-    for (size_t i = 0; i < im->globals.len; i++) {
-        Symbol *s = im->globals.items[i];
-        if (s->type == OK_TEXT && s->cval.valid) ngtext++;
-    }
-    if (ngtext > 0) {
+    if (rodata.len > 0) {
         buf_puts(&o, "\n    .section .rodata\n");
-        size_t k = 0;
-        for (size_t i = 0; i < im->globals.len; i++) {
-            Symbol *s = im->globals.items[i];
-            if (s->type != OK_TEXT || !s->cval.valid) continue;
-            buf_printf(&o, ".Lgstr%zu:\n", k++);
-            emit_bytes_as_dotbyte(&o, s->cval.t, s->cval.t_len);
-        }
+        buf_put(&o, rodata.data, rodata.len);
     }
-
-    /* globals */
-    if (im->globals.len > 0) {
+    if (data.len > 0) {
         buf_puts(&o, "\n    .section .data\n");
-        size_t k = 0;
-        for (size_t i = 0; i < im->globals.len; i++) {
-            Symbol *s = im->globals.items[i];
-            if (!s->cval.valid) {
-                /* broken initializer: sema reported; emit zeroed storage so
-                 * linking still succeeds for the erroring module path */
-                buf_printf(&o, "%s: .quad 0\n", s->mangled);
-                if (s->type == OK_TEXT) buf_printf(&o, "    .quad 0\n");
-                continue;
-            }
-            switch (s->type) {
-            case OK_NUMBER:
-                buf_printf(&o, "%s: .quad %llu\n", s->mangled, (unsigned long long)s->cval.i);
-                break;
-            case OK_BOOL:
-                buf_printf(&o, "%s: .quad %d\n", s->mangled, s->cval.b ? 1 : 0);
-                break;
-            case OK_DECIMAL: {
-                union { double d; uint64_t u; } u;
-                u.d = s->cval.d;
-                buf_printf(&o, "%s: .quad 0x%016llx\n", s->mangled, (unsigned long long)u.u);
-                break;
-            }
-            case OK_TEXT:
-                buf_printf(&o, "%s: .quad .Lgstr%zu, %zu\n", s->mangled, k++, s->cval.t_len);
-                break;
-            default:
-                buf_printf(&o, "%s: .quad 0\n", s->mangled);
-            }
-        }
+        buf_put(&o, data.data, data.len);
     }
+    buf_free(&rodata);
+    buf_free(&data);
 
     FILE *fp = fopen(out_path, "w");
     if (!fp) {

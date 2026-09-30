@@ -1,0 +1,10 @@
+type.text=1
+type.array<type.number, 3> xs = {1, 2, 3}
+write(xs[0])
+print
+write(xs[2])
+print
+write(xs[3])
+print
+write("unreachable")
+print

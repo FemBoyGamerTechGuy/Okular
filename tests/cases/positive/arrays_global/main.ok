@@ -1,0 +1,23 @@
+type.text=1
+
+type.array<type.number, 3> g = {5, 10, 15}
+
+config = {
+    type.array<type.text, 2> labels = {"lo", "hi"}
+    type.array<type.bool, 2> flags = {true, false}
+}.end
+
+write(g[2])
+print
+write(config.labels[1])
+write(" ")
+write(config.flags[0])
+print
+
+type.array<type.number, 3> copy = {0, 0, 0}
+copy = g
+copy[0] = 777
+write(copy[0])
+write(" ")
+write(g[0])
+print

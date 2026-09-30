@@ -1,0 +1,1 @@
+only array elements can be indexed for assignment

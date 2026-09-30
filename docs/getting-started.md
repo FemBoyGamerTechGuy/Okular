@@ -1,11 +1,11 @@
 # Getting Started with Okular
 
-**Okular 0.1** — a natively compiled systems language. This guide takes you
+**Okular 0.2** — a natively compiled systems language. This guide takes you
 from zero to a running executable.
 
 ## Requirements
 
-* Linux on x86-64 (the 0.1 bootstrap target; ARM64 is planned)
+* Linux on x86-64 (the 0.2 bootstrap target; ARM64 is planned)
 * A C compiler (`cc`), GNU `as` and `ld` (binutils) — used to build the
   bootstrap compiler and to assemble/link its output
 * GNU make
@@ -15,7 +15,7 @@ from zero to a running executable.
 ```console
 $ make
 $ ./build/okular --version
-Okular 0.1
+Okular 0.2
 ```
 
 The build produces:
@@ -90,7 +90,7 @@ MyProject/
 ├── main.ok          entry point + program body
 ├── src/
 │   └── greeting.ok  reusable component
-├── libs/            project libraries (validated in 0.1; binding is planned)
+├── libs/            project libraries (validated in 0.2; binding is planned)
 ├── deps/            external dependencies
 └── etc/             reserved
 ```
@@ -116,7 +116,7 @@ the build always fails.
 ## Where to go next
 
 * `docs/language-basics.md` — a tour of the language
-* `specs/spec-v0.1.md` — the specification (with an honest status table)
+* `specs/spec-v0.2.md` — the specification (with an honest status table)
 * `docs/architecture.md` — how the compiler works
 * `docs/roadmap.md` — what comes next (heap, pointers, structs, arrays…)
 * `examples/` — runnable programs (`examples/HelloProject` shows a full

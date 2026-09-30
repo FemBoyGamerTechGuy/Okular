@@ -1,0 +1,61 @@
+# arrays — fixed-length, value-copied, bounds-checked (spec 8.4 / 9)
+#
+# type.array<element type, count> name = { e1, e2, ... }
+#   name[index]        reads an element (index must be `number`)
+#   name[index] = v    writes an element
+#   a = b              copies the whole array (value semantics)
+#
+# Bounds are always checked at runtime: an out-of-bounds index is a
+# fatal trap naming the index and the length.
+
+type.text=1
+
+type.array<type.number, 5> scores = {10, 20, 30, 40, 50}
+
+loop (i from 0 until 5) {
+    write(scores[i])
+    write(" ")
+}
+print
+
+scores[2] = 99
+write(scores[2])
+print
+
+# functions take arrays by value: the callee gets its own copy
+function.sum(type.array<type.number, 5>.xs) -> number {
+    type.number total = 0
+    loop (i from 0 until 5) {
+        total = total + xs[i]
+    }
+    return total
+}
+write(sum(scores))
+print
+
+# assignment copies; modifying the copy leaves the original alone
+type.array<type.number, 5> copy = {0, 0, 0, 0, 0}
+copy = scores
+copy[0] = 1234
+write(copy[0])
+write(" ")
+write(scores[0])
+print
+
+# arrays nest: a small 2 x 3 grid
+type.array<type.array<type.number, 3>, 2> grid = {{1, 2, 3}, {4, 5, 6}}
+grid[1][2] = 60
+loop (i from 0 until 2) {
+    loop (j from 0 until 3) {
+        write(grid[i][j])
+        write(" ")
+    }
+}
+print
+
+# text arrays too
+type.array<type.text, 3> names = {"Ada", "Grace", "Linus"}
+write(names[1])
+print
+
+return 0

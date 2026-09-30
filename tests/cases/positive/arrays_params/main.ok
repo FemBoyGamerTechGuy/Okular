@@ -1,0 +1,13 @@
+type.text=1
+
+[source.files.use] = {
+    "stats"
+}.end
+
+type.array<type.number, 5> xs = {2, 4, 6, 8, 10}
+write(stats.sum(xs))
+print
+
+type.array<type.number, 3> ys = {5, 9, 1}
+write(stats.max3(ys))
+print

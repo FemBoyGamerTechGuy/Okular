@@ -1,0 +1,6 @@
+type.text=1
+function.f(type.array<type.number, 2>.xs) -> number {
+    return xs[0]
+}
+type.array<type.number, 3> a = {1, 2, 3}
+write(f(a))

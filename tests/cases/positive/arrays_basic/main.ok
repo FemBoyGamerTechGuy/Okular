@@ -1,0 +1,30 @@
+type.text=1
+
+type.array<type.number, 5> scores = {10, 20, 30, 40, 50}
+
+loop (i from 0 until 5) {
+    write(scores[i])
+    write(" ")
+}
+print
+
+scores[2] = 99
+write(scores[2])
+print
+
+type.number total = 0
+loop (i from 0 to 4) {
+    total = total + scores[i]
+}
+write(total)
+print
+
+type.array<type.bool, 3> flags = {true, false, true}
+when (flags[0] and flags[2]) {
+    write("both true")
+    print
+}
+
+type.array<type.decimal, 3> d = {0.5, 1.25, 2.75}
+write(d[1])
+print

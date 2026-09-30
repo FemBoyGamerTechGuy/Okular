@@ -1,0 +1,6 @@
+type.text=1
+type.array<type.number, 2> a = {1, 2}
+type.array<type.number, 2> b = {1, 2}
+when (a == b) {
+    write(1)
+}

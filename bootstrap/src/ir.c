@@ -57,8 +57,8 @@ static void build_expr(Ctx *c, Node *e);
 /* build operand and widen number->decimal if the parent needs decimal */
 static void build_operand_conv(Ctx *c, Node *operand, OkType want) {
     build_expr(c, operand);
-    if (want == OK_DECIMAL && operand->rtype == OK_NUMBER) {
-        IrInst inst = { .kind = I_CONV_NUM_DEC, .type = OK_DECIMAL,
+    if (want == ty_decimal && operand->rtype == ty_number) {
+        IrInst inst = { .kind = I_CONV_NUM_DEC, .type = ty_decimal,
                         .line = operand->line, .col = operand->col };
         emit(c->f, inst);
     }
@@ -78,29 +78,62 @@ static void build_store(Ctx *c, Symbol *sym) {
     emit(c->f, inst);
 }
 
+/* push the address of sym's storage (+ byte offset) — arrays are addressed */
+static void build_addr(Ctx *c, Symbol *sym, size_t offset) {
+    IrInst inst = { .line = sym->line, .col = sym->col, .i = offset };
+    if (sym->is_global) {
+        inst.kind = I_ADDR_GLOBAL;
+        inst.sym = sym;
+        inst.type = sym->type;
+    } else {
+        inst.kind = I_ADDR_LOCAL;
+        inst.slot = slot_for(c->f, sym);
+        inst.type = sym->type;
+    }
+    emit(c->f, inst);
+}
+
+/* initialize an array variable's storage from an A_ARRAYLIT (spec §8.4):
+ * element k lands at storage + k * elem-bytes; nested literals recurse */
+static void build_arraylit(Ctx *c, Node *lit, Symbol *into, size_t base_off, OkType atype) {
+    for (size_t k = 0; k < lit->args.len && k < atype->count; k++) {
+        Node *el = lit->args.items[k];
+        size_t off = base_off + k * ty_bytes(atype->elem);
+        if (el->kind == A_ARRAYLIT) {
+            build_arraylit(c, el, into, off, atype->elem);
+            continue;
+        }
+        build_addr(c, into, off);
+        build_operand_conv(c, el, atype->elem);
+        IrInst st = { .kind = I_STORE_AT, .type = atype->elem,
+                      .line = el->line, .col = el->col };
+        emit(c->f, st);
+    }
+}
+
 static void build_expr(Ctx *c, Node *e) {
     switch (e->kind) {
     case A_INT: {
-        IrInst inst = { .kind = I_CONST_INT, .type = OK_NUMBER, .i = e->ival,
+        IrInst inst = { .kind = I_CONST_INT, .type = ty_number, .i = e->ival,
                         .line = e->line, .col = e->col };
         emit(c->f, inst);
         break;
     }
     case A_DEC: {
-        IrInst inst = { .kind = I_CONST_DEC, .type = OK_DECIMAL, .d = e->dval,
+        IrInst inst = { .kind = I_CONST_DEC, .type = ty_decimal, .d = e->dval,
                         .line = e->line, .col = e->col };
         emit(c->f, inst);
         break;
     }
     case A_BOOL: {
-        IrInst inst = { .kind = I_CONST_BOOL, .type = OK_BOOL, .b = e->bval,
+        IrInst inst = { .kind = I_CONST_BOOL, .type = ty_bool, .b = e->bval,
                         .line = e->line, .col = e->col };
         emit(c->f, inst);
         break;
     }
     case A_TEXT: {
         int idx = intern_text(c->im, e->str, e->str_len);
-        IrInst inst = { .kind = I_CONST_TEXT, .type = OK_TEXT, .text_idx = idx,
+        IrInst inst = { .kind = I_CONST_TEXT, .type = ty_text, .text_idx = idx,
                         .line = e->line, .col = e->col };
         emit(c->f, inst);
         break;
@@ -108,6 +141,12 @@ static void build_expr(Ctx *c, Node *e) {
     case A_PATH: {
         Symbol *s = e->sym;
         if (!s) { OK_ICE("A_PATH without a resolved symbol at %zu:%zu", e->line, e->col); }
+        if (ty_kind(s->type) == OK_ARRAY) {
+            /* arrays evaluate to their storage address (value semantics are
+             * preserved by explicit copies; spec §8.4) */
+            build_addr(c, s, 0);
+            break;
+        }
         IrInst inst = { .line = e->line, .col = e->col };
         if (s->is_global) {
             inst.kind = I_LOAD_GLOBAL;
@@ -119,6 +158,32 @@ static void build_expr(Ctx *c, Node *e) {
             inst.type = s->type;
         }
         emit(c->f, inst);
+        break;
+    }
+    case A_ARRAYLIT: {
+        /* literals are folded into their declaration target by build_stmt;
+         * reaching here means sema let a literal escape (bug or recovery) */
+        OK_ICE("A_ARRAYLIT in expression position at %zu:%zu", e->line, e->col);
+        break;
+    }
+    case A_INDEX: {
+        /* base[index]: base evaluates to an address, index to a number;
+         * I_INDEX bounds-checks and scales (spec §9) */
+        OkType base_ty = e->a->rtype;
+        if (!base_ty || ty_kind(base_ty) != OK_ARRAY) {
+            OK_ICE("A_INDEX with non-array base at %zu:%zu", e->line, e->col);
+        }
+        build_expr(c, e->a);            /* base address */
+        build_operand_conv(c, e->b, ty_number);
+        IrInst ix = { .kind = I_INDEX, .type = base_ty,
+                      .line = e->line, .col = e->col };
+        emit(c->f, ix);
+        if (ty_kind(base_ty->elem) != OK_ARRAY) {
+            IrInst ld = { .kind = I_LOAD_AT, .type = base_ty->elem,
+                          .line = e->line, .col = e->col };
+            emit(c->f, ld);
+        }
+        /* array elements that are themselves arrays stay as addresses */
         break;
     }
     case A_CALL: {
@@ -144,11 +209,11 @@ static void build_expr(Ctx *c, Node *e) {
     }
     case A_BIN: {
         /* operand type after widening: decimal if either side is decimal */
-        OkType want_l = (e->b->rtype == OK_DECIMAL) ? OK_DECIMAL : e->a->rtype;
-        OkType want_r = (e->a->rtype == OK_DECIMAL) ? OK_DECIMAL : e->b->rtype;
+        OkType want_l = (e->b->rtype == ty_decimal) ? ty_decimal : e->a->rtype;
+        OkType want_r = (e->a->rtype == ty_decimal) ? ty_decimal : e->b->rtype;
         build_operand_conv(c, e->a, want_l);
         build_operand_conv(c, e->b, want_r);
-        OkType ot = (want_l == OK_DECIMAL || want_r == OK_DECIMAL) ? OK_DECIMAL : want_l;
+        OkType ot = (want_l == ty_decimal || want_r == ty_decimal) ? ty_decimal : want_l;
         IrInst inst = { .kind = I_BINOP, .op = e->op, .type = ot,
                         .line = e->line, .col = e->col };
         emit(c->f, inst);
@@ -193,16 +258,63 @@ static void build_stmt(StmtCtx *sc, Node *s) {
     IrFunc *f = c->f;
     switch (s->kind) {
     case A_VARDECL: {
-        /* local declaration: evaluate init, convert, store */
+        /* local declaration: literal elements are stored in place; an
+         * array-typed initializer copies; scalars store as before */
         Symbol *sym = s->sym;
+        if (ty_kind(sym->type) == OK_ARRAY && s->a->kind == A_ARRAYLIT) {
+            build_arraylit(c, s->a, sym, 0, sym->type);
+            break;
+        }
+        if (ty_kind(sym->type) == OK_ARRAY) {
+            build_addr(c, sym, 0);          /* dst */
+            build_expr(c, s->a);            /* src address */
+            IrInst cp = { .kind = I_COPY, .type = sym->type, .i = ty_bytes(sym->type),
+                          .line = s->line, .col = s->col };
+            emit(f, cp);
+            break;
+        }
         build_operand_conv(c, s->a, sym->type);
         build_store(c, sym);
         break;
     }
     case A_ASSIGN: {
         Symbol *sym = s->sym;
+        if (ty_kind(sym->type) == OK_ARRAY) {
+            build_addr(c, sym, 0);          /* dst */
+            build_expr(c, s->a);            /* src address */
+            IrInst cp = { .kind = I_COPY, .type = sym->type, .i = ty_bytes(sym->type),
+                          .line = s->line, .col = s->col };
+            emit(f, cp);
+            break;
+        }
         build_operand_conv(c, s->a, sym->type);
         build_store(c, sym);
+        break;
+    }
+    case A_INDEXASSIGN: {
+        /* base[index] = value (m[i][j] nests: s->a is the inner index) */
+        OkType base_ty = s->a->rtype;
+        if (!base_ty || ty_kind(base_ty) != OK_ARRAY) {
+            OK_ICE("A_INDEXASSIGN with non-array base at %zu:%zu", s->line, s->col);
+        }
+        OkType elem = base_ty->elem;
+        build_expr(c, s->a);                 /* base address */
+        build_operand_conv(c, s->b, ty_number);
+        IrInst ix = { .kind = I_INDEX, .type = base_ty,
+                      .line = s->line, .col = s->col };
+        emit(f, ix);
+        if (ty_kind(elem) == OK_ARRAY) {
+            /* element is itself an array: value is its address, copy it */
+            build_expr(c, s->c);
+            IrInst cp = { .kind = I_COPY, .type = elem, .i = ty_bytes(elem),
+                          .line = s->line, .col = s->col };
+            emit(f, cp);
+        } else {
+            build_operand_conv(c, s->c, elem);
+            IrInst st = { .kind = I_STORE_AT, .type = elem,
+                          .line = s->line, .col = s->col };
+            emit(f, st);
+        }
         break;
     }
     case A_EXPRSTMT: {
@@ -210,12 +322,12 @@ static void build_stmt(StmtCtx *sc, Node *s) {
         if (e->kind == A_WRITE) {
             Node *arg = e->args.len ? (Node *)e->args.items[0] : NULL;
             if (arg) build_expr(c, arg);
-            IrInst w = { .kind = I_WRITE, .type = arg ? arg->rtype : OK_VOID,
+            IrInst w = { .kind = I_WRITE, .type = arg ? arg->rtype : ty_void,
                          .line = s->line, .col = s->col };
             emit(f, w);
         } else {
             build_expr(c, e);
-            if (e->kind == A_CALL && ((FuncInfo *)e->finfo)->ret != OK_VOID) {
+            if (e->kind == A_CALL && ((FuncInfo *)e->finfo)->ret != ty_void) {
                 IrInst p = { .kind = I_POP, .type = ((FuncInfo *)e->finfo)->ret,
                              .line = s->line, .col = s->col };
                 emit(f, p);
@@ -226,7 +338,7 @@ static void build_stmt(StmtCtx *sc, Node *s) {
     case A_WRITE: {
         Node *arg = s->args.len ? (Node *)s->args.items[0] : NULL;
         if (arg) build_expr(c, arg);
-        IrInst w = { .kind = I_WRITE, .type = arg ? arg->rtype : OK_VOID,
+        IrInst w = { .kind = I_WRITE, .type = arg ? arg->rtype : ty_void,
                      .line = s->line, .col = s->col };
         emit(f, w);
         break;
@@ -264,7 +376,7 @@ static void build_stmt(StmtCtx *sc, Node *s) {
         bs->name = ok_xmalloc(strlen(ivar->name) + 8);
         sprintf(bs->name, "%s$bound", ivar->name);
         bs->kind = SYM_VAR;
-        bs->type = OK_NUMBER;
+        bs->type = ty_number;
 
         /* init: i = from */
         build_expr(c, s->a);
@@ -280,12 +392,12 @@ static void build_stmt(StmtCtx *sc, Node *s) {
         IrInst lab = { .kind = I_LABEL, .label = l_check };
         emit(f, lab);
         /* i <= bound (to)  /  i < bound (until) */
-        IrInst l1 = { .kind = I_LOAD_LOCAL, .slot = slot_for(f, ivar), .type = OK_NUMBER };
+        IrInst l1 = { .kind = I_LOAD_LOCAL, .slot = slot_for(f, ivar), .type = ty_number };
         emit(f, l1);
-        IrInst l2 = { .kind = I_LOAD_LOCAL, .slot = slot_for(f, bs), .type = OK_NUMBER };
+        IrInst l2 = { .kind = I_LOAD_LOCAL, .slot = slot_for(f, bs), .type = ty_number };
         emit(f, l2);
         IrInst cmp = { .kind = I_BINOP, .op = s->inclusive ? OP_LE : OP_LT,
-                       .type = OK_NUMBER, .line = s->line, .col = s->col };
+                       .type = ty_number, .line = s->line, .col = s->col };
         emit(f, cmp);
         IrInst jf2 = { .kind = I_JMPF, .label = l_exit };
         emit(f, jf2);
@@ -298,11 +410,11 @@ static void build_stmt(StmtCtx *sc, Node *s) {
         IrInst lcont = { .kind = I_LABEL, .label = l_cont };
         emit(f, lcont);
         /* i = i + 1 */
-        IrInst li = { .kind = I_LOAD_LOCAL, .slot = slot_for(f, ivar), .type = OK_NUMBER };
+        IrInst li = { .kind = I_LOAD_LOCAL, .slot = slot_for(f, ivar), .type = ty_number };
         emit(f, li);
-        IrInst one = { .kind = I_CONST_INT, .type = OK_NUMBER, .i = 1 };
+        IrInst one = { .kind = I_CONST_INT, .type = ty_number, .i = 1 };
         emit(f, one);
-        IrInst inc = { .kind = I_BINOP, .op = OP_ADD, .type = OK_NUMBER };
+        IrInst inc = { .kind = I_BINOP, .op = OP_ADD, .type = ty_number };
         emit(f, inc);
         build_store(c, ivar);
         IrInst back = { .kind = I_JMP, .label = l_check };
@@ -354,10 +466,10 @@ static void build_stmt(StmtCtx *sc, Node *s) {
             build_operand_conv(c, s->a, sc->fi->ret);
         } else if (sc->fi->is_entry) {
             /* top-level bare return exits with code 0 (spec §7) */
-            IrInst z = { .kind = I_CONST_INT, .type = OK_NUMBER, .i = 0 };
+            IrInst z = { .kind = I_CONST_INT, .type = ty_number, .i = 0 };
             emit(f, z);
         }
-        IrInst r = { .kind = I_RETURN, .type = s->a ? s->a->rtype : OK_VOID,
+        IrInst r = { .kind = I_RETURN, .type = s->a ? s->a->rtype : ty_void,
                      .line = s->line, .col = s->col };
         emit(f, r);
         break;
@@ -465,10 +577,10 @@ void ir_fold(IrFunc *f) {
         IrInst in = f->insts[pc];
         FoldVal v = { .known = false };
         switch (in.kind) {
-        case I_CONST_INT:  v.known = true; v.type = OK_NUMBER; v.i = in.i; break;
-        case I_CONST_DEC:  v.known = true; v.type = OK_DECIMAL; v.d = in.d; break;
-        case I_CONST_BOOL: v.known = true; v.type = OK_BOOL; v.b = in.b; break;
-        case I_CONST_TEXT: v.known = true; v.type = OK_TEXT; v.text = in.text_idx; break;
+        case I_CONST_INT:  v.known = true; v.type = ty_number; v.i = in.i; break;
+        case I_CONST_DEC:  v.known = true; v.type = ty_decimal; v.d = in.d; break;
+        case I_CONST_BOOL: v.known = true; v.type = ty_bool; v.b = in.b; break;
+        case I_CONST_TEXT: v.known = true; v.type = ty_text; v.text = in.text_idx; break;
         default: break;
         }
 
@@ -476,8 +588,8 @@ void ir_fold(IrFunc *f) {
             FoldVal r = stack[sp - 1], l = stack[sp - 2];
             FoldVal res = { .known = true };
             bool ok = true;
-            if (l.type == OK_NUMBER && r.type == OK_NUMBER) {
-                res.type = OK_NUMBER;
+            if (l.type == ty_number && r.type == ty_number) {
+                res.type = ty_number;
                 switch (in.op) {
                 case OP_ADD: res.i = l.i + r.i; break;
                 case OP_SUB: res.i = l.i - r.i; break;
@@ -485,7 +597,7 @@ void ir_fold(IrFunc *f) {
                 case OP_DIV: if (r.i == 0) { ok = false; break; } res.i = l.i / r.i; break;
                 case OP_MOD: if (r.i == 0) { ok = false; break; } res.i = l.i % r.i; break;
                 default:
-                    res.type = OK_BOOL;
+                    res.type = ty_bool;
                     switch (in.op) {
                     case OP_EQ: res.b = l.i == r.i; break;
                     case OP_NEQ: res.b = l.i != r.i; break;
@@ -496,8 +608,8 @@ void ir_fold(IrFunc *f) {
                     default: ok = false;
                     }
                 }
-            } else if (l.type == OK_DECIMAL && r.type == OK_DECIMAL) {
-                res.type = OK_DECIMAL;
+            } else if (l.type == ty_decimal && r.type == ty_decimal) {
+                res.type = ty_decimal;
                 switch (in.op) {
                 case OP_ADD: res.d = l.d + r.d; break;
                 case OP_SUB: res.d = l.d - r.d; break;
@@ -505,18 +617,18 @@ void ir_fold(IrFunc *f) {
                 case OP_DIV: res.d = l.d / r.d; break;
                 default: ok = false;
                 }
-            } else if (l.type == OK_BOOL && r.type == OK_BOOL) {
-                res.type = OK_BOOL;
+            } else if (l.type == ty_bool && r.type == ty_bool) {
+                res.type = ty_bool;
                 if (in.op == OP_AND) res.b = l.b && r.b;
                 else if (in.op == OP_OR) res.b = l.b || r.b;
                 else if (in.op == OP_EQ) res.b = l.b == r.b;
                 else if (in.op == OP_NEQ) res.b = l.b != r.b;
                 else ok = false;
-            } else if (l.type == OK_TEXT && r.type == OK_TEXT && in.op == OP_EQ) {
-                res.type = OK_BOOL;
+            } else if (l.type == ty_text && r.type == ty_text && in.op == OP_EQ) {
+                res.type = ty_bool;
                 res.b = l.text == r.text;
-            } else if (l.type == OK_TEXT && r.type == OK_TEXT && in.op == OP_NEQ) {
-                res.type = OK_BOOL;
+            } else if (l.type == ty_text && r.type == ty_text && in.op == OP_NEQ) {
+                res.type = ty_bool;
                 res.b = l.text != r.text;
             } else ok = false;
 
@@ -526,10 +638,10 @@ void ir_fold(IrFunc *f) {
                 IrInst ci;
                 memset(&ci, 0, sizeof ci);
                 ci.line = in.line; ci.col = in.col;
-                if (res.type == OK_NUMBER) { ci.kind = I_CONST_INT; ci.i = res.i; ci.type = OK_NUMBER; }
-                else if (res.type == OK_DECIMAL) { ci.kind = I_CONST_DEC; ci.d = res.d; ci.type = OK_DECIMAL; }
-                else if (res.type == OK_BOOL) { ci.kind = I_CONST_BOOL; ci.b = res.b; ci.type = OK_BOOL; }
-                else { ci.kind = I_CONST_TEXT; ci.text_idx = res.text; ci.type = OK_TEXT; }
+                if (res.type == ty_number) { ci.kind = I_CONST_INT; ci.i = res.i; ci.type = ty_number; }
+                else if (res.type == ty_decimal) { ci.kind = I_CONST_DEC; ci.d = res.d; ci.type = ty_decimal; }
+                else if (res.type == ty_bool) { ci.kind = I_CONST_BOOL; ci.b = res.b; ci.type = ty_bool; }
+                else { ci.kind = I_CONST_TEXT; ci.text_idx = res.text; ci.type = ty_text; }
                 out[on++] = ci;
                 continue;
             }
@@ -537,27 +649,27 @@ void ir_fold(IrFunc *f) {
 
         if (in.kind == I_UNOP && sp >= 1 && stack[sp - 1].known) {
             FoldVal a = stack[sp - 1];
-            if (in.uop == UN_NEG && a.type == OK_NUMBER) {
+            if (in.uop == UN_NEG && a.type == ty_number) {
                 sp--;
-                FoldVal res = { .known = true, .type = OK_NUMBER, .i = (uint64_t)(-(int64_t)a.i) };
+                FoldVal res = { .known = true, .type = ty_number, .i = (uint64_t)(-(int64_t)a.i) };
                 stack[sp++] = res;
-                IrInst ci = { .kind = I_CONST_INT, .type = OK_NUMBER, .i = res.i, .line = in.line, .col = in.col };
+                IrInst ci = { .kind = I_CONST_INT, .type = ty_number, .i = res.i, .line = in.line, .col = in.col };
                 out[on++] = ci;
                 continue;
             }
-            if (in.uop == UN_NEG && a.type == OK_DECIMAL) {
+            if (in.uop == UN_NEG && a.type == ty_decimal) {
                 sp--;
-                FoldVal res = { .known = true, .type = OK_DECIMAL, .d = -a.d };
+                FoldVal res = { .known = true, .type = ty_decimal, .d = -a.d };
                 stack[sp++] = res;
-                IrInst ci = { .kind = I_CONST_DEC, .type = OK_DECIMAL, .d = res.d, .line = in.line, .col = in.col };
+                IrInst ci = { .kind = I_CONST_DEC, .type = ty_decimal, .d = res.d, .line = in.line, .col = in.col };
                 out[on++] = ci;
                 continue;
             }
-            if (in.uop == UN_NOT && a.type == OK_BOOL) {
+            if (in.uop == UN_NOT && a.type == ty_bool) {
                 sp--;
-                FoldVal res = { .known = true, .type = OK_BOOL, .b = !a.b };
+                FoldVal res = { .known = true, .type = ty_bool, .b = !a.b };
                 stack[sp++] = res;
-                IrInst ci = { .kind = I_CONST_BOOL, .type = OK_BOOL, .b = res.b, .line = in.line, .col = in.col };
+                IrInst ci = { .kind = I_CONST_BOOL, .type = ty_bool, .b = res.b, .line = in.line, .col = in.col };
                 out[on++] = ci;
                 continue;
             }
@@ -573,33 +685,48 @@ void ir_fold(IrFunc *f) {
         case I_CONV_NUM_DEC:
             if (sp > 0) {
                 FoldVal a = stack[sp - 1];
-                if (a.known && a.type == OK_NUMBER) {
+                if (a.known && a.type == ty_number) {
                     sp--;
-                    stack[sp++] = (FoldVal){ .known = true, .type = OK_DECIMAL, .d = (double)a.i };
-                } else stack[sp - 1].type = OK_DECIMAL;
+                    stack[sp++] = (FoldVal){ .known = true, .type = ty_decimal, .d = (double)a.i };
+                } else stack[sp - 1].type = ty_decimal;
             }
             break;
         case I_BINOP:
             if (sp >= 2) sp -= 2;
             stack[sp++] = (FoldVal){ .known = false,
                 .type = (in.op >= OP_EQ && in.op <= OP_GE) || in.op == OP_AND || in.op == OP_OR
-                        ? OK_BOOL : in.type };
+                        ? ty_bool : in.type };
             break;
         case I_UNOP:
             if (sp >= 1) sp--;
             stack[sp++] = (FoldVal){ .known = false,
-                .type = in.uop == UN_NOT ? OK_BOOL : in.type };
+                .type = in.uop == UN_NOT ? ty_bool : in.type };
             break;
         case I_STORE_LOCAL: case I_STORE_GLOBAL: case I_POP:
         case I_JMPF: case I_WRITE:
             if (sp > 0) sp--;
             break;
+        case I_ADDR_LOCAL: case I_ADDR_GLOBAL:
+            stack[sp++] = (FoldVal){ .known = false, .type = in.type };
+            break;
+        case I_INDEX:
+            if (sp >= 2) sp -= 2;
+            stack[sp++] = (FoldVal){ .known = false,
+                .type = in.type ? in.type->elem : NULL };
+            break;
+        case I_LOAD_AT:
+            if (sp > 0) sp--;
+            stack[sp++] = (FoldVal){ .known = false, .type = in.type };
+            break;
+        case I_STORE_AT: case I_COPY:
+            if (sp >= 2) sp -= 2;
+            break;
         case I_CALL:
             if ((size_t)in.nargs <= sp) sp -= (size_t)in.nargs;
-            if (in.type != OK_VOID) stack[sp++] = (FoldVal){ .known = false, .type = in.type };
+            if (in.type != ty_void) stack[sp++] = (FoldVal){ .known = false, .type = in.type };
             break;
         case I_RETURN:
-            if (in.type != OK_VOID && sp > 0) sp--;
+            if (in.type != ty_void && sp > 0) sp--;
             break;
         case I_LABEL: case I_JMP: case I_PRINT:
             /* control joins: forget everything known */
@@ -641,6 +768,12 @@ static const char *ir_kind_name(IrKind k) {
     case I_PRINT: return "PRINT";
     case I_RETURN: return "RETURN";
     case I_POP: return "POP";
+    case I_ADDR_LOCAL: return "ADDR_LOCAL";
+    case I_ADDR_GLOBAL: return "ADDR_GLOBAL";
+    case I_INDEX: return "INDEX";
+    case I_LOAD_AT: return "LOAD_AT";
+    case I_STORE_AT: return "STORE_AT";
+    case I_COPY: return "COPY";
     }
     return "?";
 }
@@ -673,6 +806,12 @@ void ir_dump(IrModule *im) {
             case I_UNOP: printf(" %s", in->uop == UN_NEG ? "neg" : "not"); break;
             case I_CALL: printf(" %s nargs=%d", ((FuncInfo *)in->sym)->mangled, in->nargs); break;
             case I_LOAD_GLOBAL: case I_STORE_GLOBAL: printf(" %s", ((Symbol *)in->sym)->mangled); break;
+            case I_ADDR_GLOBAL: printf(" %s+%llu", ((Symbol *)in->sym)->mangled,
+                                       (unsigned long long)in->i); break;
+            case I_ADDR_LOCAL: printf(" slot=%d+%llu", in->slot, (unsigned long long)in->i); break;
+            case I_INDEX: case I_LOAD_AT: case I_STORE_AT:
+                printf(" [%s]", ok_type_name(in->type)); break;
+            case I_COPY: printf(" %llu bytes", (unsigned long long)in->i); break;
             default: break;
             }
             printf("\n");

@@ -1,0 +1,44 @@
+# sieve — the sieve of Eratosthenes in Okular
+#
+# A stress test for arrays: a global array, nested loops, index
+# assignment, and enough iterations to prove the compiler's loops,
+# bounds checks, and code generation hold up under real work.
+
+type.text=1
+
+type.array<type.number, 100> is_composite = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+
+loop (i from 2 until 10) {
+    when (is_composite[i] == 0) {
+        type.number multiple = i + i
+        loop (multiple < 100) {
+            is_composite[multiple] = 1
+            multiple = multiple + i
+        }
+    }
+}
+
+type.number primes = 0
+loop (i from 2 until 100) {
+    when (is_composite[i] == 0) {
+        primes = primes + 1
+        write(i)
+        write(" ")
+    }
+}
+print
+
+write("primes below 100: ")
+write(primes)
+print
+
+return 0

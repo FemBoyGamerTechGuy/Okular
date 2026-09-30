@@ -32,6 +32,15 @@ typedef enum {
     I_PRINT,         /*                                        */
     I_RETURN,        /* optional value on stack               */
     I_POP,           /* discard top                            */
+    /* arrays (spec §8.4/9): address-forming + memory ops.
+     * Array-typed expressions evaluate to an ADDRESS on the operand stack;
+     * scalars evaluate to values. Bounds are always checked. */
+    I_ADDR_LOCAL,    /* slot + i:offset  -> address of slot+off  */
+    I_ADDR_GLOBAL,   /* sym + i:offset   -> address of glob+off  */
+    I_INDEX,         /* type: array; pop index, pop base -> elem addr (checked) */
+    I_LOAD_AT,       /* type; pop addr -> value at addr          */
+    I_STORE_AT,      /* type; pop value, pop addr                */
+    I_COPY,          /* i: bytes; pop src addr, pop dst addr     */
 } IrKind;
 
 typedef struct IrInst {

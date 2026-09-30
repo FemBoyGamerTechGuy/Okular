@@ -1,6 +1,6 @@
 # Okular Bootstrap Compiler — Architecture
 
-**Version:** 0.1
+**Version:** 0.2
 **Applies to:** `bootstrap/` (the C implementation)
 
 > The C implementation is scaffolding. It exists because Okular does not yet
@@ -143,7 +143,7 @@ PRINT_FLUSH               ; statement
 RETURN
 ```
 
-`ir.c` contains the only optimization pass in 0.1: constant folding
+`ir.c` contains the only optimization pass in 0.2: constant folding
 (replaces `BINOP` over two foldable constants; used both for global
 initializer checking and for `-xw` diagnostics like always-true comparisons).
 The pass framework is a simple function-pointer list over functions — the
@@ -157,15 +157,27 @@ x86-64, Linux, freestanding:
   (`push`/`pop` with `rax`/`rcx`/`xmm0`). Correctness before speed — the
   optimization milestone will lower through registers properly.
 * Locals live at `rbp`-relative slots; every slot is 8 bytes for scalars,
-  16 for `text` (ptr+len pair). Slots are typed and number-checked.
+  16 for `text` (ptr+len pair), and `N × elem-size` for arrays. Slots are
+  typed and number-checked.
 * Globals live in `.data`/`.bss` under mangled names (`ok_<module>_<name>`).
-* Calling convention: **Okular internal ABI v0** — up to 6 arguments in
+* Calling convention: **Okular internal ABI v1** — up to 6 arguments in
   `rdi, rsi, rdx, rcx, r8, r9` (integer registers only), return in `rax`,
   caller cleans stack for excess args, `rbx`/`r12`–`r15` callee-saved.
   `decimal` values travel as raw bit patterns in integer registers/stack
   slots and live in `xmm` registers only while being computed. This is
   deliberately *not* full System V — SysV interop (XMM arg regs, varargs) is
   a designed milestone gated on FFI. It is our own ABI, documented here.
+* **Arrays (v1)**: array-typed expressions evaluate to an *address* on the
+  operand stack (`ADDR_LOCAL/GLOBAL`, `INDEX`, `LOAD_AT`, `STORE_AT`,
+  `COPY`). Indexing scales by the element size after an unsigned bounds
+  comparison; violations call `rt_bounds_trap` (exit 70). Whole-array
+  assignment and parameter passing lower to `COPY` (`rep movsq`). Array
+  arguments: the caller copies the array into a per-frame scratch block
+  (sized to the largest single call site's array bytes) and passes the
+  copy's address in a register; the callee's prologue copies it into its
+  own slot — value semantics with one register per argument, same shape as
+  `text` pairs. Array globals are `.data` with `.globl` (cross-module
+  access works); text elements point into `.rodata`.
 * Text literals go to `.rodata` with a length table; `text` values are
   (ptr, len) pairs passed by value.
 * The program entry `__ok_entry` is synthesized from `main.ok`'s top-level

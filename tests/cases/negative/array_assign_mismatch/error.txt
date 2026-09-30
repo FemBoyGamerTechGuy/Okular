@@ -1,0 +1,1 @@
+array assignment copies the contents; the types must match exactly

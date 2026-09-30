@@ -1,0 +1,1 @@
+only arrays can be indexed

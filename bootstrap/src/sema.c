@@ -72,11 +72,13 @@ const char *ok_suggest_name(Scope *s, const char *name) {
     return NULL;
 }
 
-/* assignment compatibility (spec §4.4) */
+/* assignment compatibility (spec §4.4). Types are interned, so pointer
+ * equality IS type equality — arrays must match exactly (same element type,
+ * same count); only `number` -> `decimal` widens implicitly. */
 static bool assignable(OkType from, OkType to) {
+    if (!from || !to) return false;
     if (from == to) return true;
-    /* number -> decimal widening only */
-    return from == OK_NUMBER && to == OK_DECIMAL;
+    return from == ty_number && to == ty_decimal;
 }
 
 static const char *path_join_str(char **parts, size_t n) {
@@ -136,8 +138,12 @@ static void collect_toplevel(SemaCtx *c, OkModule *m, Node *file, Scope *scope) 
                 break;
             }
             if (n->nparams > 6) {
-                Diag *d = serr(c, n, "functions with more than 6 parameters are not implemented in Okular 0.1.");
-                diag_note(d, "the 0.1 internal ABI passes up to 6 arguments in registers (docs/architecture.md §3.5); the limit lifts with the stack-args milestone.");
+                Diag *d = serr(c, n, "functions with more than 6 parameters are not implemented in Okular 0.2.");
+                diag_note(d, "the 0.2 internal ABI passes up to 6 arguments in registers (docs/architecture.md §3.5); the limit lifts with the stack-args milestone.");
+            }
+            if (ty_kind(n->otype) == OK_ARRAY) {
+                Diag *d = serr(c, n, "functions cannot return arrays in Okular 0.2.");
+                diag_note(d, "return an element, or pass a destination array when pointers arrive (spec §12).");
             }
             char *mg = mangle(m->name, NULL, n->name);
             FuncInfo *fi = funcinfo_new(n->name, mg, n->otype, n, m);
@@ -201,8 +207,12 @@ static void collect_devcol(SemaCtx *c, OkModule *m, Node *col, Scope *parent,
                 break;
             }
             if (n->nparams > 6) {
-                Diag *d = serr(c, n, "functions with more than 6 parameters are not implemented in Okular 0.1.");
-                diag_note(d, "the 0.1 internal ABI passes up to 6 arguments in registers (docs/architecture.md §3.5).");
+                Diag *d = serr(c, n, "functions with more than 6 parameters are not implemented in Okular 0.2.");
+                diag_note(d, "the 0.2 internal ABI passes up to 6 arguments in registers (docs/architecture.md §3.5).");
+            }
+            if (ty_kind(n->otype) == OK_ARRAY) {
+                Diag *d = serr(c, n, "functions cannot return arrays in Okular 0.2.");
+                diag_note(d, "return an element, or pass a destination array when pointers arrive (spec §12).");
             }
             char *mg = mangle(m->name, colpath, n->name);
             FuncInfo *fi = funcinfo_new(n->name, mg, n->otype, n, m);
@@ -244,20 +254,20 @@ static void collect_devcol(SemaCtx *c, OkModule *m, Node *col, Scope *parent,
 static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
     memset(out, 0, sizeof *out);
     switch (e->kind) {
-    case A_INT:  out->valid = true; out->type = OK_NUMBER; out->i = e->ival; return true;
-    case A_DEC:  out->valid = true; out->type = OK_DECIMAL; out->d = e->dval; return true;
-    case A_BOOL: out->valid = true; out->type = OK_BOOL; out->b = e->bval; return true;
-    case A_TEXT: out->valid = true; out->type = OK_TEXT;
+    case A_INT:  out->valid = true; out->type = ty_number; out->i = e->ival; return true;
+    case A_DEC:  out->valid = true; out->type = ty_decimal; out->d = e->dval; return true;
+    case A_BOOL: out->valid = true; out->type = ty_bool; out->b = e->bval; return true;
+    case A_TEXT: out->valid = true; out->type = ty_text;
         out->t = ok_xstrndup(e->str, e->str_len); out->t_len = e->str_len; return true;
     case A_UN: {
         ConstVal v;
         if (!const_eval(c, e->a, &v)) return false;
         if (e->uop == UN_NEG) {
-            if (v.type == OK_NUMBER) { out->valid = true; out->type = OK_NUMBER; out->i = (uint64_t)(-(int64_t)v.i); return true; }
-            if (v.type == OK_DECIMAL) { out->valid = true; out->type = OK_DECIMAL; out->d = -v.d; return true; }
+            if (v.type == ty_number) { out->valid = true; out->type = ty_number; out->i = (uint64_t)(-(int64_t)v.i); return true; }
+            if (v.type == ty_decimal) { out->valid = true; out->type = ty_decimal; out->d = -v.d; return true; }
             return false;
         }
-        if (v.type == OK_BOOL) { out->valid = true; out->type = OK_BOOL; out->b = !v.b; return true; }
+        if (v.type == ty_bool) { out->valid = true; out->type = ty_bool; out->b = !v.b; return true; }
         return false;
     }
     case A_BIN: {
@@ -266,10 +276,10 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
         if (l.type != r.type) return false;
         switch (e->op) {
         case OP_ADD:
-            if (l.type == OK_NUMBER) { out->valid = true; out->type = OK_NUMBER; out->i = l.i + r.i; return true; }
-            if (l.type == OK_DECIMAL) { out->valid = true; out->type = OK_DECIMAL; out->d = l.d + r.d; return true; }
-            if (l.type == OK_TEXT) { /* literal concatenation folds (spec §9) */
-                out->valid = true; out->type = OK_TEXT;
+            if (l.type == ty_number) { out->valid = true; out->type = ty_number; out->i = l.i + r.i; return true; }
+            if (l.type == ty_decimal) { out->valid = true; out->type = ty_decimal; out->d = l.d + r.d; return true; }
+            if (l.type == ty_text) { /* literal concatenation folds (spec §9) */
+                out->valid = true; out->type = ty_text;
                 out->t = ok_xmalloc(l.t_len + r.t_len);
                 memcpy(out->t, l.t, l.t_len);
                 memcpy(out->t + l.t_len, r.t, r.t_len);
@@ -279,38 +289,38 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
             }
             return false;
         case OP_SUB:
-            if (l.type == OK_NUMBER) { out->valid = true; out->type = OK_NUMBER; out->i = l.i - r.i; return true; }
-            if (l.type == OK_DECIMAL) { out->valid = true; out->type = OK_DECIMAL; out->d = l.d - r.d; return true; }
+            if (l.type == ty_number) { out->valid = true; out->type = ty_number; out->i = l.i - r.i; return true; }
+            if (l.type == ty_decimal) { out->valid = true; out->type = ty_decimal; out->d = l.d - r.d; return true; }
             return false;
         case OP_MUL:
-            if (l.type == OK_NUMBER) { out->valid = true; out->type = OK_NUMBER; out->i = l.i * r.i; return true; }
-            if (l.type == OK_DECIMAL) { out->valid = true; out->type = OK_DECIMAL; out->d = l.d * r.d; return true; }
+            if (l.type == ty_number) { out->valid = true; out->type = ty_number; out->i = l.i * r.i; return true; }
+            if (l.type == ty_decimal) { out->valid = true; out->type = ty_decimal; out->d = l.d * r.d; return true; }
             return false;
         case OP_DIV:
-            if (l.type == OK_NUMBER) {
+            if (l.type == ty_number) {
                 if (r.i == 0) {
                     serr(c, e, "division by zero in a constant expression.");
                     return false;
                 }
-                out->valid = true; out->type = OK_NUMBER; out->i = l.i / r.i; return true;
+                out->valid = true; out->type = ty_number; out->i = l.i / r.i; return true;
             }
-            if (l.type == OK_DECIMAL) { out->valid = true; out->type = OK_DECIMAL; out->d = l.d / r.d; return true; }
+            if (l.type == ty_decimal) { out->valid = true; out->type = ty_decimal; out->d = l.d / r.d; return true; }
             return false;
         case OP_MOD:
-            if (l.type == OK_NUMBER) {
+            if (l.type == ty_number) {
                 if (r.i == 0) {
                     serr(c, e, "remainder by zero in a constant expression.");
                     return false;
                 }
-                out->valid = true; out->type = OK_NUMBER; out->i = l.i % r.i; return true;
+                out->valid = true; out->type = ty_number; out->i = l.i % r.i; return true;
             }
             return false;
-        case OP_AND: if (l.type == OK_BOOL) { out->valid = true; out->type = OK_BOOL; out->b = l.b && r.b; return true; } return false;
-        case OP_OR:  if (l.type == OK_BOOL) { out->valid = true; out->type = OK_BOOL; out->b = l.b || r.b; return true; } return false;
+        case OP_AND: if (l.type == ty_bool) { out->valid = true; out->type = ty_bool; out->b = l.b && r.b; return true; } return false;
+        case OP_OR:  if (l.type == ty_bool) { out->valid = true; out->type = ty_bool; out->b = l.b || r.b; return true; } return false;
         case OP_EQ: case OP_NEQ: case OP_LT: case OP_LE: case OP_GT: case OP_GE: {
-            out->type = OK_BOOL;
+            out->type = ty_bool;
             bool res = false;
-            if (l.type == OK_NUMBER) {
+            if (l.type == ty_number) {
                 switch (e->op) {
                 case OP_EQ: res = l.i == r.i; break;
                 case OP_NEQ: res = l.i != r.i; break;
@@ -320,7 +330,7 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
                 case OP_GE: res = l.i >= r.i; break;
                 default: return false;
                 }
-            } else if (l.type == OK_DECIMAL) {
+            } else if (l.type == ty_decimal) {
                 switch (e->op) {
                 case OP_EQ: res = l.d == r.d; break;
                 case OP_NEQ: res = l.d != r.d; break;
@@ -330,7 +340,7 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
                 case OP_GE: res = l.d >= r.d; break;
                 default: return false;
                 }
-            } else if (l.type == OK_BOOL) {
+            } else if (l.type == ty_bool) {
                 if (e->op == OP_EQ) res = l.b == r.b;
                 else if (e->op == OP_NEQ) res = l.b != r.b;
                 else return false;
@@ -344,6 +354,108 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
     default:
         return false;
     }
+}
+
+/* ---------------- array literals (spec §8.4) ---------------- */
+
+static OkType check_expr(SemaCtx *c, Node *e); /* fwd: elements are exprs */
+
+/* local (runtime) literal: each element may be any expression assignable to
+ * the element type; nested literals recurse. Reports, returns success. */
+static bool check_array_lit_runtime(SemaCtx *c, Node *lit, OkType atype, const char *what) {
+    bool ok = true;
+    lit->rtype = atype;
+    if (lit->args.len != atype->count) {
+        Diag *d = serr(c, lit, "%s expects %zu element%s, but %zu were given.",
+                       what, atype->count, atype->count == 1 ? "" : "s", lit->args.len);
+        diag_note(d, "the element count is part of the type: %s.", ok_type_name(atype));
+        ok = false;
+    }
+    size_t check_n = lit->args.len < atype->count ? lit->args.len : atype->count;
+    for (size_t k = 0; k < check_n; k++) {
+        Node *el = lit->args.items[k];
+        if (el->kind == A_ARRAYLIT) {
+            if (ty_kind(atype->elem) != OK_ARRAY) {
+                Diag *d = serr(c, el, "element %zu of %s must be `%s`, not a nested array.",
+                               k + 1, what, ok_type_name(atype->elem));
+                (void)d;
+                ok = false;
+                continue;
+            }
+            if (!check_array_lit_runtime(c, el, atype->elem, what)) ok = false;
+            continue;
+        }
+        OkType et = check_expr(c, el);
+        if (!assignable(et, atype->elem)) {
+            Diag *d = serr(c, el, "element %zu of %s must be `%s`, but a `%s` value was given.",
+                           k + 1, what, ok_type_name(atype->elem), ok_type_name(et));
+            diag_note(d, "only `number` -> `decimal` widening is implicit; everything else must match exactly.");
+            ok = false;
+        } else if (et != atype->elem && c->opt->warnings && el->kind != A_INT) {
+            swarn(c, el, "element %zu of %s implicitly widens from `number` to `decimal`.",
+                  k + 1, what);
+        }
+    }
+    return ok;
+}
+
+/* global (constant) literal: elements must fold; builds the ConstVal the
+ * backend emits into .data. Nested literals recurse. */
+static bool check_array_lit_const(SemaCtx *c, Node *lit, OkType atype, const char *what,
+                                  ConstVal *out) {
+    bool ok = true;
+    memset(out, 0, sizeof *out);
+    out->type = atype;
+    out->nelems = lit->args.len;
+    out->elems = ok_xmalloc((lit->args.len ? lit->args.len : 1) * sizeof(ConstVal));
+    if (lit->args.len != atype->count) {
+        Diag *d = serr(c, lit, "%s expects %zu element%s, but %zu were given.",
+                       what, atype->count, atype->count == 1 ? "" : "s", lit->args.len);
+        diag_note(d, "the element count is part of the type: %s.", ok_type_name(atype));
+        ok = false;
+    }
+    size_t check_n = lit->args.len < atype->count ? lit->args.len : atype->count;
+    for (size_t k = 0; k < check_n; k++) {
+        Node *el = lit->args.items[k];
+        if (el->kind == A_ARRAYLIT) {
+            if (ty_kind(atype->elem) != OK_ARRAY) {
+                Diag *d = serr(c, el, "element %zu of %s must be `%s`, not a nested array.",
+                               k + 1, what, ok_type_name(atype->elem));
+                (void)d;
+                ok = false;
+                continue;
+            }
+            if (!check_array_lit_const(c, el, atype->elem, what, &out->elems[k])) ok = false;
+            else out->elems[k].valid = true;
+            continue;
+        }
+        size_t mark = c->de->errors;
+        ConstVal ev;
+        if (!const_eval(c, el, &ev)) {
+            if (c->de->errors == mark) {
+                Diag *d = serr(c, el, "element %zu of %s is not a compile-time constant.",
+                               k + 1, what);
+                diag_note(d, "global array elements must be literal or foldable values (spec §7).");
+            }
+            ok = false;
+            continue;
+        }
+        if (!assignable(ev.type, atype->elem)) {
+            Diag *d = serr(c, el, "element %zu of %s must be `%s`, but a `%s` value was given.",
+                           k + 1, what, ok_type_name(atype->elem), ok_type_name(ev.type));
+            (void)d;
+            ok = false;
+            continue;
+        }
+        if (ev.type == ty_number && atype->elem == ty_decimal) {
+            ev.type = ty_decimal;
+            ev.d = (double)ev.i;  /* literal widening stays silent (spec §4.4) */
+        }
+        ev.valid = true;
+        out->elems[k] = ev;
+    }
+    out->valid = ok;
+    return ok;
 }
 
 /* ---------------- phase 2: check ---------------- */
@@ -406,12 +518,16 @@ static void require_text_feature(SemaCtx *c, Node *n) {
 }
 
 static OkType check_call(SemaCtx *c, Node *n) {
-    const char *full = path_join_str(n->parts, n->nparts);
+    /* path_join_str returns a shared static buffer: copy the call name
+     * before checking arguments, whose own path resolution would
+     * silently overwrite it (found while testing array diagnostics) */
+    char full[256];
+    snprintf(full, sizeof full, "%s", path_join_str(n->parts, n->nparts));
     Symbol *target = resolve_path(c, n, false);
-    if (!target) return OK_VOID;
+    if (!target) return ty_void;
     if (target->kind != SYM_FUNC) {
         serr(c, n, "`%s` is not a function — it cannot be called.", full);
-        return OK_VOID;
+        return ty_void;
     }
     FuncInfo *fi = target->func;
     n->finfo = fi;
@@ -454,10 +570,16 @@ static OkType check_write(SemaCtx *c, Node *n) {
     if (n->args.len != 1) {
         serr(c, n, "`write` takes exactly one value (`write(x)`), but %zu were given.", n->args.len);
     }
-    for (size_t i = 0; i < n->args.len; i++)
-        check_expr(c, (Node *)n->args.items[i]);
-    n->rtype = OK_VOID;
-    return OK_VOID;
+    for (size_t i = 0; i < n->args.len; i++) {
+        Node *arg = n->args.items[i];
+        OkType at = check_expr(c, arg);
+        if (ty_kind(at) == OK_ARRAY) {
+            Diag *d = serr(c, arg, "`write` prints one value at a time, not a whole array.");
+            diag_note(d, "loop over the array and `write(xs[i])` for each element (spec §11).");
+        }
+    }
+    n->rtype = ty_void;
+    return ty_void;
 }
 
 static OkType check_bin(SemaCtx *c, Node *e) {
@@ -466,102 +588,109 @@ static OkType check_bin(SemaCtx *c, Node *e) {
 
     switch (e->op) {
     case OP_AND: case OP_OR: {
-        if (lt != OK_BOOL || rt != OK_BOOL) {
+        if (lt != ty_bool || rt != ty_bool) {
             serr(c, e, "`and`/`or` combine `bool` values, but `%s` and `%s` were given.",
                  ok_type_name(lt), ok_type_name(rt));
         }
-        e->rtype = OK_BOOL;
-        return OK_BOOL;
+        e->rtype = ty_bool;
+        return ty_bool;
     }
     case OP_EQ: case OP_NEQ: {
-        if (lt == OK_TEXT && rt == OK_TEXT) { e->rtype = OK_BOOL; return OK_BOOL; }
-        if (lt == OK_BOOL && rt == OK_BOOL) { e->rtype = OK_BOOL; return OK_BOOL; }
+        if (ty_kind(lt) == OK_ARRAY || ty_kind(rt) == OK_ARRAY) {
+            Diag *d = serr(c, e, "arrays are not comparable with `%s` in 0.2.",
+                           e->op == OP_EQ ? "==" : "!=");
+            diag_note(d, "compare elements individually (for example inside a loop).");
+            e->rtype = ty_bool;
+            return ty_bool;
+        }
+        if (lt == ty_text && rt == ty_text) { e->rtype = ty_bool; return ty_bool; }
+        if (lt == ty_bool && rt == ty_bool) { e->rtype = ty_bool; return ty_bool; }
         if (assignable(lt, rt) || assignable(rt, lt)) {
             if (lt != rt && c->opt->warnings && !(e->a->kind == A_INT) && !(e->b->kind == A_INT))
                 swarn(c, e, "comparison mixes `number` and `decimal` — the `number` side widens.");
-            e->rtype = OK_BOOL;
-            return OK_BOOL;
+            e->rtype = ty_bool;
+            return ty_bool;
         }
         serr(c, e, "`%s` and `%s` cannot be compared for equality.",
              ok_type_name(lt), ok_type_name(rt));
-        e->rtype = OK_BOOL;
-        return OK_BOOL;
+        e->rtype = ty_bool;
+        return ty_bool;
     }
     case OP_LT: case OP_LE: case OP_GT: case OP_GE: {
-        if ((lt == OK_NUMBER || lt == OK_DECIMAL) && (rt == OK_NUMBER || rt == OK_DECIMAL)) {
+        if ((lt == ty_number || lt == ty_decimal) && (rt == ty_number || rt == ty_decimal)) {
             if (lt != rt && c->opt->warnings && !(e->a->kind == A_INT) && !(e->b->kind == A_INT))
                 swarn(c, e, "comparison mixes `number` and `decimal` — the `number` side widens.");
-            e->rtype = OK_BOOL;
-            return OK_BOOL;
+            e->rtype = ty_bool;
+            return ty_bool;
         }
-        if (lt == OK_TEXT && rt == OK_TEXT) {
+        if (lt == ty_text && rt == ty_text) {
             serr(c, e, "text is not ordered — only `==` and `!=` are defined for `text` in 0.1.");
-            e->rtype = OK_BOOL;
-            return OK_BOOL;
+            e->rtype = ty_bool;
+            return ty_bool;
         }
         serr(c, e, "`%s` and `%s` cannot be ordered.", ok_type_name(lt), ok_type_name(rt));
-        e->rtype = OK_BOOL;
-        return OK_BOOL;
+        e->rtype = ty_bool;
+        return ty_bool;
     }
     case OP_ADD: {
-        if (lt == OK_TEXT && rt == OK_TEXT) { e->rtype = OK_TEXT; return OK_TEXT; }
+        if (lt == ty_text && rt == ty_text) { e->rtype = ty_text; return ty_text; }
         goto arith;
     }
     case OP_SUB: case OP_MUL: case OP_DIV: {
-        if (lt == OK_TEXT || rt == OK_TEXT) {
+        if (lt == ty_text || rt == ty_text) {
             serr(c, e, "`+` concatenates `text` with `text`; `%s` and `%s` do not combine.",
                  ok_type_name(lt), ok_type_name(rt));
-            e->rtype = lt == OK_TEXT ? OK_TEXT : OK_NUMBER;
+            e->rtype = lt == ty_text ? ty_text : ty_number;
             return e->rtype;
         }
         goto arith;
     }
     case OP_MOD: {
-        if (lt == OK_NUMBER && rt == OK_NUMBER) { e->rtype = OK_NUMBER; return OK_NUMBER; }
-        if (lt == OK_DECIMAL || rt == OK_DECIMAL) {
+        if (lt == ty_number && rt == ty_number) { e->rtype = ty_number; return ty_number; }
+        if (lt == ty_decimal || rt == ty_decimal) {
             serr(c, e, "remainder (`%%`) is defined for `number` only in 0.1; a decimal remainder builtin is planned.");
         } else {
             serr(c, e, "`%%` needs `number` operands, but `%s` and `%s` were given.",
                  ok_type_name(lt), ok_type_name(rt));
         }
-        e->rtype = OK_NUMBER;
-        return OK_NUMBER;
+        e->rtype = ty_number;
+        return ty_number;
     }
     }
 arith: ;
-    bool numnum = lt == OK_NUMBER && rt == OK_NUMBER;
-    bool numdec = (lt == OK_NUMBER && rt == OK_DECIMAL) || (lt == OK_DECIMAL && rt == OK_NUMBER);
-    bool decdec = lt == OK_DECIMAL && rt == OK_DECIMAL;
-    if (numnum) { e->rtype = OK_NUMBER; return OK_NUMBER; }
+    bool numnum = lt == ty_number && rt == ty_number;
+    bool numdec = (lt == ty_number && rt == ty_decimal) || (lt == ty_decimal && rt == ty_number);
+    bool decdec = lt == ty_decimal && rt == ty_decimal;
+    if (numnum) { e->rtype = ty_number; return ty_number; }
     if (numdec || decdec) {
         if (numdec && c->opt->warnings) {
             /* literal number in a decimal context is silent (spec §4.4) */
-            if (!(e->a->kind == A_INT && lt == OK_NUMBER) && !(e->b->kind == A_INT && rt == OK_NUMBER))
+            if (!(e->a->kind == A_INT && lt == ty_number) && !(e->b->kind == A_INT && rt == ty_number))
                 swarn(c, e, "arithmetic mixes `number` and `decimal` — the `number` operand widens to `decimal`.");
         }
-        e->rtype = OK_DECIMAL;
-        return OK_DECIMAL;
+        e->rtype = ty_decimal;
+        return ty_decimal;
     }
-    if (lt == OK_BOOL || rt == OK_BOOL) {
+    if (lt == ty_bool || rt == ty_bool) {
         serr(c, e, "`bool` values do not take arithmetic (use `and`/`or`/`not`).");
     } else {
         serr(c, e, "`%s` and `%s` do not combine arithmetically.",
              ok_type_name(lt), ok_type_name(rt));
     }
-    e->rtype = OK_NUMBER;
-    return OK_NUMBER;
+    e->rtype = ty_number;
+    return ty_number;
 }
 
 static OkType check_expr(SemaCtx *c, Node *e) {
     e->checked = true;
     switch (e->kind) {
-    case A_INT:  e->rtype = OK_NUMBER; return OK_NUMBER;
-    case A_DEC:  e->rtype = OK_DECIMAL; return OK_DECIMAL;
-    case A_BOOL: e->rtype = OK_BOOL; return OK_BOOL;
-    case A_TEXT: e->rtype = OK_TEXT; return OK_TEXT;
+    case A_INT:  e->rtype = ty_number; return ty_number;
+    case A_DEC:  e->rtype = ty_decimal; return ty_decimal;
+    case A_BOOL: e->rtype = ty_bool; return ty_bool;
+    case A_TEXT: e->rtype = ty_text; return ty_text;
     case A_PATH: {
         Symbol *s = resolve_path(c, e, true);
-        if (!s) { e->rtype = OK_NUMBER; return OK_NUMBER; }
+        if (!s) { e->rtype = ty_number; return ty_number; }
         e->sym = s;
         e->rtype = s->type;
         return s->type;
@@ -569,23 +698,46 @@ static OkType check_expr(SemaCtx *c, Node *e) {
     case A_CALL:  return check_call(c, e);
     case A_WRITE: return check_write(c, e);
     case A_BIN:   return check_bin(c, e);
+    case A_ARRAYLIT: {
+        Diag *d = serr(c, e, "an array literal belongs to a declaration: `type.array<type.number, 3> xs = { ... }`.");
+        diag_note(d, "assignment copies whole arrays from other arrays; literals are for declarations (spec §8.4).");
+        e->rtype = NULL;
+        return NULL;
+    }
+    case A_INDEX: {
+        OkType bt = check_expr(c, e->a);
+        if (!bt || ty_kind(bt) != OK_ARRAY) {
+            Diag *d = serr(c, e, "this value is a `%s` — only arrays can be indexed.", ok_type_name(bt));
+            diag_note(d, "array indexing is `name[index]`; the index must be a `number` (spec §9).");
+            check_expr(c, e->b); /* still check the index */
+            e->rtype = ty_number;
+            return ty_number;
+        }
+        OkType it = check_expr(c, e->b);
+        if (it != ty_number) {
+            Diag *d = serr(c, e->b, "the array index must be `number`, but `%s` was given.", ok_type_name(it));
+            diag_note(d, "indices are whole numbers; out-of-bounds access is a runtime trap (spec §8.4).");
+        }
+        e->rtype = bt->elem;
+        return bt->elem;
+    }
     case A_UN: {
         OkType t = check_expr(c, e->a);
         if (e->uop == UN_NEG) {
-            if (t != OK_NUMBER && t != OK_DECIMAL)
+            if (t != ty_number && t != ty_decimal)
                 serr(c, e, "unary `-` needs a `number` or `decimal`, but `%s` was given.", ok_type_name(t));
             e->rtype = t;
             return t;
         }
-        if (t != OK_BOOL)
+        if (t != ty_bool)
             serr(c, e, "`not` needs a `bool`, but `%s` was given.", ok_type_name(t));
-        e->rtype = OK_BOOL;
-        return OK_BOOL;
+        e->rtype = ty_bool;
+        return ty_bool;
     }
     default:
         serr(c, e, "this expression form is not valid here.");
-        e->rtype = OK_VOID;
-        return OK_VOID;
+        e->rtype = ty_void;
+        return ty_void;
     }
 }
 
@@ -632,7 +784,7 @@ static void check_func_body(SemaCtx *c, Node *fn, FuncInfo *fi) {
     check_stmt_list(c, &fn->body);
 
     /* valued functions must return on every path (spec §8.2) */
-    if (fi->ret != OK_VOID && !list_returns(&fn->body)) {
+    if (fi->ret != ty_void && !list_returns(&fn->body)) {
         Diag *d = serr(c, fn, "function `%s` promises a `%s` result, but some paths fall off the end without `return`.",
                        fi->name, ok_type_name(fi->ret));
         diag_note(d, "Okular checks every exit path conservatively: loops never count as guaranteed returns.");
@@ -655,6 +807,34 @@ static void check_func_body(SemaCtx *c, Node *fn, FuncInfo *fi) {
 static void check_stmt(SemaCtx *c, Node *s) {
     switch (s->kind) {
     case A_VARDECL: {
+        if (ty_kind(s->otype) == OK_ARRAY) {
+            if (s->a->kind == A_ARRAYLIT) {
+                check_array_lit_runtime(c, s->a, s->otype, s->name);
+            } else {
+                OkType it = check_expr(c, s->a);
+                if (it != s->otype) {
+                    Diag *d = serr(c, s, "variable `%s` is `%s`, but the initializer is `%s`.",
+                                   s->name, ok_type_name(s->otype), ok_type_name(it));
+                    diag_note(d, "array copies require the exact same array type (element type and count).");
+                }
+            }
+            Symbol *ex = scope_insert(c->cur_scope, s->name, SYM_VAR, s->line, s->col);
+            if (ex->decl && ex->decl != s) {
+                serr(c, s, "duplicate definition of `%s` in this scope.", s->name);
+                break;
+            }
+            ex->type = s->otype;
+            ex->decl = s;
+            s->sym = ex;
+            break;
+        }
+        if (s->a->kind == A_ARRAYLIT) {
+            Diag *d = serr(c, s, "variable `%s` is `%s`, but the initializer is an array literal.",
+                           s->name, ok_type_name(s->otype));
+            diag_note(d, "array literals initialize array variables: `type.array<type.%s, N> name = { ... }`.",
+                      ok_type_name(s->otype));
+            break;
+        }
         OkType it = check_expr(c, s->a);
         if (!assignable(it, s->otype)) {
             Diag *d = serr(c, s, "variable `%s` is `%s`, but the initializer is `%s`.",
@@ -681,11 +861,54 @@ static void check_stmt(SemaCtx *c, Node *s) {
         if (!target) break;
         s->sym = target;
         OkType vt = check_expr(c, s->a);
+        if (ty_kind(target->type) == OK_ARRAY || ty_kind(vt) == OK_ARRAY) {
+            if (vt != target->type) {
+                Diag *d = serr(c, s, "cannot assign a `%s` value to `%s`, which is `%s`.",
+                               ok_type_name(vt), path_join_str(s->parts, s->nparts),
+                               ok_type_name(target->type));
+                diag_note(d, "array assignment copies the contents; the types must match exactly (spec §8.4).");
+            }
+            break;
+        }
         if (!assignable(vt, target->type)) {
             serr(c, s, "cannot assign a `%s` value to `%s`, which is `%s`.",
                  ok_type_name(vt), path_join_str(s->parts, s->nparts), ok_type_name(target->type));
         } else if (vt != target->type && c->opt->warnings && s->a->kind != A_INT) {
             swarn(c, s, "assignment implicitly widens from `number` to `decimal`.");
+        }
+        break;
+    }
+    case A_INDEXASSIGN: {
+        OkType bt = check_expr(c, s->a);   /* base: A_PATH or nested A_INDEX */
+        if (!bt || ty_kind(bt) != OK_ARRAY) {
+            Diag *d = serr(c, s, "this value is a `%s` — only array elements can be indexed for assignment.",
+                           ok_type_name(bt));
+            diag_note(d, "store into arrays with `name[index] = value` (spec §8.4).");
+            check_expr(c, s->b);
+            check_expr(c, s->c);
+            break;
+        }
+        OkType it = check_expr(c, s->b);
+        if (it != ty_number) {
+            Diag *d = serr(c, s->b, "the array index must be `number`, but `%s` was given.", ok_type_name(it));
+            diag_note(d, "out-of-bounds access is a runtime trap (spec §8.4).");
+        }
+        OkType elem = bt->elem;
+        OkType vt = check_expr(c, s->c);
+        if (ty_kind(elem) == OK_ARRAY) {
+            if (vt != elem) {
+                Diag *d = serr(c, s->c, "this element is `%s`, but a `%s` value was given.",
+                               ok_type_name(elem), ok_type_name(vt));
+                diag_note(d, "assigning a whole inner array copies it; the types must match exactly.");
+            }
+            break;
+        }
+        if (!assignable(vt, elem)) {
+            Diag *d = serr(c, s->c, "the array elements are `%s`, but a `%s` value was given.",
+                           ok_type_name(elem), ok_type_name(vt));
+            diag_note(d, "only `number` -> `decimal` widening is implicit; everything else must match exactly.");
+        } else if (vt != elem && c->opt->warnings && s->c->kind != A_INT) {
+            swarn(c, s, "element assignment implicitly widens from `number` to `decimal`.");
         }
         break;
     }
@@ -699,7 +922,7 @@ static void check_stmt(SemaCtx *c, Node *s) {
     }
     case A_WHEN: {
         OkType ct = check_expr(c, s->a);
-        if (ct != OK_BOOL) {
+        if (ct != ty_bool) {
             Diag *d = serr(c, s->a, "the `when` condition must be `bool`, but `%s` was given.", ok_type_name(ct));
             diag_note(d, "comparisons (`==`, `<`, ...) produce `bool`.");
         }
@@ -718,13 +941,13 @@ static void check_stmt(SemaCtx *c, Node *s) {
     case A_LOOP_COUNT: {
         OkType ft = check_expr(c, s->a);
         OkType bt = check_expr(c, s->b);
-        if (ft != OK_NUMBER) serr(c, s->a, "the loop start must be `number`, but `%s` was given.", ok_type_name(ft));
-        if (bt != OK_NUMBER) serr(c, s->b, "the loop bound must be `number`, but `%s` was given.", ok_type_name(bt));
+        if (ft != ty_number) serr(c, s->a, "the loop start must be `number`, but `%s` was given.", ok_type_name(ft));
+        if (bt != ty_number) serr(c, s->b, "the loop bound must be `number`, but `%s` was given.", ok_type_name(bt));
 
         Scope *sc = scope_new("the loop", c->cur_scope);
         c->cur_scope = sc;
         Symbol *lv = scope_insert(sc, s->name, SYM_VAR, s->line, s->col);
-        lv->type = OK_NUMBER;
+        lv->type = ty_number;
         lv->decl = s;
         lv->used = true;
         s->sym = lv; /* IR needs the loop variable's slot symbol */
@@ -737,7 +960,7 @@ static void check_stmt(SemaCtx *c, Node *s) {
     }
     case A_LOOP_COND: {
         OkType ct = check_expr(c, s->a);
-        if (ct != OK_BOOL) serr(c, s->a, "the loop condition must be `bool`, but `%s` was given.", ok_type_name(ct));
+        if (ct != ty_bool) serr(c, s->a, "the loop condition must be `bool`, but `%s` was given.", ok_type_name(ct));
         Scope *sc = scope_new("the loop", c->cur_scope);
         c->cur_scope = sc;
         bool saved = c->in_loop;
@@ -768,7 +991,7 @@ static void check_stmt(SemaCtx *c, Node *s) {
         OkType rt = c->cur_func->ret;
         if (s->a) {
             OkType vt = check_expr(c, s->a);
-            if (rt == OK_VOID) {
+            if (rt == ty_void) {
                 Diag *d = serr(c, s, "this function returns nothing, so `return` must not carry a value.");
                 diag_found(d, "returned a `%s` value.", ok_type_name(vt));
             } else if (!assignable(vt, rt)) {
@@ -778,7 +1001,7 @@ static void check_stmt(SemaCtx *c, Node *s) {
                 swarn(c, s, "return value implicitly widens from `number` to `decimal`.");
             }
         } else {
-            if (rt != OK_VOID && !c->cur_func->is_entry) {
+            if (rt != ty_void && !c->cur_func->is_entry) {
                 serr(c, s, "this function promises a `%s` result — `return` needs a value.", ok_type_name(rt));
             }
         }
@@ -814,6 +1037,28 @@ static void check_column(SemaCtx *c, Node *col, Scope *ns) {
                 check_func_body(c, mem, mem->finfo);
             }
         } else if (mem->kind == A_VARDECL) {
+            if (ty_kind(mem->otype) == OK_ARRAY) {
+                char what[192];
+                snprintf(what, sizeof what, "array `%s.%s`", col->name, mem->name);
+                if (mem->a->kind != A_ARRAYLIT) {
+                    Diag *d = serr(c, mem, "the initializer of `%s.%s` must be an array literal `{ ... }`.",
+                                   col->name, mem->name);
+                    diag_note(d, "global initializers must be compile-time constants (spec §7).");
+                    c->cur_scope = ns;
+                    check_expr(c, mem->a);
+                } else {
+                    ConstVal cv;
+                    check_array_lit_const(c, mem->a, mem->otype, what, &cv);
+                    if (mem->sym) mem->sym->cval = cv;
+                }
+                continue;
+            }
+            if (mem->a->kind == A_ARRAYLIT) {
+                Diag *d = serr(c, mem, "`%s.%s` is `%s`, but the initializer is an array literal.",
+                               col->name, mem->name, ok_type_name(mem->otype));
+                (void)d;
+                continue;
+            }
             ConstVal cv;
             size_t mark = c->de->errors;
             bool okc = const_eval(c, mem->a, &cv);
@@ -829,8 +1074,8 @@ static void check_column(SemaCtx *c, Node *col, Scope *ns) {
                 if (!assignable(cv.type, mem->otype)) {
                     serr(c, mem, "`%s.%s` is `%s`, but the initializer is `%s`.",
                          col->name, mem->name, ok_type_name(mem->otype), ok_type_name(cv.type));
-                } else if (cv.type == OK_NUMBER && mem->otype == OK_DECIMAL) {
-                    cv.type = OK_DECIMAL; cv.d = (double)cv.i;
+                } else if (cv.type == ty_number && mem->otype == ty_decimal) {
+                    cv.type = ty_decimal; cv.d = (double)cv.i;
                 }
                 if (mem->sym) mem->sym->cval = cv;
             }
@@ -858,6 +1103,27 @@ static void check_module(SemaCtx *c, OkModule *m, Scope *scope) {
         }
         case A_VARDECL: {
             /* global: initializer must be a compile-time constant (spec §7) */
+            if (ty_kind(n->otype) == OK_ARRAY) {
+                char what[160];
+                snprintf(what, sizeof what, "global array `%s`", n->name);
+                if (n->a->kind != A_ARRAYLIT) {
+                    Diag *d = serr(c, n, "the initializer of global array `%s` must be an array literal `{ ... }`.", n->name);
+                    diag_note(d, "global initializers must be compile-time constants (spec §7).");
+                    c->cur_scope = scope;
+                    check_expr(c, n->a);
+                } else {
+                    ConstVal cv;
+                    check_array_lit_const(c, n->a, n->otype, what, &cv);
+                    if (n->sym) n->sym->cval = cv;
+                }
+                break;
+            }
+            if (n->a->kind == A_ARRAYLIT) {
+                Diag *d = serr(c, n, "variable `%s` is `%s`, but the initializer is an array literal.",
+                               n->name, ok_type_name(n->otype));
+                (void)d;
+                break;
+            }
             ConstVal cv;
             size_t mark = c->de->errors;
             bool okc = const_eval(c, n->a, &cv);
@@ -873,8 +1139,8 @@ static void check_module(SemaCtx *c, OkModule *m, Scope *scope) {
                 if (!assignable(cv.type, n->otype)) {
                     serr(c, n, "variable `%s` is `%s`, but the initializer is `%s`.",
                          n->name, ok_type_name(n->otype), ok_type_name(cv.type));
-                } else if (cv.type == OK_NUMBER && n->otype == OK_DECIMAL) {
-                    cv.type = OK_DECIMAL; cv.d = (double)cv.i; /* widen silently for .data */
+                } else if (cv.type == ty_number && n->otype == ty_decimal) {
+                    cv.type = ty_decimal; cv.d = (double)cv.i; /* widen silently for .data */
                 }
                 if (n->sym) n->sym->cval = cv;
             }
@@ -898,7 +1164,7 @@ static void check_module(SemaCtx *c, OkModule *m, Scope *scope) {
             }
             /* main top level runs as the entry function: return = exit code */
             if (!m->entry) {
-                m->entry = funcinfo_new("__ok_entry", "__ok_entry", OK_NUMBER, NULL, m);
+                m->entry = funcinfo_new("__ok_entry", "__ok_entry", ty_number, NULL, m);
                 m->entry->is_entry = true;
             }
             c->cur_func = m->entry;

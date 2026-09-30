@@ -1,0 +1,1 @@
+prints one value at a time, not a whole array

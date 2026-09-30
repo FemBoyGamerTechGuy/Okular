@@ -1,7 +1,7 @@
 # Okular Language Basics (0.1)
 
 A tour of what Okular 0.1 does today. The specification
-(`specs/spec-v0.1.md`) is the source of truth; this page is the friendly
+(`specs/spec-v0.2.md`) is the source of truth; this page is the friendly
 version. Everything shown here compiles and runs with the bootstrap
 compiler.
 
@@ -193,10 +193,39 @@ Errors always carry the location, the offending line, a caret, and a note
 suggesting the fix. One compilation reports many independent errors, and a
 failed build never produces an executable from required code.
 
-## What 0.1 does not have (yet)
+## Arrays
 
-Arrays, structs, unions, pointers, manual heap management, FFI, threads,
-match expressions, type inference, constants, aliases, and visibility
-modifiers are all **designed** (see `specs/spec-v0.1.md` §20 and
+Fixed-length arrays hold N elements of one type. The count is part of the
+type, assignment copies the contents, and bounds are always checked at
+runtime — an out-of-bounds index is a fatal trap, not silent corruption:
+
+```ok
+type.array<type.number, 5> scores = {10, 20, 30, 40, 50}
+
+scores[2] = 99          # indexed store
+write(scores[2])        # indexed load
+
+type.array<type.array<type.number, 3>, 2> grid = {{1, 2, 3}, {4, 5, 6}}
+write(grid[1][2])       # nesting chains
+
+function.sum(type.array<type.number, 5>.xs) -> number {   # by value
+    type.number total = 0
+    loop (i from 0 until 5) {
+        total = total + xs[i]
+    }
+    return total
+}
+
+type.array<type.number, 5> copy = {0, 0, 0, 0, 0}
+copy = scores           # whole-array copy
+```
+
+See `specs/spec-v0.2.md` §8.4 for the complete rules.
+
+## What 0.2 does not have (yet)
+
+Structs, unions, pointers, manual heap management, dynamic-length arrays,
+FFI, threads, match expressions, type inference, constants, aliases, and
+visibility modifiers are all **designed** (see `specs/spec-v0.2.md` §20 and
 `docs/roadmap.md`) and **not implemented**. The compiler says so plainly
 when you use a reserved construct — it never pretends.

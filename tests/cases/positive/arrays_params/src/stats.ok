@@ -1,0 +1,18 @@
+function.sum(type.array<type.number, 5>.xs) -> number {
+    type.number t = 0
+    loop (i from 0 until 5) {
+        t = t + xs[i]
+    }
+    return t
+}
+
+function.max3(type.array<type.number, 3>.xs) -> number {
+    type.number m = xs[0]
+    when (xs[1] > m) {
+        m = xs[1]
+    }
+    when (xs[2] > m) {
+        m = xs[2]
+    }
+    return m
+}

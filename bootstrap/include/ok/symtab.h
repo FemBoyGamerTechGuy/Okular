@@ -23,7 +23,8 @@ typedef struct FuncInfo {
     bool is_entry;          /* synthesized __ok_entry for main.ok top level */
 } FuncInfo;
 
-/* constant value for global initializers (spec §7/§8.1: constants only) */
+/* constant value for global initializers (spec §7/§8: constants only).
+ * Arrays carry their element constants recursively (spec §8.4). */
 typedef struct ConstVal {
     bool valid;
     OkType type;
@@ -32,6 +33,8 @@ typedef struct ConstVal {
     bool b;
     char *t;                /* owned bytes */
     size_t t_len;
+    struct ConstVal *elems; /* array elements (owned) */
+    size_t nelems;
 } ConstVal;
 
 typedef struct Symbol {

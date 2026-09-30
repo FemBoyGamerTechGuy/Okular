@@ -1,0 +1,22 @@
+type.text=1
+
+type.array<type.array<type.number, 3>, 2> grid = {{1, 2, 3}, {4, 5, 6}}
+
+grid[1][2] = 60
+
+type.number total = 0
+loop (i from 0 until 2) {
+    loop (j from 0 until 3) {
+        write(grid[i][j])
+        write(" ")
+        total = total + grid[i][j]
+    }
+}
+print
+write(total)
+print
+
+type.array<type.array<type.number, 2>, 3> rows = {{1, 1}, {2, 2}, {3, 3}}
+rows[2][0] = 30
+write(rows[2][0] + rows[2][1])
+print

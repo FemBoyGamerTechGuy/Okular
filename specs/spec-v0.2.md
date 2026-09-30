@@ -1,8 +1,11 @@
 # Okular Language Specification
 
-**Version:** 0.1 (bootstrap)
+**Version:** 0.2 (arrays)
 **Status:** Evolving draft
 **Implementation:** bootstrap compiler in C (`bootstrap/`)
+
+> 0.2 adds fixed-length arrays (value semantics, bounds-checked indexing)
+> on top of 0.1. See the changelog in §23.
 
 > This specification is the source of truth for the Okular language.
 > When the implementation changes the language, this document changes with it.
@@ -88,9 +91,9 @@ union  pointer  alloc  release  null  guard  fail  with
 priv  pub  match  case  const  ptr
 ```
 
-`libs`, `source`, and `use` are not keywords: they are contextual segments
-of language column paths (`[libs.use]`, `[source.files.use]`) and may
-appear as ordinary identifiers elsewhere.
+`libs`, `source`, `use`, and `array` are not keywords: they are contextual
+segments of language column paths or of type references (`[libs.use]`,
+`type.array<...>`) and may appear as ordinary identifiers elsewhere.
 
 ### 1.6 Number literals
 
@@ -128,7 +131,8 @@ and  or  not            logical (word operators)
 
 `=` never tests equality. Equality is always `==`. Word logical operators were
 chosen over `&& || !` because they read naturally at statement level and are
-impossible to confuse with bitwise operators (§9, planned).
+impossible to confuse with bitwise operators (§9, planned). `[` `]` index
+arrays (§8.4/9) and also suppress newlines (§1.2).
 
 ---
 
@@ -270,6 +274,9 @@ The compiler distinguishes, per §7 of the engineering brief:
 | `decimal` | floating point, the approachable default | IEEE-754 binary64 |
 | `text` | immutable UTF-8 text (pointer + length) | 16 bytes |
 | `bool` | `true` / `false` | 1 byte |
+| `array<T, N>` | N elements of type T, laid out contiguously | N × size(T) |
+
+Array types are written `type.array<type.number, 5>` (§8.4).
 
 `number` and `decimal` are deliberately not named "int"/"float": they are the
 *default* types a beginner reaches for, sized by the platform for the era
@@ -311,6 +318,9 @@ of lookahead after `type.<name>`:
 * All other mixes are compile errors. No silent conversions. No
   `text`↔`number` coercion — explicit conversion builtins are planned
   (`text.to_number`, `number.to_text`).
+* Array types convert never: `array<number, 3>` and `array<number, 2>` are
+  different types, and element types must match exactly (widening applies
+  per element in literals only, §8.4).
 
 ---
 
@@ -443,9 +453,10 @@ type.number count = 0
 type.text user = "Alex"
 type.decimal ratio = 0.75
 type.bool active = true
+type.array<type.number, 5> scores = {10, 20, 30, 40, 50}
 ```
 
-* Initialization is **required** in 0.1 (no default initialization — explicit
+* Initialization is **required** in 0.2 (no default initialization — explicit
   behavior over implicit; see design principles). This is a deliberate,
   documented restriction, not an oversight.
 * Reassignment: `count = count + 1` (same type only).
@@ -492,6 +503,11 @@ function.<name>(<typeRef>.<param>, ...) [-> <typeRef>] { body }
   convention, visible only through side effects such as `write` order.
 * Missing `return` on a valued function: compile error, checked by a
   reachability analysis of the body's terminal statements.
+* Array parameters are passed **by value**: the caller makes a private copy
+  and the callee sees only that copy (§8.4, D23).
+* Functions **cannot return arrays** in 0.2 — the return ABI carries a
+  single register value. This documented restriction lifts with the memory
+  milestone (§12).
 
 ### 8.3 Structs (designed; not implemented in 0.1)
 
@@ -507,6 +523,48 @@ nested structs, arrays-in-structs, explicit layout/alignment attributes, and
 value vs reference semantics are designed in `docs/roadmap.md`. The keyword is
 reserved and the column-style shape above is the committed direction.
 
+### 8.4 Arrays
+
+A fixed-length array holds exactly N elements of one element type T, stored
+contiguously:
+
+```ok
+type.array<type.number, 5> scores = {10, 20, 30, 40, 50}
+type.array<type.text, 2>   names  = {"Ada", "Grace"}
+type.array<type.array<type.number, 3>, 2> grid = {{1, 2, 3}, {4, 5, 6}}
+```
+
+Rules:
+
+* **The count is part of the type.** `array<number, 5>` and `array<number, 6>`
+  are different types that never convert. The count is a literal between
+  1 and 65536 in the bootstrap compiler (a documented limit that lifts with
+  the memory milestone; total storage is bounded to 1 MiB per array).
+* **Literals only initialize declarations** — `= { ... }` after a declaration.
+  Assignment copies whole arrays from other arrays of the exact same type;
+  a literal in assignment position is a compile error.
+* **Element rules**: literal elements must each be assignable to T (`number`
+  literals widen to `decimal` elements); the element count must match exactly.
+  Nested literals follow the nested element type.
+* **Value semantics.** Assignment (`a = b`), initialization from another array,
+  and parameter passing **copy the contents**. Mutating a copy never touches
+  the original; a function that mutates its parameter mutates only its own
+  copy. (Reference-style access arrives with pointers, §12.)
+* **Indexing** is `name[index]` (§9); `name[index] = value` stores. Indices
+  are `number`. Indexing chains nest for array-of-array types (`grid[1][2]`).
+* **Bounds are always checked** — in every mode, at every index operation.
+  An out-of-bounds index (including a negative one) is a fatal runtime trap
+  naming the index and the array's length, exit code 70 (§13). The
+  default is safe; opting out arrives only with the low-level memory gate
+  (`type.mem=1`, planned). This decision is D24.
+* **Arrays are not comparable** (`==`/`!=` are errors — compare elements),
+  not writable as a whole (`write(arr)` is an error with guidance), and not
+  usable in arithmetic or conditions.
+* Globals and column members may be arrays; their elements must be
+  compile-time constants, emitted as static data (§7).
+* Arrays of every scalar type work; elements are laid out from the storage
+  start, each aligned to its natural size.
+
 ---
 
 ## 9. Expressions
@@ -521,7 +579,7 @@ Precedence, loosest to tightest:
 | 4 | `+  -` | left |
 | 5 | `*  /  %` | left |
 | 6 | unary `not`, unary `-` | prefix |
-| 7 | call `f(x)`, member `a.b`, literals, names, `( expr )` | — |
+| 7 | call `f(x)`, member `a.b`, index `a[i]`, literals, names, `( expr )` | — |
 
 * `+` on `text` concatenates. `+` on `number`/`decimal` adds. There is no
   `+` between `text` and `number` (planned explicit conversion builtins).
@@ -530,6 +588,9 @@ Precedence, loosest to tightest:
   division. `%` is remainder, `number` only.
 * Constant expressions (literals folded at compile time) are required for
   global initializers (§7) and are folded by the IR constant-folding pass.
+* `xs[i]` requires an array base and a `number` index; its type is the
+  element type. Bounds are checked at runtime (§8.4). `xs[i] = v` is the
+  indexed store form; chained indices (`grid[i][j]`) walk element types.
 
 ---
 
@@ -645,8 +706,8 @@ heap machinery is honestly marked NOT IMPLEMENTED in §22.
 * **Compile-time errors** — precise diagnostics (§15), build fails, no
   executable is produced from required code.
 * **Runtime fatal errors** — traps with a message (e.g. output buffer
-  overflow) and a nonzero exit code. Implemented in 0.1 for the cases the
-  runtime can hit.
+  overflow, array index out of bounds) and a nonzero exit code (70).
+  Implemented for the cases the runtime can hit.
 * **Recoverable errors** — designed model: valued functions can signal
   failure through a `guard`/`fail` mechanism with explicit propagation:
 
@@ -736,10 +797,19 @@ funcdecl        = "function" "." IDENT "(" [ params ] ")"
                   [ "->" typeref ] block ;
 params          = param { "," param } ;
 param           = typeref "." IDENT ;
-typeref         = "number" | "decimal" | "text" | "bool" ;
 
-vardecl         = typeref IDENT "=" expr ;
-assignment      = path "=" expr ;
+(* type references: scalars, or arrays with the `type.` prefix.
+ * parameter/return positions also accept the bare scalar names
+ * for 0.1 compatibility (`number.a`); arrays must use the full form. *)
+typeref         = "type" "." ( scalar | "array" "<" typeref "," INT ">" ) ;
+scalar          = "number" | "decimal" | "text" | "bool" ;
+baretyperef     = scalar | typeref ;
+
+vardecl         = typeref IDENT "=" initializer ;
+initializer     = expr | arraylit ;
+arraylit        = "{" [ initializer { "," initializer } ] "}" ;
+assignment      = path "=" expr
+                | postfix "[" expr "]" "=" expr ;   (* indexed store *)
 
 block           = "{" { statement } "}" ;
 
@@ -766,14 +836,16 @@ cmpx            = addx [ ("=="|"!="|"<"|"<="|">"|">=") addx ] ;
 addx            = mulx { ("+"|"-") mulx } ;
 mulx            = unary { ("*"|"/"|"%") unary } ;
 unary           = ("not" | "-") unary | postfix ;
-postfix         = primary { "." IDENT | "(" [ args ] ")" } ;
+postfix         = primary { "." IDENT | "(" [ args ] ")" | "[" expr "]" } ;
 primary         = INTLIT | FLOATLIT | STRINGLIT | "true" | "false"
                 | path | "(" expr ")" ;
 ```
 
 Notes: `print` is a statement keyword; `write(...)` is parsed as a builtin
 call expression-statement and type-checked against the text subsystem gate.
-Member access on values (methods) arrives with structs.
+Member access on values (methods) arrives with structs. Array literals are
+parsed as initializers only; array indexing is a postfix form chained after
+the base expression (`grid[i][j]`).
 
 ---
 
@@ -809,7 +881,8 @@ loop (i from 1 until 21) {
 
 ## 18. Versioning
 
-* This document specifies **Okular 0.1**, the first bootstrap release.
+* This document specifies **Okular 0.2**. 0.1 was the first bootstrap
+  release; 0.2 adds arrays (§23).
 * The version registry is the compatibility mechanism behind `--legacy`:
   every construct records the version that introduced it; the compiler may
   translate superseded constructs forward rather than accumulating special
@@ -847,17 +920,24 @@ Major decisions and their rationale (required by the engineering brief §4.10):
 | D20 | Counted loops increment; `from`/`to`/`until` are keywords | descending loops use condition loops in 0.1 |
 | D21 | Executables are non-PIE, `ld`-linked, `_start` entry | simplest freestanding start; PIE is a backend milestone |
 | D22 | Text args pass as pointers to (ptr,len) pairs; scalars in integer registers | one coherent internal ABI (docs/architecture.md §3.5) |
+| D23 | Array args: caller copies into private scratch, passes the copy's address; callee copies into its own frame (ABI v1) | value semantics without new register classes; same shape as D22; the shared scratch is sound because copies happen at call time |
+| D24 | Bounds checks always on, trap with index+length, exit 70 | safety is opt-out, not opt-in (§12); the low-level escape arrives with `type.mem=1` |
+| D25 | `type.array<T, N>` mirrors the committed `type.ptr<T>` shape (§12) | one type-reference grammar; the count lives in the type, not the value |
 
 ---
 
-## 20. What 0.1 Deliberately Does NOT Contain
+## 20. What 0.2 Deliberately Does NOT Contain
 
-Arrays, slices, structs, unions, pointers, manual allocation, FFI, threads,
+Slices, structs, unions, pointers, manual allocation, FFI, threads,
 match expressions, type inference, constants, aliases, `priv`, block
 comments, scientific-notation literals, method calls, debug symbols,
 optimization beyond constant folding, an optimizer framework, and the
 self-hosted compiler. Each is designed in `docs/roadmap.md` with a milestone.
 Nothing in this list is claimed to work.
+
+0.2 also does not contain: array returns from functions (D23-adjacent
+restriction, lifts with the memory milestone), array literals outside
+declarations, dynamic-length arrays, or bounds-check opt-out.
 
 ---
 
@@ -884,6 +964,10 @@ An implementation claiming "Okular 0.1" must:
 | Module namespaces (`greeting.greet()`) | §6.2 | implemented |
 | `[libs.use]` resolution check | §6.3 | implemented (binding NOT IMPLEMENTED) |
 | Types: number/decimal/text/bool | §4.1 | implemented |
+| Fixed-length arrays `type.array<T, N>` | §8.4 | implemented |
+| Array literals (nested), indexed load/store | §8.4/9 | implemented |
+| Array value semantics (copy on assign/pass) | §8.4 | implemented |
+| Bounds checks + runtime trap | §8.4/13 | implemented |
 | Fixed-width integers | §4.2 | NOT IMPLEMENTED (reserved) |
 | `type.text=1` gate | §5 | implemented |
 | Variables, scoping, reassignment | §8.1 | implemented |
@@ -896,7 +980,7 @@ An implementation claiming "Okular 0.1" must:
 | `write`/`print` buffer model | §11 | implemented |
 | Pointers, manual memory | §12 | NOT IMPLEMENTED |
 | Recoverable errors (`guard`/`fail`) | §13 | NOT IMPLEMENTED |
-| Runtime traps (buffer overflow) | §13 | implemented |
+| Runtime traps (buffer overflow, array bounds) | §13 | implemented |
 | Diagnostics: format, multi-error recovery | §14 | implemented |
 | `-w`, `-xw`, `-s`, `-l` flags | §14 | implemented (no legacy constructs exist yet) |
 | x86-64 freestanding native codegen | §15 | implemented |
@@ -906,3 +990,30 @@ An implementation claiming "Okular 0.1" must:
 | ARM64 / RISC-V backends | — | NOT IMPLEMENTED (planned) |
 
 "implemented" above means: covered by the test suite in `tests/`.
+
+---
+
+## 23. Changelog
+
+### 0.2
+
+* **Arrays** (§8.4): fixed-length, value-copied, bounds-checked. Declaration
+  `type.array<type.number, 5> xs = { ... }`; indexing `xs[i]`; indexed store
+  `xs[i] = v`; nesting `grid[i][j]`; function parameters by value; global and
+  column-member arrays with constant elements.
+* Type system rebuilt on interned descriptors (`OkType` is now a pointer;
+  scalars are singletons, arrays intern per element+count) — the foundation
+  for pointers, structs, and unions.
+* Internal ABI v1: array arguments travel as caller-owned copies addressed
+  through one register (D23).
+* Fixes found while testing: top-level `when` without `else` no longer swallows
+  the following statement separator; global variables are now exported
+  (`.globl`) so cross-module access links; call diagnostics no longer show an
+  argument name in place of the function name (shared-buffer aliasing).
+* Compiler: 178 checks (positive/negative/policy/flags/traps); examples
+  `examples/arrays`, `examples/sieve`.
+
+### 0.1
+
+* Initial bootstrap release: language columns, modules, functions, control
+  flow, text subsystem, freestanding x86-64 code generation.

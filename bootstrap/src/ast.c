@@ -53,6 +53,12 @@ static void dump_stmt(Node *s, int ind) {
         printf("exprstmt\n");
         dump_expr(s->a, ind + 2);
         break;
+    case A_INDEXASSIGN:
+        printf("index-assign\n");
+        dump_expr(s->a, ind + 2);
+        dump_expr(s->b, ind + 2);
+        dump_expr(s->c, ind + 2);
+        break;
     case A_WHEN:
         printf("when\n");
         dump_expr(s->a, ind + 2);
@@ -135,6 +141,16 @@ static void dump_expr(Node *e, int ind) {
     case A_UN:
         printf("unop %s\n", e->uop == UN_NEG ? "-" : "not");
         dump_expr(e->a, ind + 2);
+        break;
+    case A_ARRAYLIT:
+        printf("arraylit (%zu elements)\n", e->args.len);
+        for (size_t i = 0; i < e->args.len; i++)
+            dump_expr((Node *)e->args.items[i], ind + 2);
+        break;
+    case A_INDEX:
+        printf("index\n");
+        dump_expr(e->a, ind + 2);
+        dump_expr(e->b, ind + 2);
         break;
     default:
         printf("?expr(%d)\n", (int)e->kind);

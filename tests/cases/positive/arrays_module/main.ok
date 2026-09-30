@@ -1,0 +1,12 @@
+type.text=1
+
+[source.files.use] = {
+    "board"
+}.end
+
+write(board.total(board.cells))
+print
+
+board.cells[0] = 40
+write(board.cells[0])
+print
