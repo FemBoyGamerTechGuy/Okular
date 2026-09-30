@@ -1,0 +1,11 @@
+type.text=1
+function.shout(text.w) -> text {
+    return w + "!"
+}
+function.join(text.a, text.b) -> text {
+    return a + "-" + b
+}
+write(shout("okular"))
+print
+write(join("left", "right"))
+print

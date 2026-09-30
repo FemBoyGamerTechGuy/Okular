@@ -1,0 +1,3 @@
+function.nothing() -> number {
+    return 1
+}

@@ -1,0 +1,9 @@
+type.text=1
+type.number a = 1
+type.number b = 2
+write("sum: ")
+write(a + b)
+write(" product: ")
+write(a * b)
+print
+print

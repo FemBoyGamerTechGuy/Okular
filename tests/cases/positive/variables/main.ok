@@ -1,0 +1,14 @@
+type.text=1
+type.number age = 18
+type.decimal h = 1.5
+type.text name = "Ann"
+type.bool ok = true
+age = age + 1
+write(name)
+write(" ")
+write(age)
+write(" ")
+write(h)
+write(" ")
+write(ok)
+print

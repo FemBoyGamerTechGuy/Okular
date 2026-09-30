@@ -1,0 +1,11 @@
+type.text=1
+loop (i from 1 until 8) {
+    when (i == 4) {
+        continue
+    }
+    when (i == 6) {
+        break
+    }
+    write(i)
+}
+print

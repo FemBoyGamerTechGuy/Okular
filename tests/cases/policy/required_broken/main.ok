@@ -1,0 +1,6 @@
+type.text=1
+[source.files.use] = {
+    "broken"
+}.end
+write("fine")
+print

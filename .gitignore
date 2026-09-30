@@ -1,0 +1,14 @@
+# build artifacts
+build/bootstrap/
+build/okular
+build/rt_code.o
+build/rt_start.o
+runtime/rt.o
+
+# project-local build outputs from examples and tests
+examples/*/build/
+tests/tmp/
+
+# editor/os noise
+*.swp
+.DS_Store

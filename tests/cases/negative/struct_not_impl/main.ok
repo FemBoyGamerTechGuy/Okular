@@ -1,0 +1,5 @@
+type.text=1
+struct.Point = {
+    type.number x
+    type.number y
+}.end

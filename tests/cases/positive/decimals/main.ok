@@ -1,0 +1,13 @@
+type.text=1
+
+type.decimal a = 0.5
+type.decimal b = 1.25
+type.decimal c = 0
+
+c = a + b * 2
+write(c)
+write(" ")
+write(a / 4)
+write(" ")
+write(-a)
+print

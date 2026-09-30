@@ -1,0 +1,11 @@
+type.text=1
+type.bool a = true
+type.bool b = false
+write(a and b)
+write(" ")
+write(a or b)
+write(" ")
+write(not b)
+write(" ")
+write(3 > 2 and 2 > 3)
+print

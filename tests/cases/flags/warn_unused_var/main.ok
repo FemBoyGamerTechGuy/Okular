@@ -1,0 +1,10 @@
+type.text=1
+
+function.f() -> number {
+    type.number used = 1
+    type.number unused_var = 2
+    return used
+}
+
+write(f())
+print

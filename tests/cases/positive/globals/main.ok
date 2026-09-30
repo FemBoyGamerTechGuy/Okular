@@ -1,0 +1,11 @@
+type.text=1
+type.number counter = 0
+
+function.bump() -> number {
+    counter = counter + 1
+    return counter
+}
+bump()
+bump()
+write(bump())
+print

@@ -1,0 +1,3 @@
+function.triple(number.x) -> number {
+    return x * 3
+}

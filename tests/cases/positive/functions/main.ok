@@ -1,0 +1,11 @@
+type.text=1
+function.add(number.a, number.b) -> number {
+    return a + b
+}
+function.greet() -> text {
+    return "hi"
+}
+write(add(2, 3))
+print
+write(greet())
+print

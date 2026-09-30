@@ -1,0 +1,38 @@
+# variables — declarations, types, assignment (spec §8.1, §4.1).
+#
+# Okular 0.1 requires explicit initialization: no silent defaults.
+
+type.text=1
+
+# the four 0.1 types
+type.number age = 18
+type.text name = "Alex"
+type.decimal height = 1.82
+type.bool alive = true
+
+# assignment (same type only)
+age = age + 1
+
+# hex and digit grouping (spec §1.6)
+type.number mask = 0xFF
+type.number big = 1_000_000
+
+write(name)
+write(" is ")
+write(age)
+write(" years old, ")
+write(height)
+write(" m tall, and it is ")
+write(alive)
+print
+
+write("mask = ")
+write(mask)
+write(", big = ")
+write(big)
+print
+
+# text concatenation builds values, write composes output
+type.text full = "Ok" + "ular " + "rocks"
+write(full)
+print

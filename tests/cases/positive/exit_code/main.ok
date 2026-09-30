@@ -1,0 +1,4 @@
+type.text=1
+write("bye")
+print
+return 42

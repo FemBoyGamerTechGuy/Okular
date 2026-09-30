@@ -1,0 +1,12 @@
+type.text=1
+type.number big = 4611686018427387904
+type.number neg = -9223372036854775807
+type.number hex = 0xFFFFFFFFFFFF
+write(big)
+write(" ")
+write(neg + 1)
+write(" ")
+write(hex)
+write(" ")
+write(0 - 1)
+print

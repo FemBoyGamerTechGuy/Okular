@@ -1,0 +1,6 @@
+[source.files.use] = {
+    "b"
+}.end
+function.f() -> number {
+    return b.g() + 1
+}

@@ -1,0 +1,965 @@
+/* sema.c — semantic analysis for Okular 0.1.
+ *
+ * Scope model (spec §6.2):
+ *   root scope  = main.ok's top level + one namespace symbol per src module
+ *   module scope = a src file's top level (parent = root)
+ *   column scope = a developer column's namespace (parent = its file scope)
+ *   block scopes = function bodies / when / loop bodies
+ *
+ * Annotations written for IR:
+ *   A_PATH/A_ASSIGN/A_VARDECL -> node->sym
+ *   A_CALL                    -> node->finfo, node->rtype
+ *   all expressions           -> node->rtype
+ *   global A_VARDECL          -> sym->cval (constant initializer)
+ */
+#include "ok/sema.h"
+
+typedef struct SemaCtx {
+    DiagEngine *de;
+    OkProject *proj;
+    const OkOptions *opt;
+    Scope *root;
+    OkModule *cur_mod;
+    Scope *cur_scope;
+    FuncInfo *cur_func;      /* NULL inside main top level until entry made */
+    bool in_loop;
+} SemaCtx;
+
+/* ---------------- helpers ---------------- */
+
+static Diag *serr(SemaCtx *c, Node *n, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+static Diag *serr(SemaCtx *c, Node *n, const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    char buf[512]; vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
+    return diag_emit(c->de, DIAG_ERROR, c->cur_mod->src, n ? n->line : 0, n ? n->col : 0, "%s", buf);
+}
+static Diag *swarn(SemaCtx *c, Node *n, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+static Diag *swarn(SemaCtx *c, Node *n, const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    char buf[512]; vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
+    return diag_emit(c->de, DIAG_WARNING, c->cur_mod->src, n ? n->line : 0, n ? n->col : 0, "%s", buf);
+}
+
+/* name suggestion: closest scope name with edit distance <= 2 (brief §42) */
+static int edit_distance(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    if (la == 0) return (int)lb;
+    if (lb == 0) return (int)la;
+    int prev[64], cur[64];
+    if (lb >= 64) return 99;
+    for (size_t j = 0; j <= lb; j++) prev[j] = (int)j;
+    for (size_t i = 1; i <= la; i++) {
+        cur[0] = (int)i;
+        for (size_t j = 1; j <= lb; j++) {
+            int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+            int m = prev[j - 1] + cost;
+            if (cur[j - 1] + 1 < m) m = cur[j - 1] + 1;
+            if (prev[j] + 1 < m) m = prev[j] + 1;
+            cur[j] = m;
+        }
+        memcpy(prev, cur, sizeof prev);
+    }
+    return prev[lb];
+}
+
+const char *ok_suggest_name(Scope *s, const char *name) {
+    for (Scope *sc = s; sc; sc = sc->parent)
+        for (size_t i = 0; i < sc->n; i++)
+            if (edit_distance(name, sc->syms[i]->name) <= 2)
+                return sc->syms[i]->name;
+    return NULL;
+}
+
+/* assignment compatibility (spec §4.4) */
+static bool assignable(OkType from, OkType to) {
+    if (from == to) return true;
+    /* number -> decimal widening only */
+    return from == OK_NUMBER && to == OK_DECIMAL;
+}
+
+static const char *path_join_str(char **parts, size_t n) {
+    static char buf[256];
+    size_t off = 0;
+    for (size_t i = 0; i < n && off < sizeof buf - 1; i++)
+        off += snprintf(buf + off, sizeof buf - off, "%s%s", i ? "." : "", parts[i]);
+    return buf;
+}
+
+/* mangled asm name: ok_<module>[_<col>...]_<name> */
+static char *mangle(const char *mod, const char *colpath, const char *name) {
+    size_t n = strlen(mod) + (colpath ? strlen(colpath) : 0) + strlen(name) + 16;
+    char *out = ok_xmalloc(n);
+    if (colpath && *colpath)
+        snprintf(out, n, "ok_%s_%s_%s", mod, colpath, name);
+    else
+        snprintf(out, n, "ok_%s_%s", mod, name);
+    for (char *s = out; *s; s++)
+        if (*s == '.') *s = '_';
+    return out;
+}
+
+/* ---------------- phase 1: collect ---------------- */
+
+static void collect_devcol(SemaCtx *c, OkModule *m, Node *col, Scope *parent,
+                            char *colpath_in);
+
+static void collect_toplevel(SemaCtx *c, OkModule *m, Node *file, Scope *scope) {
+    c->cur_mod = m;
+    for (size_t i = 0; i < file->body.len; i++) {
+        Node *n = file->body.items[i];
+        switch (n->kind) {
+        case A_DIRECTIVE: {
+            if (n->feature < 0) break; /* unknown feature: parser errored */
+            m->features[n->feature] = (n->fvalue != 0);
+            break;
+        }
+        case A_LANGCOL: {
+            const char *p = path_join_str(n->parts, n->nparts);
+            if (strcmp(p, "source.files.use") != 0 && strcmp(p, "libs.use") != 0) {
+                Diag *d = serr(c, n, "unknown language column `[%s]`.", p);
+                diag_note(d, "the language columns in 0.1 are: [libs.use], [source.files.use].");
+                diag_note(d, "developer columns are plain names: `physics = { ... }.end`.");
+            }
+            break;
+        }
+        case A_DEVCOL:
+            collect_devcol(c, m, n, scope, NULL);
+            break;
+        case A_FUNC: {
+            Symbol *ex = scope_insert(scope, n->name, SYM_FUNC, n->line, n->col);
+            if (ex->kind != SYM_FUNC || (ex->decl && ex->decl != n)) {
+                serr(c, n, "duplicate definition of `%s` in this scope.", n->name);
+                Diag *d = serr(c, ex->decl ? ex->decl : n, "`%s` was first defined here.", n->name);
+                (void)d;
+                break;
+            }
+            if (n->nparams > 6) {
+                Diag *d = serr(c, n, "functions with more than 6 parameters are not implemented in Okular 0.1.");
+                diag_note(d, "the 0.1 internal ABI passes up to 6 arguments in registers (docs/architecture.md §3.5); the limit lifts with the stack-args milestone.");
+            }
+            char *mg = mangle(m->name, NULL, n->name);
+            FuncInfo *fi = funcinfo_new(n->name, mg, n->otype, n, m);
+            fi->nparams = n->nparams;
+            fi->param_types = ok_xmalloc((n->nparams ? n->nparams : 1) * sizeof(OkType));
+            fi->param_names = ok_xmalloc((n->nparams ? n->nparams : 1) * sizeof(char *));
+            for (size_t k = 0; k < n->nparams; k++) {
+                fi->param_types[k] = n->params[k].type;
+                fi->param_names[k] = ok_xstrdup(n->params[k].name);
+            }
+            ex->func = fi;
+            n->finfo = fi;
+            break;
+        }
+        case A_VARDECL: {
+            Symbol *ex = scope_insert(scope, n->name, SYM_VAR, n->line, n->col);
+            if (ex->kind != SYM_VAR || (ex->decl && ex->decl != n)) {
+                serr(c, n, "duplicate definition of `%s` in this scope.", n->name);
+                break;
+            }
+            ex->type = n->otype;
+            ex->decl = n;
+            ex->is_global = true;
+            ex->mangled = mangle(m->name, NULL, n->name);
+            n->sym = ex;
+            break;
+        }
+        default:
+            /* statements: checked (and restricted to main.ok) in phase 2 */
+            break;
+        }
+    }
+}
+
+static void collect_devcol(SemaCtx *c, OkModule *m, Node *col, Scope *parent,
+                            char *colpath_in) {
+    /* namespace scope */
+    Scope *ns = scope_new("column", parent);
+
+    /* colpath for mangling */
+    char colpath[256];
+    if (colpath_in) snprintf(colpath, sizeof colpath, "%s.%s", colpath_in, col->name);
+    else            snprintf(colpath, sizeof colpath, "%s", col->name);
+
+    /* insert the namespace symbol into the PARENT scope */
+    Symbol *ex = scope_insert(parent, col->name, SYM_NS, col->line, col->col);
+    if (ex->kind != SYM_NS || (ex->decl && ex->decl != col)) {
+        serr(c, col, "duplicate definition of `%s` in this scope.", col->name);
+        return;
+    }
+    ex->ns = ns;
+    ex->decl = col;
+
+    for (size_t i = 0; i < col->body.len; i++) {
+        Node *n = col->body.items[i];
+        switch (n->kind) {
+        case A_FUNC: {
+            Symbol *fs = scope_insert(ns, n->name, SYM_FUNC, n->line, n->col);
+            if (fs->kind != SYM_FUNC || (fs->decl && fs->decl != n)) {
+                serr(c, n, "duplicate definition of `%s` in column `%s`.", n->name, col->name);
+                break;
+            }
+            if (n->nparams > 6) {
+                Diag *d = serr(c, n, "functions with more than 6 parameters are not implemented in Okular 0.1.");
+                diag_note(d, "the 0.1 internal ABI passes up to 6 arguments in registers (docs/architecture.md §3.5).");
+            }
+            char *mg = mangle(m->name, colpath, n->name);
+            FuncInfo *fi = funcinfo_new(n->name, mg, n->otype, n, m);
+            fi->nparams = n->nparams;
+            fi->param_types = ok_xmalloc((n->nparams ? n->nparams : 1) * sizeof(OkType));
+            fi->param_names = ok_xmalloc((n->nparams ? n->nparams : 1) * sizeof(char *));
+            for (size_t k = 0; k < n->nparams; k++) {
+                fi->param_types[k] = n->params[k].type;
+                fi->param_names[k] = ok_xstrdup(n->params[k].name);
+            }
+            fs->func = fi;
+            n->finfo = fi;
+            break;
+        }
+        case A_VARDECL: {
+            Symbol *vs = scope_insert(ns, n->name, SYM_VAR, n->line, n->col);
+            if (vs->kind != SYM_VAR || (vs->decl && vs->decl != n)) {
+                serr(c, n, "duplicate definition of `%s` in column `%s`.", n->name, col->name);
+                break;
+            }
+            vs->type = n->otype;
+            vs->decl = n;
+            vs->is_global = true;
+            vs->mangled = mangle(m->name, colpath, n->name);
+            n->sym = vs;
+            break;
+        }
+        case A_DEVCOL:
+            collect_devcol(c, m, n, ns, colpath);
+            break;
+        default:
+            break; /* parser rejects other members */
+        }
+    }
+}
+
+/* ---------------- constant evaluation (globals + -xw) ---------------- */
+
+static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
+    memset(out, 0, sizeof *out);
+    switch (e->kind) {
+    case A_INT:  out->valid = true; out->type = OK_NUMBER; out->i = e->ival; return true;
+    case A_DEC:  out->valid = true; out->type = OK_DECIMAL; out->d = e->dval; return true;
+    case A_BOOL: out->valid = true; out->type = OK_BOOL; out->b = e->bval; return true;
+    case A_TEXT: out->valid = true; out->type = OK_TEXT;
+        out->t = ok_xstrndup(e->str, e->str_len); out->t_len = e->str_len; return true;
+    case A_UN: {
+        ConstVal v;
+        if (!const_eval(c, e->a, &v)) return false;
+        if (e->uop == UN_NEG) {
+            if (v.type == OK_NUMBER) { out->valid = true; out->type = OK_NUMBER; out->i = (uint64_t)(-(int64_t)v.i); return true; }
+            if (v.type == OK_DECIMAL) { out->valid = true; out->type = OK_DECIMAL; out->d = -v.d; return true; }
+            return false;
+        }
+        if (v.type == OK_BOOL) { out->valid = true; out->type = OK_BOOL; out->b = !v.b; return true; }
+        return false;
+    }
+    case A_BIN: {
+        ConstVal l, r;
+        if (!const_eval(c, e->a, &l) || !const_eval(c, e->b, &r)) return false;
+        if (l.type != r.type) return false;
+        switch (e->op) {
+        case OP_ADD:
+            if (l.type == OK_NUMBER) { out->valid = true; out->type = OK_NUMBER; out->i = l.i + r.i; return true; }
+            if (l.type == OK_DECIMAL) { out->valid = true; out->type = OK_DECIMAL; out->d = l.d + r.d; return true; }
+            if (l.type == OK_TEXT) { /* literal concatenation folds (spec §9) */
+                out->valid = true; out->type = OK_TEXT;
+                out->t = ok_xmalloc(l.t_len + r.t_len);
+                memcpy(out->t, l.t, l.t_len);
+                memcpy(out->t + l.t_len, r.t, r.t_len);
+                out->t_len = l.t_len + r.t_len;
+                free(l.t); free(r.t);
+                return true;
+            }
+            return false;
+        case OP_SUB:
+            if (l.type == OK_NUMBER) { out->valid = true; out->type = OK_NUMBER; out->i = l.i - r.i; return true; }
+            if (l.type == OK_DECIMAL) { out->valid = true; out->type = OK_DECIMAL; out->d = l.d - r.d; return true; }
+            return false;
+        case OP_MUL:
+            if (l.type == OK_NUMBER) { out->valid = true; out->type = OK_NUMBER; out->i = l.i * r.i; return true; }
+            if (l.type == OK_DECIMAL) { out->valid = true; out->type = OK_DECIMAL; out->d = l.d * r.d; return true; }
+            return false;
+        case OP_DIV:
+            if (l.type == OK_NUMBER) {
+                if (r.i == 0) {
+                    serr(c, e, "division by zero in a constant expression.");
+                    return false;
+                }
+                out->valid = true; out->type = OK_NUMBER; out->i = l.i / r.i; return true;
+            }
+            if (l.type == OK_DECIMAL) { out->valid = true; out->type = OK_DECIMAL; out->d = l.d / r.d; return true; }
+            return false;
+        case OP_MOD:
+            if (l.type == OK_NUMBER) {
+                if (r.i == 0) {
+                    serr(c, e, "remainder by zero in a constant expression.");
+                    return false;
+                }
+                out->valid = true; out->type = OK_NUMBER; out->i = l.i % r.i; return true;
+            }
+            return false;
+        case OP_AND: if (l.type == OK_BOOL) { out->valid = true; out->type = OK_BOOL; out->b = l.b && r.b; return true; } return false;
+        case OP_OR:  if (l.type == OK_BOOL) { out->valid = true; out->type = OK_BOOL; out->b = l.b || r.b; return true; } return false;
+        case OP_EQ: case OP_NEQ: case OP_LT: case OP_LE: case OP_GT: case OP_GE: {
+            out->type = OK_BOOL;
+            bool res = false;
+            if (l.type == OK_NUMBER) {
+                switch (e->op) {
+                case OP_EQ: res = l.i == r.i; break;
+                case OP_NEQ: res = l.i != r.i; break;
+                case OP_LT: res = l.i < r.i; break;
+                case OP_LE: res = l.i <= r.i; break;
+                case OP_GT: res = l.i > r.i; break;
+                case OP_GE: res = l.i >= r.i; break;
+                default: return false;
+                }
+            } else if (l.type == OK_DECIMAL) {
+                switch (e->op) {
+                case OP_EQ: res = l.d == r.d; break;
+                case OP_NEQ: res = l.d != r.d; break;
+                case OP_LT: res = l.d < r.d; break;
+                case OP_LE: res = l.d <= r.d; break;
+                case OP_GT: res = l.d > r.d; break;
+                case OP_GE: res = l.d >= r.d; break;
+                default: return false;
+                }
+            } else if (l.type == OK_BOOL) {
+                if (e->op == OP_EQ) res = l.b == r.b;
+                else if (e->op == OP_NEQ) res = l.b != r.b;
+                else return false;
+            } else return false;
+            out->valid = true; out->b = res;
+            return true;
+        }
+        }
+        return false;
+    }
+    default:
+        return false;
+    }
+}
+
+/* ---------------- phase 2: check ---------------- */
+
+static OkType check_expr(SemaCtx *c, Node *e);
+static void check_stmt_list(SemaCtx *c, Vec *body);
+static void check_stmt(SemaCtx *c, Node *s);
+
+/* Resolve a dotted path to a symbol; reports and returns NULL on failure. */
+static Symbol *resolve_path(SemaCtx *c, Node *n, bool want_var) {
+    const char *full = path_join_str(n->parts, n->nparts);
+    Symbol *first = scope_lookup(c->cur_scope, n->parts[0]);
+    if (!first) {
+        Diag *d = serr(c, n, "unknown name `%s`.", full);
+        const char *sug = ok_suggest_name(c->cur_scope, n->parts[0]);
+        if (sug) diag_note(d, "did you mean `%s`?", sug);
+        else diag_note(d, "names come from this file, its columns, main.ok, and used modules (`greeting.greet`).");
+        return NULL;
+    }
+    if (n->nparts == 1) {
+        if (want_var && first->kind != SYM_VAR) {
+            serr(c, n, "`%s` is a %s, not a variable — it cannot be assigned or read as a value.",
+                 full, first->kind == SYM_FUNC ? "function" : "namespace");
+            return NULL;
+        }
+        if (first->kind == SYM_VAR) first->used = true;
+        return first;
+    }
+    /* dotted: walk namespaces */
+    Symbol *cur = first;
+    for (size_t i = 1; i < n->nparts; i++) {
+        if (cur->kind != SYM_NS) {
+            serr(c, n, "`%s` is not a namespace — `.` cannot follow it in 0.1.",
+                 path_join_str(n->parts, i));
+            return NULL;
+        }
+        Symbol *next = scope_find_local(cur->ns, n->parts[i]);
+        if (!next) {
+            Diag *d = serr(c, n, "`%s` has no member `%s`.", path_join_str(n->parts, i), n->parts[i]);
+            diag_note(d, "available: the public names of `%s`.", n->parts[0]);
+            return NULL;
+        }
+        cur = next;
+    }
+    if (want_var && cur->kind != SYM_VAR) {
+        serr(c, n, "`%s` is a %s, not a variable — it cannot be assigned or read as a value.",
+             full, cur->kind == SYM_FUNC ? "function" : "namespace");
+        return NULL;
+    }
+    if (cur->kind == SYM_VAR) cur->used = true;
+    return cur;
+}
+
+/* require a type with a good message */
+static void require_text_feature(SemaCtx *c, Node *n) {
+    if (!c->cur_mod->features[OK_FEATURE_TEXT]) {
+        Diag *d = serr(c, n, "the text subsystem is not active in this file.");
+        diag_note(d, "add `type.text=1` at the top of the file to activate `write` and `print` (spec §5).");
+    }
+}
+
+static OkType check_call(SemaCtx *c, Node *n) {
+    const char *full = path_join_str(n->parts, n->nparts);
+    Symbol *target = resolve_path(c, n, false);
+    if (!target) return OK_VOID;
+    if (target->kind != SYM_FUNC) {
+        serr(c, n, "`%s` is not a function — it cannot be called.", full);
+        return OK_VOID;
+    }
+    FuncInfo *fi = target->func;
+    n->finfo = fi;
+
+    if (n->args.len != fi->nparams) {
+        Diag *d = serr(c, n, "`%s` expects %zu argument%s, but %zu were given.",
+                       full, fi->nparams, fi->nparams == 1 ? "" : "s", n->args.len);
+        char sig[256];
+        size_t off = 0;
+        off += snprintf(sig + off, sizeof sig - off, "signature: %s(", full);
+        for (size_t k = 0; k < fi->nparams && off < sizeof sig - 1; k++)
+            off += snprintf(sig + off, sizeof sig - off, "%s%s.%s", k ? ", " : "",
+                            ok_type_name(fi->param_types[k]), fi->param_names[k]);
+        snprintf(sig + off, sizeof sig - off, ") -> %s", ok_type_name(fi->ret));
+        diag_note(d, "%s", sig);
+        /* still check the args that were supplied */
+    }
+    size_t check_n = n->args.len < fi->nparams ? n->args.len : fi->nparams;
+    for (size_t i = 0; i < n->args.len; i++) {
+        Node *arg = n->args.items[i];
+        OkType at = check_expr(c, arg);
+        if (i < check_n) {
+            OkType want = fi->param_types[i];
+            if (!assignable(at, want)) {
+                Diag *d = serr(c, arg, "argument %zu of `%s` must be `%s`, but a `%s` value was given.",
+                               i + 1, full, ok_type_name(want), ok_type_name(at));
+                diag_note(d, "conversions between text and numbers are explicit builtins (planned; spec §4.4).");
+            } else if (at != want && c->opt->warnings && arg->kind != A_INT) {
+                swarn(c, arg, "argument %zu of `%s` implicitly widens from `number` to `decimal`.",
+                      i + 1, full);
+            }
+        }
+    }
+    n->rtype = fi->ret;
+    return fi->ret;
+}
+
+static OkType check_write(SemaCtx *c, Node *n) {
+    require_text_feature(c, n);
+    if (n->args.len != 1) {
+        serr(c, n, "`write` takes exactly one value (`write(x)`), but %zu were given.", n->args.len);
+    }
+    for (size_t i = 0; i < n->args.len; i++)
+        check_expr(c, (Node *)n->args.items[i]);
+    n->rtype = OK_VOID;
+    return OK_VOID;
+}
+
+static OkType check_bin(SemaCtx *c, Node *e) {
+    OkType lt = check_expr(c, e->a);
+    OkType rt = check_expr(c, e->b);
+
+    switch (e->op) {
+    case OP_AND: case OP_OR: {
+        if (lt != OK_BOOL || rt != OK_BOOL) {
+            serr(c, e, "`and`/`or` combine `bool` values, but `%s` and `%s` were given.",
+                 ok_type_name(lt), ok_type_name(rt));
+        }
+        e->rtype = OK_BOOL;
+        return OK_BOOL;
+    }
+    case OP_EQ: case OP_NEQ: {
+        if (lt == OK_TEXT && rt == OK_TEXT) { e->rtype = OK_BOOL; return OK_BOOL; }
+        if (lt == OK_BOOL && rt == OK_BOOL) { e->rtype = OK_BOOL; return OK_BOOL; }
+        if (assignable(lt, rt) || assignable(rt, lt)) {
+            if (lt != rt && c->opt->warnings && !(e->a->kind == A_INT) && !(e->b->kind == A_INT))
+                swarn(c, e, "comparison mixes `number` and `decimal` — the `number` side widens.");
+            e->rtype = OK_BOOL;
+            return OK_BOOL;
+        }
+        serr(c, e, "`%s` and `%s` cannot be compared for equality.",
+             ok_type_name(lt), ok_type_name(rt));
+        e->rtype = OK_BOOL;
+        return OK_BOOL;
+    }
+    case OP_LT: case OP_LE: case OP_GT: case OP_GE: {
+        if ((lt == OK_NUMBER || lt == OK_DECIMAL) && (rt == OK_NUMBER || rt == OK_DECIMAL)) {
+            if (lt != rt && c->opt->warnings && !(e->a->kind == A_INT) && !(e->b->kind == A_INT))
+                swarn(c, e, "comparison mixes `number` and `decimal` — the `number` side widens.");
+            e->rtype = OK_BOOL;
+            return OK_BOOL;
+        }
+        if (lt == OK_TEXT && rt == OK_TEXT) {
+            serr(c, e, "text is not ordered — only `==` and `!=` are defined for `text` in 0.1.");
+            e->rtype = OK_BOOL;
+            return OK_BOOL;
+        }
+        serr(c, e, "`%s` and `%s` cannot be ordered.", ok_type_name(lt), ok_type_name(rt));
+        e->rtype = OK_BOOL;
+        return OK_BOOL;
+    }
+    case OP_ADD: {
+        if (lt == OK_TEXT && rt == OK_TEXT) { e->rtype = OK_TEXT; return OK_TEXT; }
+        goto arith;
+    }
+    case OP_SUB: case OP_MUL: case OP_DIV: {
+        if (lt == OK_TEXT || rt == OK_TEXT) {
+            serr(c, e, "`+` concatenates `text` with `text`; `%s` and `%s` do not combine.",
+                 ok_type_name(lt), ok_type_name(rt));
+            e->rtype = lt == OK_TEXT ? OK_TEXT : OK_NUMBER;
+            return e->rtype;
+        }
+        goto arith;
+    }
+    case OP_MOD: {
+        if (lt == OK_NUMBER && rt == OK_NUMBER) { e->rtype = OK_NUMBER; return OK_NUMBER; }
+        if (lt == OK_DECIMAL || rt == OK_DECIMAL) {
+            serr(c, e, "remainder (`%%`) is defined for `number` only in 0.1; a decimal remainder builtin is planned.");
+        } else {
+            serr(c, e, "`%%` needs `number` operands, but `%s` and `%s` were given.",
+                 ok_type_name(lt), ok_type_name(rt));
+        }
+        e->rtype = OK_NUMBER;
+        return OK_NUMBER;
+    }
+    }
+arith: ;
+    bool numnum = lt == OK_NUMBER && rt == OK_NUMBER;
+    bool numdec = (lt == OK_NUMBER && rt == OK_DECIMAL) || (lt == OK_DECIMAL && rt == OK_NUMBER);
+    bool decdec = lt == OK_DECIMAL && rt == OK_DECIMAL;
+    if (numnum) { e->rtype = OK_NUMBER; return OK_NUMBER; }
+    if (numdec || decdec) {
+        if (numdec && c->opt->warnings) {
+            /* literal number in a decimal context is silent (spec §4.4) */
+            if (!(e->a->kind == A_INT && lt == OK_NUMBER) && !(e->b->kind == A_INT && rt == OK_NUMBER))
+                swarn(c, e, "arithmetic mixes `number` and `decimal` — the `number` operand widens to `decimal`.");
+        }
+        e->rtype = OK_DECIMAL;
+        return OK_DECIMAL;
+    }
+    if (lt == OK_BOOL || rt == OK_BOOL) {
+        serr(c, e, "`bool` values do not take arithmetic (use `and`/`or`/`not`).");
+    } else {
+        serr(c, e, "`%s` and `%s` do not combine arithmetically.",
+             ok_type_name(lt), ok_type_name(rt));
+    }
+    e->rtype = OK_NUMBER;
+    return OK_NUMBER;
+}
+
+static OkType check_expr(SemaCtx *c, Node *e) {
+    e->checked = true;
+    switch (e->kind) {
+    case A_INT:  e->rtype = OK_NUMBER; return OK_NUMBER;
+    case A_DEC:  e->rtype = OK_DECIMAL; return OK_DECIMAL;
+    case A_BOOL: e->rtype = OK_BOOL; return OK_BOOL;
+    case A_TEXT: e->rtype = OK_TEXT; return OK_TEXT;
+    case A_PATH: {
+        Symbol *s = resolve_path(c, e, true);
+        if (!s) { e->rtype = OK_NUMBER; return OK_NUMBER; }
+        e->sym = s;
+        e->rtype = s->type;
+        return s->type;
+    }
+    case A_CALL:  return check_call(c, e);
+    case A_WRITE: return check_write(c, e);
+    case A_BIN:   return check_bin(c, e);
+    case A_UN: {
+        OkType t = check_expr(c, e->a);
+        if (e->uop == UN_NEG) {
+            if (t != OK_NUMBER && t != OK_DECIMAL)
+                serr(c, e, "unary `-` needs a `number` or `decimal`, but `%s` was given.", ok_type_name(t));
+            e->rtype = t;
+            return t;
+        }
+        if (t != OK_BOOL)
+            serr(c, e, "`not` needs a `bool`, but `%s` was given.", ok_type_name(t));
+        e->rtype = OK_BOOL;
+        return OK_BOOL;
+    }
+    default:
+        serr(c, e, "this expression form is not valid here.");
+        e->rtype = OK_VOID;
+        return OK_VOID;
+    }
+}
+
+/* does a statement list always flow out of the function (return/break/continue
+ * or when/else where both branches do)? conservative (spec §8.2). */
+static bool list_exits(Vec *body) {
+    for (size_t i = 0; i < body->len; i++) {
+        Node *s = body->items[i];
+        if (s->kind == A_RETURN || s->kind == A_BREAK || s->kind == A_CONTINUE)
+            return true;
+        if (s->kind == A_WHEN && s->body_else.len > 0 &&
+            list_exits(&s->body) && list_exits(&s->body_else))
+            return true;
+    }
+    return false;
+}
+static bool list_returns(Vec *body) {
+    for (size_t i = 0; i < body->len; i++) {
+        Node *s = body->items[i];
+        if (s->kind == A_RETURN && s->a) return true;
+        if (s->kind == A_WHEN && s->body_else.len > 0 &&
+            list_returns(&s->body) && list_returns(&s->body_else))
+            return true;
+    }
+    return false;
+}
+
+static void check_func_body(SemaCtx *c, Node *fn, FuncInfo *fi) {
+    Scope *fs = scope_new("the function", c->cur_scope);
+    c->cur_scope = fs;
+    c->cur_func = fi;
+    c->in_loop = false;
+
+    /* parameters live in the function scope */
+    fi->param_syms = ok_xmalloc((fn->nparams ? fn->nparams : 1) * sizeof(Symbol *));
+    for (size_t i = 0; i < fn->nparams; i++) {
+        Symbol *ps = scope_insert(fs, fn->params[i].name, SYM_VAR, fn->line, fn->col);
+        ps->type = fn->params[i].type;
+        ps->decl = fn;
+        ps->used = true; /* params count as used */
+        fi->param_syms[i] = ps;
+    }
+
+    check_stmt_list(c, &fn->body);
+
+    /* valued functions must return on every path (spec §8.2) */
+    if (fi->ret != OK_VOID && !list_returns(&fn->body)) {
+        Diag *d = serr(c, fn, "function `%s` promises a `%s` result, but some paths fall off the end without `return`.",
+                       fi->name, ok_type_name(fi->ret));
+        diag_note(d, "Okular checks every exit path conservatively: loops never count as guaranteed returns.");
+    }
+
+    /* unused locals (warning) */
+    if (c->opt->warnings) {
+        for (size_t i = 0; i < fs->n; i++) {
+            Symbol *s = fs->syms[i];
+            if (s->kind == SYM_VAR && !s->used && s->decl && s->decl->kind == A_VARDECL) {
+                swarn(c, s->decl, "variable `%s` is never used.", s->name);
+            }
+        }
+    }
+
+    c->cur_scope = fs->parent;
+    c->cur_func = NULL;
+}
+
+static void check_stmt(SemaCtx *c, Node *s) {
+    switch (s->kind) {
+    case A_VARDECL: {
+        OkType it = check_expr(c, s->a);
+        if (!assignable(it, s->otype)) {
+            Diag *d = serr(c, s, "variable `%s` is `%s`, but the initializer is `%s`.",
+                           s->name, ok_type_name(s->otype), ok_type_name(it));
+            diag_note(d, "only `number` -> `decimal` widening is implicit; everything else must match exactly.");
+        } else if (it != s->otype && c->opt->warnings && s->a->kind != A_INT) {
+            swarn(c, s, "initializer implicitly widens from `number` to `decimal` for `%s`.", s->name);
+        }
+        Symbol *ex = scope_insert(c->cur_scope, s->name, SYM_VAR, s->line, s->col);
+        if (ex->decl && ex->decl != s) {
+            serr(c, s, "duplicate definition of `%s` in this scope.", s->name);
+            break;
+        }
+        if (c->opt->extra_warnings && ex->scope != c->cur_scope) {
+            /* shadowing an outer name (inserted into an ancestor before) */
+        }
+        ex->type = s->otype;
+        ex->decl = s;
+        s->sym = ex;
+        break;
+    }
+    case A_ASSIGN: {
+        Symbol *target = resolve_path(c, s, true);
+        if (!target) break;
+        s->sym = target;
+        OkType vt = check_expr(c, s->a);
+        if (!assignable(vt, target->type)) {
+            serr(c, s, "cannot assign a `%s` value to `%s`, which is `%s`.",
+                 ok_type_name(vt), path_join_str(s->parts, s->nparts), ok_type_name(target->type));
+        } else if (vt != target->type && c->opt->warnings && s->a->kind != A_INT) {
+            swarn(c, s, "assignment implicitly widens from `number` to `decimal`.");
+        }
+        break;
+    }
+    case A_EXPRSTMT: {
+        OkType t = check_expr(c, s->a);
+        if (s->a->kind != A_CALL && s->a->kind != A_WRITE) {
+            serr(c, s->a, "an expression statement must be a call like `physics.fall(3)` or `write(x)`.");
+        }
+        (void)t;
+        break;
+    }
+    case A_WHEN: {
+        OkType ct = check_expr(c, s->a);
+        if (ct != OK_BOOL) {
+            Diag *d = serr(c, s->a, "the `when` condition must be `bool`, but `%s` was given.", ok_type_name(ct));
+            diag_note(d, "comparisons (`==`, `<`, ...) produce `bool`.");
+        }
+        Scope *sc = scope_new("the when block", c->cur_scope);
+        c->cur_scope = sc;
+        check_stmt_list(c, &s->body);
+        c->cur_scope = sc->parent;
+        if (s->body_else.len) {
+            Scope *sc2 = scope_new("the else block", c->cur_scope);
+            c->cur_scope = sc2;
+            check_stmt_list(c, &s->body_else);
+            c->cur_scope = sc2->parent;
+        }
+        break;
+    }
+    case A_LOOP_COUNT: {
+        OkType ft = check_expr(c, s->a);
+        OkType bt = check_expr(c, s->b);
+        if (ft != OK_NUMBER) serr(c, s->a, "the loop start must be `number`, but `%s` was given.", ok_type_name(ft));
+        if (bt != OK_NUMBER) serr(c, s->b, "the loop bound must be `number`, but `%s` was given.", ok_type_name(bt));
+
+        Scope *sc = scope_new("the loop", c->cur_scope);
+        c->cur_scope = sc;
+        Symbol *lv = scope_insert(sc, s->name, SYM_VAR, s->line, s->col);
+        lv->type = OK_NUMBER;
+        lv->decl = s;
+        lv->used = true;
+        s->sym = lv; /* IR needs the loop variable's slot symbol */
+        bool saved = c->in_loop;
+        c->in_loop = true;
+        check_stmt_list(c, &s->body);
+        c->in_loop = saved;
+        c->cur_scope = sc->parent;
+        break;
+    }
+    case A_LOOP_COND: {
+        OkType ct = check_expr(c, s->a);
+        if (ct != OK_BOOL) serr(c, s->a, "the loop condition must be `bool`, but `%s` was given.", ok_type_name(ct));
+        Scope *sc = scope_new("the loop", c->cur_scope);
+        c->cur_scope = sc;
+        bool saved = c->in_loop;
+        c->in_loop = true;
+        check_stmt_list(c, &s->body);
+        c->in_loop = saved;
+        c->cur_scope = sc->parent;
+        break;
+    }
+    case A_BREAK:
+        if (!c->in_loop) serr(c, s, "`break` is only meaningful inside a loop.");
+        break;
+    case A_CONTINUE:
+        if (!c->in_loop) serr(c, s, "`continue` is only meaningful inside a loop.");
+        break;
+    case A_PRINT:
+        require_text_feature(c, s);
+        break;
+    case A_WRITE:
+        check_write(c, s);
+        break;
+    case A_DIRECTIVE:
+    case A_LANGCOL:
+        /* top-level constructs; validated during collect */
+        break;
+    case A_RETURN: {
+        if (!c->cur_func) { serr(c, s, "`return` is only valid inside a function."); break; }
+        OkType rt = c->cur_func->ret;
+        if (s->a) {
+            OkType vt = check_expr(c, s->a);
+            if (rt == OK_VOID) {
+                Diag *d = serr(c, s, "this function returns nothing, so `return` must not carry a value.");
+                diag_found(d, "returned a `%s` value.", ok_type_name(vt));
+            } else if (!assignable(vt, rt)) {
+                serr(c, s, "this function must return `%s`, but `return` gives `%s`.",
+                     ok_type_name(rt), ok_type_name(vt));
+            } else if (vt != rt && c->opt->warnings && s->a->kind != A_INT) {
+                swarn(c, s, "return value implicitly widens from `number` to `decimal`.");
+            }
+        } else {
+            if (rt != OK_VOID && !c->cur_func->is_entry) {
+                serr(c, s, "this function promises a `%s` result — `return` needs a value.", ok_type_name(rt));
+            }
+        }
+        break;
+    }
+    default:
+        serr(c, s, "this statement is not allowed here.");
+    }
+}
+
+static void check_stmt_list(SemaCtx *c, Vec *body) {
+    for (size_t i = 0; i < body->len; i++) {
+        Node *s = body->items[i];
+        check_stmt(c, s);
+        /* unreachable code after an exiting statement (spec §14, -w) */
+        if (c->opt->warnings && i + 1 < body->len) {
+            Vec one; one.items = &body->items[i]; one.len = 1; one.cap = 1;
+            if (list_exits(&one)) {
+                Node *next = body->items[i + 1];
+                swarn(c, next, "unreachable code — the statement above always exits this block.");
+            }
+        }
+    }
+}
+
+/* check one column's members (recursively) with the column's namespace scope */
+static void check_column(SemaCtx *c, Node *col, Scope *ns) {
+    for (size_t k = 0; k < col->body.len; k++) {
+        Node *mem = col->body.items[k];
+        if (mem->kind == A_FUNC) {
+            if (mem->finfo) {
+                c->cur_scope = ns;
+                check_func_body(c, mem, mem->finfo);
+            }
+        } else if (mem->kind == A_VARDECL) {
+            ConstVal cv;
+            size_t mark = c->de->errors;
+            bool okc = const_eval(c, mem->a, &cv);
+            if (!okc) {
+                if (c->de->errors == mark) {
+                    Diag *d = serr(c, mem, "the initializer of `%s.%s` is not a compile-time constant.",
+                                   col->name, mem->name);
+                    diag_note(d, "global initializers must be literal or foldable values in 0.1 (spec §7); use main.ok top-level statements for computed setup.");
+                }
+                c->cur_scope = ns;
+                check_expr(c, mem->a);
+            } else {
+                if (!assignable(cv.type, mem->otype)) {
+                    serr(c, mem, "`%s.%s` is `%s`, but the initializer is `%s`.",
+                         col->name, mem->name, ok_type_name(mem->otype), ok_type_name(cv.type));
+                } else if (cv.type == OK_NUMBER && mem->otype == OK_DECIMAL) {
+                    cv.type = OK_DECIMAL; cv.d = (double)cv.i;
+                }
+                if (mem->sym) mem->sym->cval = cv;
+            }
+        } else if (mem->kind == A_DEVCOL) {
+            Symbol *nested = scope_find_local(ns, mem->name);
+            if (nested && nested->ns) check_column(c, mem, nested->ns);
+        }
+    }
+}
+
+/* check one module's declarations and bodies */
+static void check_module(SemaCtx *c, OkModule *m, Scope *scope) {
+    c->cur_mod = m;
+    c->cur_scope = scope;
+
+    for (size_t i = 0; i < m->ast->body.len; i++) {
+        Node *n = m->ast->body.items[i];
+        switch (n->kind) {
+        case A_FUNC: {
+            if (n->finfo) {
+                c->cur_scope = scope;
+                check_func_body(c, n, n->finfo);
+            }
+            break;
+        }
+        case A_VARDECL: {
+            /* global: initializer must be a compile-time constant (spec §7) */
+            ConstVal cv;
+            size_t mark = c->de->errors;
+            bool okc = const_eval(c, n->a, &cv);
+            if (!okc) {
+                if (c->de->errors == mark) {
+                    Diag *d = serr(c, n, "the initializer of global `%s` is not a compile-time constant.",
+                                   n->name);
+                    diag_note(d, "global initializers must be literal or foldable values in 0.1 (spec §7); use main.ok top-level statements for computed setup.");
+                }
+                c->cur_scope = scope;
+                check_expr(c, n->a); /* still type-check it for more diagnostics */
+            } else {
+                if (!assignable(cv.type, n->otype)) {
+                    serr(c, n, "variable `%s` is `%s`, but the initializer is `%s`.",
+                         n->name, ok_type_name(n->otype), ok_type_name(cv.type));
+                } else if (cv.type == OK_NUMBER && n->otype == OK_DECIMAL) {
+                    cv.type = OK_DECIMAL; cv.d = (double)cv.i; /* widen silently for .data */
+                }
+                if (n->sym) n->sym->cval = cv;
+            }
+            break;
+        }
+        case A_DEVCOL: {
+            Symbol *colsym = scope_find_local(scope, n->name);
+            if (colsym && colsym->ns) check_column(c, n, colsym->ns);
+            break;
+        }
+        case A_DIRECTIVE:
+        case A_LANGCOL:
+            /* collected/validated in phase 1; no body to check */
+            break;
+        default:
+            /* statements: only legal in main.ok (spec §7) */
+            if (strcmp(m->name, "main") != 0) {
+                Diag *d = serr(c, n, "top-level statements are only allowed in `main.ok`.");
+                diag_note(d, "source files expose declarations; their code runs when called (spec §6.2).");
+                break;
+            }
+            /* main top level runs as the entry function: return = exit code */
+            if (!m->entry) {
+                m->entry = funcinfo_new("__ok_entry", "__ok_entry", OK_NUMBER, NULL, m);
+                m->entry->is_entry = true;
+            }
+            c->cur_func = m->entry;
+            c->cur_scope = scope;
+            check_stmt(c, n);
+            c->cur_func = NULL;
+            break;
+        }
+    }
+}
+
+/* ---------------- driver ---------------- */
+
+bool sema_run(OkProject *p, DiagEngine *de, const OkOptions *opt) {
+    SemaCtx c;
+    c.de = de; c.proj = p; c.opt = opt;
+    c.root = scope_new("main.ok", NULL);
+    c.cur_mod = NULL; c.cur_scope = NULL; c.cur_func = NULL; c.in_loop = false;
+
+    size_t errmark = de->errors;
+
+    /* phase 1: collect symbols, module scopes */
+    for (size_t i = 0; i < p->modules.len; i++) {
+        OkModule *m = p->modules.items[i];
+        if (m->state != MOD_LOADED) continue;
+        if (strcmp(m->name, "main") == 0) {
+            collect_toplevel(&c, m, m->ast, c.root);
+        } else {
+            Scope *mscope = scope_new(m->name, c.root);
+            collect_toplevel(&c, m, m->ast, mscope);
+            /* bind the module namespace into root (spec §6.2) */
+            Symbol *bind = scope_insert(c.root, m->name, SYM_NS, 0, 0);
+            if (bind->ns && bind->ns != mscope) {
+                diag_error_noloc(de, "module name `%s` collides with another module or a main.ok column.", m->name);
+            }
+            bind->ns = mscope;
+        }
+    }
+
+    /* phase 2: check bodies */
+    for (size_t i = 0; i < p->modules.len; i++) {
+        OkModule *m = p->modules.items[i];
+        if (m->state != MOD_LOADED) continue;
+        Scope *mscope = (strcmp(m->name, "main") == 0)
+            ? c.root
+            : scope_find_local(c.root, m->name)->ns;
+        bool saved = de->force_warning;
+        if (!m->required && !opt->strict)
+            de->force_warning = true; /* optional policy (brief §36); NOT in strict */
+        size_t mark = de->len;
+        check_module(&c, m, mscope);
+        if (de->errors > mark) {
+            m->broken = true;
+        } else if (!m->required) {
+            /* downgraded errors (was-error diagnostics) mean the optional
+             * module failed to compile and will be skipped (brief §36) */
+            for (size_t k = mark; k < de->len; k++)
+                if (de->items[k].downgraded) { m->broken = true; break; }
+        }
+        de->force_warning = saved;
+    }
+
+    return de->errors == errmark;
+}

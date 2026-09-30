@@ -1,0 +1,5 @@
+math = {
+    function.double(number.x) -> number {
+        return x * 2
+    }
+}.end

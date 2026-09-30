@@ -1,0 +1,15 @@
+# greeting.ok — a reusable source component (spec §6).
+#
+# Its public names are reached from main.ok as `greeting.<name>`.
+# Top-level statements are not allowed here; components expose declarations.
+#
+# (text + number concatenation is deliberately not implicit in Okular:
+#  compose output with write() or use the planned conversion builtins.)
+
+function.hello() -> text {
+    return "Hello "
+}
+
+function.shout(text.word) -> text {
+    return word + "!"
+}

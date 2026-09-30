@@ -1,0 +1,14 @@
+type.text=1
+type.number score = 85
+when (score >= 90) {
+    write("A")
+}
+else {
+    when (score >= 80) {
+        write("B")
+    }
+    else {
+        write("C")
+    }
+}
+print

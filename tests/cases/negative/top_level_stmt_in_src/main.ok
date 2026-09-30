@@ -1,0 +1,6 @@
+type.text=1
+[source.files.use] = {
+    "bad"
+}.end
+write("hi")
+print

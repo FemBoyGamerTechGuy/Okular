@@ -1,0 +1,31 @@
+# HelloProject — the brief §80 demonstration project.
+#
+# Shows: main.ok as the composition root, [source.files.use] module loading,
+# a developer column as a namespace, and functions from src/ components.
+
+type.text=1
+
+[source.files.use] = {
+    "greeting"
+}.end
+
+# a developer column is a named namespace (spec §3.3)
+config = {
+    type.number times = 3
+    type.text separator = " "
+}.end
+
+# main.ok composes the components and runs the program:
+# write() composes a line from pieces; print flushes it (spec §11)
+type.number i = 0
+loop (i from 1 to config.times) {
+    write(greeting.hello())
+    write(i)
+    write(config.separator)
+}
+print
+
+write(greeting.shout("okular"))
+print
+
+return 0

@@ -1,0 +1,13 @@
+type.text=1
+type.number x = 2 + 3 * 4
+type.number y = (2 + 3) * 4
+type.number z = 100 / 7
+type.number m = 100 % 7
+write(x)
+write(" ")
+write(y)
+write(" ")
+write(z)
+write(" ")
+write(m)
+print

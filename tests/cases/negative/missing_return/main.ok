@@ -1,0 +1,6 @@
+type.text=1
+function.f(number.x) -> number {
+    when (x > 5) {
+        return 1
+    }
+}

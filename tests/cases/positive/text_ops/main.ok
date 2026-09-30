@@ -1,0 +1,9 @@
+type.text=1
+type.text a = "Ok" + "ul" + "ar"
+type.text b = "Okular"
+write(a == b)
+write(" ")
+write(a != "other")
+write(" ")
+write("tab\tnl\nend")
+print

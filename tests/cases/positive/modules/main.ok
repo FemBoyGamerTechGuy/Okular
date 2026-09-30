@@ -1,0 +1,6 @@
+type.text=1
+[source.files.use] = {
+    "helper"
+}.end
+write(helper.triple(5))
+print

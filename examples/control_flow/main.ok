@@ -1,0 +1,51 @@
+# control_flow — when/else, loops, break/continue (spec §10).
+#
+# The conditional is `when (cond) { } else { }` — deliberately not C's `if`.
+
+type.text=1
+
+# counted loop: `to` is INCLUSIVE, `until` is EXCLUSIVE (both documented)
+loop (i from 1 to 5) {
+    write(i)
+    write(" ")
+}
+print
+
+# condition loop
+type.number n = 5
+type.number factorial = 1
+loop (n > 1) {
+    factorial = factorial * n
+    n = n - 1
+}
+write("5! = ")
+write(factorial)
+print
+
+# break and continue
+loop (i from 1 until 20) {
+    when (i % 2 == 0) {
+        continue          # skip even numbers
+    }
+    when (i > 9) {
+        break             # stop past 9
+    }
+    write(i)
+    write(" ")
+}
+print
+
+# when/else chains read as questions about values
+type.number score = 77
+when (score >= 90) {
+    write("grade: A")
+}
+else {
+    when (score >= 75) {
+        write("grade: B")
+    }
+    else {
+        write("grade: C")
+    }
+}
+print

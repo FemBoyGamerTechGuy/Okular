@@ -1,0 +1,16 @@
+type.text=1
+physics = {
+    type.number g = 10
+
+    function.fall(number.t) -> number {
+        return g * t
+    }
+
+    deep = {
+        type.number secret = 7
+    }.end
+}.end
+write(physics.fall(3))
+write(" ")
+write(physics.deep.secret)
+print

@@ -1,0 +1,6 @@
+[source.files.use] = {
+    "a"
+}.end
+function.fb() -> number {
+    return a.fa()
+}

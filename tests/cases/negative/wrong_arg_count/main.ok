@@ -1,0 +1,6 @@
+type.text=1
+function.add(number.a, number.b) -> number {
+    return a + b
+}
+write(add(1))
+print

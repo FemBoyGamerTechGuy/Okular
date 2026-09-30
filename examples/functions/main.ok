@@ -1,0 +1,47 @@
+# functions — declarations, parameters, returns, recursion (spec §8.2).
+#
+# Note the two type spellings, both pinned by the language's own examples:
+#   statement declarations:  type.number x = 1
+#   signatures:              function.add(number.a, number.b) -> number
+
+type.text=1
+
+function.add(number.a, number.b) -> number {
+    return a + b
+}
+
+function.greet(text.who) -> text {
+    return "Hello, " + who + "!"
+}
+
+function.fib(number.n) -> number {
+    when (n < 2) {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+function.countdown(number.start) {
+    # a function with no `->` clause returns nothing;
+    # counted loops increment, so a countdown uses a condition loop
+    type.number i = start
+    loop (i > 0) {
+        write(i)
+        write(" ")
+        i = i - 1
+    }
+    print
+}
+
+write(greet("Okular"))
+print
+
+write("add(2, 3) = ")
+write(add(2, 3))
+print
+
+write("fib(12) = ")
+write(fib(12))
+print
+
+countdown(5)

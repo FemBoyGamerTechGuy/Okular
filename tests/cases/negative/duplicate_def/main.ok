@@ -1,0 +1,7 @@
+type.text=1
+function.f() -> number {
+    return 1
+}
+function.f() -> number {
+    return 2
+}
