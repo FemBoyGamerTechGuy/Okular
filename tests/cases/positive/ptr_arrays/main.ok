@@ -1,0 +1,66 @@
+type.text=1
+
+type.array<type.number, 4> data = {1, 2, 3, 4}
+
+function.zero_via_ptr(ptr<number>.p, number.n) {
+    loop (i from 0 until n) {
+        *(p + i) = 0
+    }
+}
+
+function.sum_via_ptr(ptr<number>.p, number.n) -> number {
+    type.number total = 0
+    loop (i from 0 until n) {
+        total = total + *(p + i)
+    }
+    return total
+}
+
+function.run() -> number {
+    type.array<type.number, 3> xs = {10, 20, 30}
+    type.ptr<type.number> p1 = &xs[1]
+    write(*p1)
+    print
+    *p1 = 200
+    write(xs[1])
+    print
+
+    type.ptr<type.number> p0 = &xs[0]
+    write(p1 - p0)
+    print
+
+    type.number s = sum_via_ptr(&xs[0], 3)
+    write(s)
+    print
+
+    type.array<type.number, 3> ys = {0, 0, 0}
+    zero_via_ptr(&ys[0], 3)
+    write(ys[0] + ys[1] + ys[2])
+    print
+
+    type.ptr<type.number> gd = &data[0]
+    write(*(gd + 2))
+    print
+    *(gd + 3) = 400
+    write(data[3])
+    print
+
+    type.array<type.array<type.number, 2>, 2> grid = {{1, 2}, {3, 4}}
+    type.ptr<type.number> cell = &grid[1][0]
+    write(*cell)
+    print
+    *cell = 30
+    write(grid[1][0])
+    print
+
+    type.array<type.int8, 4> b = {-1, -2, -3, -4}
+    type.ptr<type.int8> bp = &b[0]
+    write(*bp)
+    print
+    *(bp + 3) = 127
+    write(b[3])
+    print
+    return 0
+}
+
+run()

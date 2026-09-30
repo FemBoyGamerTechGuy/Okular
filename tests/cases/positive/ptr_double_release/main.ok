@@ -1,0 +1,8 @@
+type.text=1
+function.run() -> number {
+    type.ptr<type.number> p = alloc<type.number>(2)
+    release(p)
+    release(p)
+    return 0
+}
+run()

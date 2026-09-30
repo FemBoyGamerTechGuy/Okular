@@ -21,10 +21,14 @@ typedef enum {
     A_ARRAYLIT,      /* { e1, e2, ... } array literal (declaration initializers) */
     A_INDEX,         /* base[index] (base in a, index in b) */
     A_CONV,          /* explicit conversion builtin T.to_U(x) (a = value, otype = target) */
+    A_NULL,          /* the `null` literal (rtype ty_null) */
+    A_ALLOC,         /* alloc<T>(count) (a = count, otype = ptr<T>) */
     /* statements */
     A_VARDECL,       /* type.<T> name = init (init may be A_ARRAYLIT) */
     A_ASSIGN,        /* path = value */
     A_INDEXASSIGN,   /* base[index] = value (base a, index b, value c) */
+    A_DEREFASSIGN,   /* *ptr = value (ptr in a, value in c) — 0.4, spec §12 */
+    A_RELEASE,       /* release(ptr) — statement, a = pointer expression */
     A_EXPRSTMT,      /* expression statement (calls / write only, checked in sema) */
     A_WHEN,          /* when (cond) { } else { } */
     A_LOOP_COUNT,    /* loop (i from a to/until b) { } */
@@ -45,7 +49,7 @@ typedef enum {
     OP_AND, OP_OR,
 } BinOp;
 
-typedef enum { UN_NEG, UN_NOT } UnOp;
+typedef enum { UN_NEG, UN_NOT, UN_ADDR, UN_DEREF } UnOp;
 
 typedef struct Node Node;
 

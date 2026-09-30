@@ -284,6 +284,7 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
     case A_INT:  out->valid = true; out->type = ty_number; out->i = e->ival; return true;
     case A_DEC:  out->valid = true; out->type = ty_decimal; out->d = e->dval; return true;
     case A_BOOL: out->valid = true; out->type = ty_bool; out->b = e->bval; return true;
+    case A_NULL: out->valid = true; out->type = ty_null; out->i = 0; return true;
     case A_TEXT: out->valid = true; out->type = ty_text;
         out->t = ok_xstrndup(e->str, e->str_len); out->t_len = e->str_len; return true;
     case A_UN: {
@@ -559,6 +560,11 @@ static bool const_into_type(SemaCtx *c, Node *init, ConstVal *cv, OkType to) {
         cv->i = ty_reencode(cv->i, to);
         return true;
     }
+    if (ty_is_ptr(to)) {          /* null initializes any pointer */
+        cv->type = to;
+        cv->i = 0;
+        return true;
+    }
     return false;
 }
 
@@ -745,6 +751,10 @@ static OkType check_write(SemaCtx *c, Node *n) {
             Diag *d = serr(c, arg, "`write` prints one value at a time, not a whole array.");
             diag_note(d, "loop over the array and `write(xs[i])` for each element (spec §11).");
         }
+        if (ty_is_ptr(at) || at == ty_null) {
+            Diag *d = serr(c, arg, "`write` does not print pointer values in 0.4.");
+            diag_note(d, "compare with `== null` for checks; debug address printing is planned (spec §11).");
+        }
     }
     n->rtype = ty_void;
     return ty_void;
@@ -778,6 +788,70 @@ static OkType check_bin(SemaCtx *c, Node *e) {
     if (!rt_eff) rt_eff = rt;
     OkType ct = ty_common(lt_eff, rt_eff);
     e->otype = ct;
+
+    /* ---- pointer operations (spec §12) ---- */
+    {
+        bool lp = ty_is_ptr(lt), rp = ty_is_ptr(rt);
+        bool ln = (lt == ty_null), rn = (rt == ty_null);
+        if (lp || rp || ln || rn) {
+            if (e->op == OP_EQ || e->op == OP_NEQ) {
+                bool ok_pairs = (lp && rp && lt == rt)
+                             || (lp && rn) || (rp && ln) || (ln && rn);
+                if (!ok_pairs) {
+                    Diag *d = serr(c, e, "`%s` and `%s` cannot be compared — pointers compare only with pointers of the same type or with `null`.",
+                                   ok_type_name(lt), ok_type_name(rt));
+                    (void)d;
+                }
+                e->otype = lp ? lt : (rp ? rt : ty_number);
+                e->rtype = ty_bool;
+                return ty_bool;
+            }
+            if (e->op == OP_ADD || e->op == OP_SUB) {
+                if (lp && rp) {
+                    if (e->op == OP_ADD || lt != rt) {
+                        Diag *d = serr(c, e, "pointers do not add; `%s` and `%s` combine only as `p - q` (element difference).",
+                                       ok_type_name(lt), ok_type_name(rt));
+                        (void)d;
+                        e->rtype = ty_number;
+                        return ty_number;
+                    }
+                    e->otype = lt;      /* p - q : number (element difference) */
+                    e->rtype = ty_number;
+                    return ty_number;
+                }
+                if (lp && ty_is_integer(rt)) {
+                    e->otype = lt;      /* p +/- n : ptr<T>, scaled by size(T) */
+                    e->rtype = lt;
+                    return lt;
+                }
+                if (rp && ty_is_integer(lt)) {
+                    if (e->op == OP_SUB) {
+                        serr(c, e, "`integer - pointer` is not defined — subtract from the pointer instead (`p - n`).");
+                    } else {
+                        e->otype = rt;  /* n + p : ptr<T> */
+                        e->rtype = rt;
+                        return rt;
+                    }
+                    e->rtype = ty_number;
+                    return ty_number;
+                }
+                Diag *d = serr(c, e, "`%s` and `%s` do not combine — pointers add or subtract integers, or subtract a matching pointer.",
+                               ok_type_name(lt), ok_type_name(rt));
+                (void)d;
+                e->rtype = ty_number;
+                return ty_number;
+            }
+            if (e->op == OP_AND || e->op == OP_OR) {
+                serr(c, e, "`and`/`or` combine `bool` values — compare pointers with `==`/`!=` first.");
+                e->rtype = ty_bool;
+                return ty_bool;
+            }
+            Diag *d = serr(c, e, "pointer values do not take arithmetic or ordering here — use `==`/`!=`, `p + n`, or `p - q`.");
+            (void)d;
+            e->rtype = ty_number;
+            return ty_number;
+        }
+    }
 
     switch (e->op) {
     case OP_AND: case OP_OR: {
@@ -894,6 +968,17 @@ static OkType check_expr(SemaCtx *c, Node *e) {
     case A_DEC:  e->rtype = ty_decimal; return ty_decimal;
     case A_BOOL: e->rtype = ty_bool; return ty_bool;
     case A_TEXT: e->rtype = ty_text; return ty_text;
+    case A_NULL: e->rtype = ty_null; return ty_null;
+    case A_ALLOC: {
+        OkType ct = check_expr(c, e->a);
+        if (!ty_is_integer(ct)) {
+            Diag *d = serr(c, e->a, "the element count of `alloc` must be an integer type, but `%s` was given.",
+                            ok_type_name(ct));
+            diag_note(d, "example: `alloc<type.number>(10)` allocates room for 10 numbers.");
+        }
+        e->rtype = e->otype;
+        return e->otype;
+    }
     case A_PATH: {
         Symbol *s = resolve_path(c, e, true);
         if (!s) { e->rtype = ty_number; return ty_number; }
@@ -919,17 +1004,22 @@ static OkType check_expr(SemaCtx *c, Node *e) {
     }
     case A_INDEX: {
         OkType bt = check_expr(c, e->a);
-        if (!bt || ty_kind(bt) != OK_ARRAY) {
-            Diag *d = serr(c, e, "this value is a `%s` — only arrays can be indexed.", ok_type_name(bt));
-            diag_note(d, "array indexing is `name[index]`; the index must be an integer type (spec §9).");
+        if ((!bt || ty_kind(bt) != OK_ARRAY) && !ty_is_ptr(bt)) {
+            Diag *d = serr(c, e, "this value is a `%s` — only arrays and pointers can be indexed.", ok_type_name(bt));
+            diag_note(d, "array indexing is `name[index]`; the index must be an integer type (spec §9/§12).");
             check_expr(c, e->b); /* still check the index */
             e->rtype = ty_number;
             return ty_number;
         }
         OkType it = check_expr(c, e->b);
         if (!ty_is_integer(it)) {
-            Diag *d = serr(c, e->b, "the array index must be an integer type, but `%s` was given.", ok_type_name(it));
-            diag_note(d, "out-of-bounds access (including negative indices) is a runtime trap (spec §8.4).");
+            Diag *d = serr(c, e->b, "the index must be an integer type, but `%s` was given.", ok_type_name(it));
+            diag_note(d, "out-of-bounds array access is a runtime trap; pointer indexing is unchecked (spec §8.4/§12).");
+        }
+        if (ty_is_ptr(bt)) {
+            /* pointer indexing: unchecked element access (spec §12) */
+            e->rtype = bt->elem;
+            return bt->elem;
         }
         e->rtype = bt->elem;
         return bt->elem;
@@ -942,10 +1032,40 @@ static OkType check_expr(SemaCtx *c, Node *e) {
             e->rtype = t;
             return t;
         }
-        if (t != ty_bool)
-            serr(c, e, "`not` needs a `bool`, but `%s` was given.", ok_type_name(t));
-        e->rtype = ty_bool;
-        return ty_bool;
+        if (e->uop == UN_NOT) {
+            if (t != ty_bool)
+                serr(c, e, "`not` needs a `bool`, but `%s` was given.", ok_type_name(t));
+            e->rtype = ty_bool;
+            return ty_bool;
+        }
+        if (e->uop == UN_ADDR) {
+            /* &x — address-of (spec §12): variables, array elements,
+             * and dereferences are addressable; all yield ptr<T> where
+             * T is the operand's type */
+            if (e->a->kind == A_PATH && e->a->sym) {
+                e->rtype = ty_ptr(e->a->sym->type);
+            } else if (e->a->kind == A_INDEX) {
+                e->rtype = ty_ptr(e->a->rtype);
+            } else if (e->a->kind == A_UN && e->a->uop == UN_DEREF) {
+                e->rtype = ty_ptr(e->a->rtype); /* &*p : ptr<T> when *p : T */
+            } else {
+                Diag *d = serr(c, e, "`&` needs a variable, an array element, or a dereference — not this expression.");
+                diag_note(d, "addressable forms: `&x`, `&xs[i]`, `&*p` (spec §12).");
+                e->rtype = NULL;
+                return NULL;
+            }
+            if (!e->rtype) { e->rtype = ty_ptr(ty_number); return e->rtype; }
+            return e->rtype;
+        }
+        /* UN_DEREF */
+        if (!ty_is_ptr(t)) {
+            Diag *d = serr(c, e, "`*` dereferences a pointer, but `%s` was given.", ok_type_name(t));
+            diag_note(d, "pointers come from `&x`, `alloc<T>(n)`, or pointer-typed values (spec §12).");
+            e->rtype = ty_number;
+            return ty_number;
+        }
+        e->rtype = t->elem;
+        return t->elem;
     }
     default:
         serr(c, e, "this expression form is not valid here.");
@@ -1093,20 +1213,20 @@ static void check_stmt(SemaCtx *c, Node *s) {
     }
     case A_INDEXASSIGN: {
         OkType bt = check_expr(c, s->a);   /* base: A_PATH or nested A_INDEX */
-        if (!bt || ty_kind(bt) != OK_ARRAY) {
-            Diag *d = serr(c, s, "this value is a `%s` — only array elements can be indexed for assignment.",
+        if ((!bt || ty_kind(bt) != OK_ARRAY) && !ty_is_ptr(bt)) {
+            Diag *d = serr(c, s, "this value is a `%s` — only array elements or pointers can be indexed for assignment.",
                            ok_type_name(bt));
-            diag_note(d, "store into arrays with `name[index] = value` (spec §8.4).");
+            diag_note(d, "store into arrays with `name[index] = value`, or through pointers with `p[index] = value` (spec §8.4/§12).");
             check_expr(c, s->b);
             check_expr(c, s->c);
             break;
         }
         OkType it = check_expr(c, s->b);
         if (!ty_is_integer(it)) {
-            Diag *d = serr(c, s->b, "the array index must be an integer type, but `%s` was given.", ok_type_name(it));
-            diag_note(d, "out-of-bounds access is a runtime trap (spec §8.4).");
+            Diag *d = serr(c, s->b, "the index must be an integer type, but `%s` was given.", ok_type_name(it));
+            diag_note(d, "out-of-bounds array access is a runtime trap; pointer indexing is unchecked (spec §8.4/§12).");
         }
-        OkType elem = bt->elem;
+        OkType elem = bt->elem;  /* array element or pointer pointee */
         OkType vt = check_expr(c, s->c);
         if (ty_kind(elem) == OK_ARRAY) {
             if (vt != elem) {
@@ -1117,11 +1237,47 @@ static void check_stmt(SemaCtx *c, Node *s) {
             break;
         }
         if (!assignable_value(c, s->c, vt, elem)) {
-            Diag *d = serr(c, s->c, "the array elements are `%s`, but a `%s` value was given.",
+            Diag *d = serr(c, s->c, "the elements are `%s`, but a `%s` value was given.",
                            ok_type_name(elem), ok_type_name(vt));
             diag_note(d, "safe widening is implicit; everything else converts explicitly (spec §4.4).");
         } else if (vt != elem && elem == ty_decimal && c->opt->warnings && s->c->kind != A_INT) {
             swarn(c, s, "element assignment implicitly widens to `decimal`.");
+        }
+        break;
+    }
+    case A_DEREFASSIGN: {
+        /* *p = value (spec §12) */
+        OkType pt = check_expr(c, s->a);
+        if (!ty_is_ptr(pt)) {
+            Diag *d = serr(c, s->a, "`*` stores through a pointer, but this value is `%s`.", ok_type_name(pt));
+            diag_note(d, "pointers come from `&x`, `alloc<T>(n)`, or pointer-typed values (spec §12).");
+            check_expr(c, s->c);
+            break;
+        }
+        OkType elem = pt->elem;
+        OkType vt = check_expr(c, s->c);
+        if (ty_kind(elem) == OK_ARRAY) {
+            if (vt != elem) {
+                Diag *d = serr(c, s->c, "`*p` is `%s`, but a `%s` value was given.",
+                               ok_type_name(elem), ok_type_name(vt));
+                diag_note(d, "storing a whole array copies it into the destination; the types must match exactly.");
+            }
+            break;
+        }
+        if (!assignable_value(c, s->c, vt, elem)) {
+            serr(c, s->c, "`*p` holds `%s`, but a `%s` value was given.",
+                 ok_type_name(elem), ok_type_name(vt));
+        } else if (vt != elem && elem == ty_decimal && c->opt->warnings && s->c->kind != A_INT) {
+            swarn(c, s, "deref assignment implicitly widens to `decimal`.");
+        }
+        break;
+    }
+    case A_RELEASE: {
+        OkType pt = check_expr(c, s->a);
+        if (!ty_is_ptr(pt) && pt != ty_null) {
+            Diag *d = serr(c, s->a, "`release` takes a pointer (or `null`, which is a no-op), but `%s` was given.",
+                           ok_type_name(pt));
+            diag_note(d, "heap blocks come from `alloc<T>(n)` (spec §12).");
         }
         break;
     }

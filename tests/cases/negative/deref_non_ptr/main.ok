@@ -1,0 +1,2 @@
+type.number x = 5
+type.number y = *x

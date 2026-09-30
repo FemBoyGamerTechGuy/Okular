@@ -1,12 +1,12 @@
 # Okular Language Specification
 
-**Version:** 0.3 (fixed-width integers)
+**Version:** 0.4 (pointers & manual memory)
 **Status:** Evolving draft
 **Implementation:** bootstrap compiler in C (`bootstrap/`)
 
-> 0.3 adds the fixed-width integer family with wrapping semantics, the
-> implicit widening lattice, and the `T.to_U(x)` conversion builtins
-> (§4.2/§4.4) on top of 0.2. See the changelog in §23.
+> 0.4 adds the pointer system — `ptr<T>` types, `&`/`*`, pointer
+> arithmetic and indexing, `alloc`/`release`, `null`, and a real heap
+> allocator (§12) — on top of 0.3. See the changelog in §23.
 
 > This specification is the source of truth for the Okular language.
 > When the implementation changes the language, this document changes with it.
@@ -76,25 +76,26 @@ are reserved for compiler internals.
 
 ### 1.5 Keywords
 
-Active in 0.1:
+Active in 0.4:
 
 ```
 type  function  struct  when  else  loop  from  to  until
 break  continue  return  print  write  true  false
-and  or  not  end
+and  or  not  end  alloc  release  null
 ```
 
 Reserved for designed-but-unimplemented features (using them as identifiers
 is a compile error, so future adoption is non-breaking):
 
 ```
-union  pointer  alloc  release  null  guard  fail  with
-priv  pub  match  case  const  ptr
+union  pointer  guard  fail  with
+priv  pub  match  case  const
 ```
 
-`libs`, `source`, `use`, and `array` are not keywords: they are contextual
-segments of language column paths or of type references (`[libs.use]`,
-`type.array<...>`) and may appear as ordinary identifiers elsewhere.
+`libs`, `source`, `use`, `array`, and `ptr` are not keywords: they are
+contextual segments of language column paths or of type references
+(`[libs.use]`, `type.array<...>`, `type.ptr<...>`) and may appear as
+ordinary identifiers elsewhere.
 
 ### 1.6 Number literals
 
@@ -568,10 +569,12 @@ function.<name>(<typeRef>.<param>, ...) [-> <typeRef>] { body }
 * Missing `return` on a valued function: compile error, checked by a
   reachability analysis of the body's terminal statements.
 * Array parameters are passed **by value**: the caller makes a private copy
-  and the callee sees only that copy (§8.4, D23).
-* Functions **cannot return arrays** in 0.2 — the return ABI carries a
-  single register value. This documented restriction lifts with the memory
-  milestone (§12).
+  and the callee sees only that copy (§8.4, D23). Reference-style parameter
+  passing is available through pointers since 0.4: `ptr<number>.p` hands the
+  caller's storage to the callee (out-parameters).
+* Functions **cannot return arrays directly** — the return ABI carries a
+  single register value. Since 0.4 the pointer route works: return
+  `ptr<array<T, N>>` (heap- or global-backed).
 
 ### 8.3 Structs (designed; not implemented in 0.1)
 
@@ -614,7 +617,8 @@ Rules:
 * **Value semantics.** Assignment (`a = b`), initialization from another array,
   and parameter passing **copy the contents**. Mutating a copy never touches
   the original; a function that mutates its parameter mutates only its own
-  copy. (Reference-style access arrives with pointers, §12.)
+  copy. (Reference-style access exists since 0.4: take `&xs[i]` or pass
+  `ptr<T>` — §12.)
 * **Indexing** is `name[index]` (§9); `name[index] = value` stores. Indices
   are any integer type (`number`, `int8`…`uint64`). Indexing chains nest
   for array-of-array types (`grid[1][2]`).
@@ -760,30 +764,53 @@ language keywords in 0.1 (they are not user-callable function values).
 
 ---
 
-## 12. Memory Model (design; implementation milestone 5)
+## 12. Memory Model (implemented in 0.4)
 
-Okular's memory design is committed even where 0.1 does not implement it:
+Okular's memory model is now real, not just designed:
 
-* **Stack allocation** is the default for locals.
+* **Stack allocation** is the default for locals (unchanged since 0.1).
 * **Manual heap control** is explicit and always available:
 
   ```ok
-  type.ptr<type.number> p = alloc<type.number>(1)
+  type.ptr<type.number> p = alloc<type.number>(3)
+  p[0] = 1
   release(p)
   ```
 
-  (grammar provisional, keyword `ptr`/`alloc`/`release` reserved)
-* Pointers are first-class: address-of (`&x`), dereference, pointer
-  arithmetic, null (`null` keyword reserved), comparisons.
-* **Safety is opt-out, not opt-in**: the default path is memory-safe, and
-  low-level operations are gated by explicit constructs (`type.mem=1`
-  feature directive planned), so beginners are not *forced* into unsafe code
-  and experts are never *blocked* from it.
-* No mandatory garbage collection (design principle: native performance).
-  Optional region/arena helpers are planned in the standard library.
-
-0.1 implements only stack frames and a static output buffer; all pointer and
-heap machinery is honestly marked NOT IMPLEMENTED in §22.
+* **Pointer types** are `ptr<T>` for any value type T (nested pointers
+  included: `ptr<ptr<number>>`). Declaration form `type.ptr<type.number>`,
+  parameter/return forms `ptr<number>.p`, `-> ptr<number>`.
+* **Pointers are first-class values**: address-of (`&x`, `&xs[i]`, `&*p`),
+  dereference (`*p` as expression, `*p = v` as statement), pointer
+  indexing (`p[i]`), arithmetic (`p + n`, `p - n` scaled by `size(T)`;
+  `p - q` is the signed element difference), comparisons (`==`, `!=`
+  against a matching pointer or `null`), and `null` itself (assignable to
+  any `ptr<T>`; `release(null)` is a no-op).
+* **The heap is a real allocator** (runtime shim): mmap-backed pools,
+  16-byte block headers, first-fit with splitting, address-ordered free
+  list with neighbor coalescing. Zero-byte allocations trap; releasing an
+  invalid or already-released pointer is detected through header
+  validation and traps.
+* **Safety profile, honestly stated:**
+  * Dereferencing or indexing through `null` traps (exit 73).
+  * `alloc(0)` and invalid/double `release` trap (exit 74).
+  * **Pointer indexing is NOT bounds-checked** — an allocation's length is
+    not recoverable from a derived pointer. Arrays (`array<T, N>`) remain
+    the always-checked default (§8.4).
+  * **Use-after-release is NOT detected** (no quarantine). Releasing
+    memory that has live pointers into it is undefined behavior, exactly
+    as documented here.
+  * **Dangling stack pointers** are possible: `&local` escaping its
+    function (for example by returning it) is undefined behavior. Static
+    escape analysis is future work; the hazard is stated plainly instead
+    of being hidden.
+  * Integers never convert to or from pointers — no
+    number-to-address casts in 0.4 (a `type.mem=1`-gated raw-address
+    facility remains the designed escape hatch for driver-level work).
+* No garbage collection, mandatory or otherwise (design principle: native
+  performance). Region/arena helpers are planned in the standard library.
+* Global pointer variables initialize to `null` only; `&global` in a
+  global initializer awaits relocation support (state it, don't fake it).
 
 ---
 
@@ -793,8 +820,10 @@ heap machinery is honestly marked NOT IMPLEMENTED in §22.
   executable is produced from required code.
 * **Runtime fatal errors** — traps with a message and a nonzero exit code:
   array bounds and text-arena exhaustion exit 70; **integer division by zero
-  (0.3) exits 71**; output-buffer overflow exits 74; internal runtime errors
-  use 75+. Implemented for the cases the runtime can hit.
+  (0.3) exits 71**; **null dereference (0.4) exits 73**; **invalid or
+  zero-sized allocation / invalid release (0.4) exits 74**; output-buffer
+  overflow exits 75; internal runtime errors use 76+. Implemented for the
+  cases the runtime can hit.
 * **Recoverable errors** — designed model: valued functions can signal
   failure through a `guard`/`fail` mechanism with explicit propagation:
 
@@ -1069,9 +1098,9 @@ An implementation claiming "Okular 0.1" must:
 | `loop` counted (to/until) + conditional | §10 | implemented |
 | `break`/`continue` | §10 | implemented |
 | `write`/`print` buffer model | §11 | implemented |
-| Pointers, manual memory | §12 | NOT IMPLEMENTED |
+| Pointers, manual memory | §12 | implemented (unchecked indexing, use-after-release, dangling `&local` documented) |
 | Recoverable errors (`guard`/`fail`) | §13 | NOT IMPLEMENTED |
-| Runtime traps (buffer overflow, array bounds, div by zero) | §13 | implemented |
+| Runtime traps (bounds, div by zero, null deref, bad alloc/release) | §13 | implemented |
 | Diagnostics: format, multi-error recovery | §14 | implemented |
 | `-w`, `-xw`, `-s`, `-l` flags | §14 | implemented (no legacy constructs exist yet) |
 | x86-64 freestanding native codegen | §15 | implemented |
@@ -1085,6 +1114,28 @@ An implementation claiming "Okular 0.1" must:
 ---
 
 ## 23. Changelog
+
+### 0.4
+
+* **Pointers & manual memory** (§12): `ptr<T>` types (nested pointers
+  included), `&x` / `&xs[i]` / `&*p` address-of, `*p` dereference loads and
+  `*p = v` stores, unchecked pointer indexing `p[i]`, scaled arithmetic
+  `p ± n`, element-difference `p - q`, `==`/`!=` against matching pointers or
+  `null`, and the `null` literal (assignable to any pointer).
+* **Heap** (§12): `alloc<T>(count)` and `release(p)` over a real allocator —
+  mmap pools, 16-byte headers, first-fit with splitting, address-ordered
+  free list with coalescing; zero-size and invalid/double releases trap
+  (exit 74); `release(null)` is a no-op.
+* **Null safety** (§13): every dereference, pointer store, and pointer
+  index null-checks; `null` traps with exit 73.
+* Safety profile stated honestly: pointer indexing is unchecked, use-after-
+  release is undetected, and `&local` escaping its function is undefined —
+  documented in §12 rather than hidden. Arrays stay always-checked.
+* Runtime: `rt_alloc`/`rt_release` (freestanding, mmap syscall),
+  `rt_null_trap`.
+* IR: `I_ALLOC`, `I_RELEASE`, `I_PTRCHK`, `I_PTR_SCALE`, `I_PTR_DIFF`;
+  pointer arithmetic and comparisons lower through the typed stack machine.
+* Tests: 246 → 301 checks; example `examples/pointers`.
 
 ### 0.3
 

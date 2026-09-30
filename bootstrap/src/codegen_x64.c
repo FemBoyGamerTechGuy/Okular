@@ -260,8 +260,9 @@ static void emit_call(FnCtx *fc, IrInst *in) {
     buf_puts(o, "    mov rsp, rbx\n    pop rbx\n");
 
     /* result: every integer result travels extended in rax; decimal as
-     * raw bits in rax; text as the (ptr,len) pair */
-    if (ty_is_integer(fi->ret) || fi->ret == ty_bool) {
+     * raw bits in rax; text as the (ptr,len) pair; pointers as rax */
+    if (ty_is_integer(fi->ret) || fi->ret == ty_bool || ty_is_ptr(fi->ret)
+        || fi->ret == ty_null) {
         push_rax(o);
     } else if (fi->ret == ty_decimal) {
         buf_puts(o, "    movq xmm0, rax\n");
@@ -273,6 +274,17 @@ static void emit_call(FnCtx *fc, IrInst *in) {
 
 static void emit_binop(FnCtx *fc, IrInst *in) {
     Buf *o = fc->out;
+
+    /* pointer arithmetic: rax = pointer, rcx = integer scaled by size(T) */
+    if (ty_is_ptr(in->type) && (in->op == OP_ADD || in->op == OP_SUB)) {
+        size_t esz = ty_bytes(in->type->elem);
+        buf_puts(o, "    pop rcx\n    pop rax\n"); /* rcx = n, rax = p */
+        buf_printf(o, "    imul rcx, %zu\n", esz);
+        if (in->op == OP_ADD) buf_puts(o, "    add rax, rcx\n");
+        else                  buf_puts(o, "    sub rax, rcx\n");
+        push_rax(o);
+        return;
+    }
 
     if (in->type == ty_text) {
         /* only `+` (concat) reaches here; == / != also possible */
@@ -596,7 +608,8 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
     case I_RETURN:
         if (ty_kind(in->type) == OK_ARRAY)
             OK_ICE("RETURN of array type at %zu:%zu (sema should have rejected it)", in->line, in->col);
-        if (ty_is_integer(in->type) || in->type == ty_bool) {
+        if (ty_is_integer(in->type) || in->type == ty_bool || ty_is_ptr(in->type)
+            || in->type == ty_null) {
             pop_rax(o);
         } else if (in->type == ty_decimal) {
             pop_xmm0(o);
@@ -683,6 +696,55 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
                    (unsigned long long)in->i);
         break;
     }
+    case I_ALLOC: {
+        /* pop count (rax); bytes = count * size(T); rt_alloc(bytes) */
+        size_t esz = ty_bytes(in->type);
+        buf_puts(o, "    pop rax\n");
+        if (esz != 1) buf_printf(o, "    imul rax, %zu\n", esz);
+        buf_puts(o, "    mov rdi, rax\n");
+        call_aligned(o, "rt_alloc");
+        push_rax(o);
+        break;
+    }
+    case I_RELEASE: {
+        /* pop ptr; rt_release handles null (no-op) and validates headers */
+        buf_puts(o, "    pop rax\n    mov rdi, rax\n");
+        call_aligned(o, "rt_release");
+        break;
+    }
+    case I_PTRCHK: {
+        /* pop ptr; null dereferences trap (spec §13, exit 73); push back */
+        size_t pk = fc->div_seq++;   /* reuse the per-function label counter */
+        buf_puts(o, "    pop rax\n    test rax, rax\n");
+        buf_printf(o, "    jnz .Lpnk_%zu_%zu\n", fc->func_seq, pk);
+        buf_puts(o, "    call rt_null_trap\n"); /* never returns */
+        buf_printf(o, ".Lpnk_%zu_%zu:\n", fc->func_seq, pk);
+        push_rax(o);
+        break;
+    }
+    case I_PTR_SCALE: {
+        /* pop index (rcx), pop ptr (rax); addr = ptr + index*size(T) */
+        size_t esz = ty_bytes(in->type->elem);
+        buf_puts(o, "    pop rcx\n    pop rax\n");
+        if (esz == 1) {
+            buf_puts(o, "    add rax, rcx\n");
+        } else if (esz == 2 || esz == 4 || esz == 8) {
+            buf_printf(o, "    lea rax, [rax + rcx*%zu]\n", esz);
+        } else {
+            buf_printf(o, "    imul rcx, rcx, %zu\n    add rax, rcx\n", esz);
+        }
+        push_rax(o);
+        break;
+    }
+    case I_PTR_DIFF: {
+        /* pop q (rcx), pop p (rax); result = (p - q) / size(T), signed */
+        size_t esz = ty_bytes(in->type->elem);
+        buf_puts(o, "    pop rcx\n    pop rax\n");
+        buf_puts(o, "    sub rax, rcx\n    cqo\n");
+        buf_printf(o, "    mov rcx, %zu\n    idiv rcx\n", esz);
+        push_rax(o);
+        break;
+    }
     default:
         OK_ICE("unhandled IR kind %d at %zu:%zu", (int)in->kind, in->line, in->col);
     }
@@ -751,6 +813,11 @@ static void emit_const_elems(GlobCtx *g, const char *label, OkType t, ConstVal *
     case OK_UINT64:
         buf_printf(g->data, "    .quad %llu\n", (unsigned long long)cv->i);
         break;
+    case OK_PTR: case OK_NULL:
+        /* pointers in .data: the address bits (null = 0); address-of-global
+         * initializers arrive with the relocation milestone */
+        buf_printf(g->data, "    .quad %llu\n", (unsigned long long)cv->i);
+        break;
     case OK_DECIMAL: {
         union { double d; uint64_t u; } u;
         u.d = cv->d;
@@ -774,7 +841,7 @@ bool codegen_module(IrModule *im, const char *out_path) {
     Buf o;
     buf_init(&o);
 
-    buf_puts(&o, "# Okular 0.3 bootstrap — x86-64 Linux assembly\n");
+    buf_puts(&o, "# Okular 0.4 bootstrap — x86-64 Linux assembly\n");
     buf_puts(&o, "# module: ");
     buf_puts(&o, im->mod->name);
     buf_puts(&o, "\n    .intel_syntax noprefix\n\n    .text\n");

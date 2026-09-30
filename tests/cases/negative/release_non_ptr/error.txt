@@ -1,0 +1,1 @@
+`release` takes a pointer (or `null`, which is a no-op), but `number` was given

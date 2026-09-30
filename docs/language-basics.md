@@ -1,7 +1,7 @@
 # Okular Language Basics (0.1)
 
 A tour of what Okular 0.1 does today. The specification
-(`specs/spec-v0.3.md`) is the source of truth; this page is the friendly
+(`specs/spec-v0.4.md`) is the source of truth; this page is the friendly
 version. Everything shown here compiles and runs with the bootstrap
 compiler.
 
@@ -249,13 +249,13 @@ type.array<type.number, 5> copy = {0, 0, 0, 0, 0}
 copy = scores           # whole-array copy
 ```
 
-See `specs/spec-v0.3.md` §8.4 for the complete rules.
+See `specs/spec-v0.4.md` §8.4 for the complete rules.
 
-## What 0.3 does not have (yet)
+## What 0.4 does not have (yet)
 
 Structs, unions, pointers, manual heap management, dynamic-length arrays,
 FFI, threads, match expressions, type inference, constants, aliases, and
-visibility modifiers are all **designed** (see `specs/spec-v0.3.md` §20 and
+visibility modifiers are all **designed** (see `specs/spec-v0.4.md` §20 and
 `docs/roadmap.md`) and **not implemented**. The same goes for `f32` (a true
 32-bit float) and the `text` conversion builtins (`text.to_number`,
 `number.to_text`). The compiler says so plainly

@@ -12,6 +12,7 @@ static Type t_number_s = { OK_NUMBER, NULL, 0, "number",  64, true  };
 static Type t_dec_s    = { OK_DECIMAL, NULL, 0, "decimal", 0, false };
 static Type t_text_s   = { OK_TEXT,   NULL, 0, "text",     0, false };
 static Type t_bool_s   = { OK_BOOL,   NULL, 0, "bool",     0, false };
+static Type t_null_s   = { OK_NULL,   NULL, 0, "null",     0, false };
 
 static Type t_i8_s     = { OK_INT8,   NULL, 0, "int8",     8, true  };
 static Type t_i16_s    = { OK_INT16,  NULL, 0, "int16",   16, true  };
@@ -26,6 +27,7 @@ OkType ty_number  = &t_number_s;
 OkType ty_decimal = &t_dec_s;
 OkType ty_text    = &t_text_s;
 OkType ty_bool    = &t_bool_s;
+OkType ty_null    = &t_null_s;
 
 OkType ty_int8    = &t_i8_s;
 OkType ty_int16   = &t_i16_s;
@@ -56,6 +58,7 @@ static size_t scalar_bytes(TypeKind k) {
     case OK_INT8: case OK_UINT8: return 1;
     case OK_INT16: case OK_UINT16: return 2;
     case OK_INT32: case OK_UINT32: return 4;
+    case OK_PTR: case OK_NULL: return 8;   /* addresses are one word */
     default: return 8;   /* number, decimal */
     }
 }
@@ -64,6 +67,33 @@ size_t ty_bytes(OkType t) {
     if (!t) return 0;
     if (t->kind == OK_ARRAY) return ty_bytes(t->elem) * t->count;
     return scalar_bytes(t->kind);
+}
+
+/* ---- pointer interning (spec §12) ---- */
+
+typedef struct PtrEntry {
+    Type t;
+    struct PtrEntry *next;
+} PtrEntry;
+
+static PtrEntry *ptr_table[256];
+
+OkType ty_ptr(OkType elem) {
+    if (!elem || elem->kind == OK_VOID || elem->kind == OK_NULL) return NULL;
+    size_t h = (((size_t)(uintptr_t)elem) * 2654435761u) & 255u;
+    for (PtrEntry *e = ptr_table[h]; e; e = e->next)
+        if (e->t.elem == elem) return &e->t;
+    PtrEntry *e = ok_xmalloc(sizeof *e);
+    memset(e, 0, sizeof *e);
+    e->t.kind = OK_PTR;
+    e->t.elem = elem;
+    char buf[256];
+    int n = snprintf(buf, sizeof buf, "ptr<%s>", elem->name);
+    if (n < 0 || (size_t)n >= sizeof buf) n = (int)sizeof buf - 1;
+    e->t.name = ok_xstrndup(buf, (size_t)n);
+    e->next = ptr_table[h];
+    ptr_table[h] = e;
+    return &e->t;
 }
 
 OkType ty_array(OkType elem, size_t count) {
@@ -178,6 +208,8 @@ bool ty_sint_fits(int64_t v, OkType t) {
 bool ty_assignable(OkType from, OkType to) {
     if (!from || !to) return false;
     if (from == to) return true;
+    /* the null literal initializes any pointer (spec §12) */
+    if (from == ty_null && to->kind == OK_PTR) return true;
     /* integer -> decimal widens implicitly (as number did in 0.2) */
     if (to == ty_decimal && ty_is_integer(from)) return true;
     if (!ty_is_integer(from) || !ty_is_integer(to)) return false;
@@ -214,6 +246,8 @@ bool ty_convertible(OkType from, OkType to) {
     if (from == ty_text || to == ty_text) return false; /* planned, not built */
     if (ty_kind(from) == OK_ARRAY || ty_kind(to) == OK_ARRAY) return false;
     if (from == ty_void || to == ty_void) return false;
+    /* null -> ptr is a pure representation no-op for IR operand conversion */
+    if (from == ty_null && ty_is_ptr(to)) return true;
     if (ty_is_integer(from) && ty_is_integer(to)) return true;
     if (ty_is_integer(from) && to == ty_decimal) return true;
     if (from == ty_decimal && ty_is_integer(to)) return true;

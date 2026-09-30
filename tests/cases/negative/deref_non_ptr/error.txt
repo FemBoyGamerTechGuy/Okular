@@ -1,0 +1,1 @@
+`*` dereferences a pointer, but `number` was given

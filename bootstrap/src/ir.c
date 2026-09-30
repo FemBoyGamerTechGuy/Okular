@@ -173,22 +173,47 @@ static void build_expr(Ctx *c, Node *e) {
         /* base[index]: base evaluates to an address, index to an integer;
          * I_INDEX bounds-checks and scales (spec §9). The index's 64-bit
          * register representation is already the correct unsigned key —
-         * negative values are huge unsigned numbers and trap (spec §8.4). */
+         * negative values are huge unsigned numbers and trap (spec §8.4).
+         * Pointer bases scale without bounds checks (spec §12). */
         OkType base_ty = e->a->rtype;
-        if (!base_ty || ty_kind(base_ty) != OK_ARRAY) {
-            OK_ICE("A_INDEX with non-array base at %zu:%zu", e->line, e->col);
+        if (!base_ty || (ty_kind(base_ty) != OK_ARRAY && !ty_is_ptr(base_ty))) {
+            OK_ICE("A_INDEX with non-array non-pointer base at %zu:%zu", e->line, e->col);
         }
-        build_expr(c, e->a);            /* base address */
-        build_expr(c, e->b);            /* index: bits are the compare key */
-        IrInst ix = { .kind = I_INDEX, .type = base_ty,
-                      .line = e->line, .col = e->col };
-        emit(c->f, ix);
+        build_expr(c, e->a);            /* base address / pointer value */
+        if (ty_is_ptr(base_ty)) {
+            IrInst chk = { .kind = I_PTRCHK, .type = base_ty->elem,
+                          .line = e->line, .col = e->col };
+            emit(c->f, chk);
+            build_expr(c, e->b);
+            IrInst sc = { .kind = I_PTR_SCALE, .type = base_ty,
+                         .line = e->line, .col = e->col };
+            emit(c->f, sc);
+        } else {
+            build_expr(c, e->b);        /* index: bits are the compare key */
+            IrInst ix = { .kind = I_INDEX, .type = base_ty,
+                          .line = e->line, .col = e->col };
+            emit(c->f, ix);
+        }
         if (ty_kind(base_ty->elem) != OK_ARRAY) {
             IrInst ld = { .kind = I_LOAD_AT, .type = base_ty->elem,
                           .line = e->line, .col = e->col };
             emit(c->f, ld);
         }
         /* array elements that are themselves arrays stay as addresses */
+        break;
+    }
+    case A_NULL: {
+        IrInst inst = { .kind = I_CONST_INT, .type = ty_null, .i = 0,
+                        .line = e->line, .col = e->col };
+        emit(c->f, inst);
+        break;
+    }
+    case A_ALLOC: {
+        /* alloc<T>(count): count converts to number, bytes = count*size(T) */
+        build_operand_conv(c, e->a, ty_number);
+        IrInst inst = { .kind = I_ALLOC, .type = e->otype->elem,
+                        .line = e->line, .col = e->col };
+        emit(c->f, inst);
         break;
     }
     case A_CONV: {
@@ -226,10 +251,38 @@ static void build_expr(Ctx *c, Node *e) {
     case A_BIN: {
         /* operand type after literal adaptation + widening: sema stashed
          * the common type on the node (e->otype); recompute as fallback
-         * for recovery paths (spec §4.4) */
+         * for recovery paths (spec §4.4). Pointer arithmetic lowers here
+         * too: p±n scales by size(T); p-q is the element difference (§12) */
         OkType ot = e->otype;
         if (!ot) ot = ty_common(e->a->rtype, e->b->rtype);
         if (!ot) ot = (e->a->rtype ? e->a->rtype : ty_number); /* recovery */
+        if (ty_is_ptr(ot)) {
+            bool ap = ty_is_ptr(e->a->rtype), bp = ty_is_ptr(e->b->rtype);
+            if (ap && bp && e->op == OP_SUB) {
+                build_operand_conv(c, e->a, ot);
+                build_operand_conv(c, e->b, ot);
+                IrInst pd = { .kind = I_PTR_DIFF, .type = ot,
+                              .line = e->line, .col = e->col };
+                emit(c->f, pd);
+                break;
+            }
+            if (ap && !bp) {
+                /* p ± n: pointer first so the backend sees rax=ptr, rcx=n */
+                build_operand_conv(c, e->a, ot);
+                build_operand_conv(c, e->b, ty_number);
+            } else if (bp && !ap && e->op == OP_ADD) {
+                /* n + p commutes: push the pointer first */
+                build_operand_conv(c, e->b, ot);
+                build_operand_conv(c, e->a, ty_number);
+            } else {
+                build_operand_conv(c, e->a, ot);
+                build_operand_conv(c, e->b, ot);
+            }
+            IrInst inst = { .kind = I_BINOP, .op = e->op, .type = ot,
+                            .line = e->line, .col = e->col };
+            emit(c->f, inst);
+            break;
+        }
         build_operand_conv(c, e->a, ot);
         build_operand_conv(c, e->b, ot);
         IrInst inst = { .kind = I_BINOP, .op = e->op, .type = ot,
@@ -238,6 +291,58 @@ static void build_expr(Ctx *c, Node *e) {
         break;
     }
     case A_UN: {
+        if (e->uop == UN_ADDR) {
+            /* &x — address-of (spec §12): variables, array elements,
+             * pointer-indexed elements, and dereferences */
+            if (e->a->kind == A_PATH && e->a->sym) {
+                build_addr(c, e->a->sym, 0);
+                break;
+            }
+            if (e->a->kind == A_INDEX) {
+                OkType base_ty = e->a->a->rtype;
+                if (ty_is_ptr(base_ty)) {
+                    /* &p[i]: null-check, scale, keep the address */
+                    build_expr(c, e->a->a);
+                    IrInst chk = { .kind = I_PTRCHK, .type = base_ty->elem,
+                                  .line = e->line, .col = e->col };
+                    emit(c->f, chk);
+                    build_expr(c, e->a->b);
+                    IrInst sc = { .kind = I_PTR_SCALE, .type = base_ty,
+                                 .line = e->line, .col = e->col };
+                    emit(c->f, sc);
+                } else {
+                    /* &xs[i]: bounds-checked element address (no LOAD_AT) */
+                    build_expr(c, e->a->a);
+                    build_expr(c, e->a->b);
+                    IrInst ix = { .kind = I_INDEX, .type = base_ty,
+                                  .line = e->line, .col = e->col };
+                    emit(c->f, ix);
+                }
+                break;
+            }
+            if (e->a->kind == A_UN && e->a->uop == UN_DEREF) {
+                build_expr(c, e->a->a); /* &*p is p */
+                break;
+            }
+            OK_ICE("A_UN ADDR with non-addressable operand at %zu:%zu", e->line, e->col);
+        }
+        if (e->uop == UN_DEREF) {
+            /* *p — dereference (spec §12): null-check then load; a pointer
+             * to an array yields the array (its address) unchanged */
+            OkType pt = e->a->rtype;
+            if (!ty_is_ptr(pt))
+                OK_ICE("A_UN DEREF of non-pointer at %zu:%zu", e->line, e->col);
+            build_expr(c, e->a);
+            IrInst chk = { .kind = I_PTRCHK, .type = pt->elem,
+                          .line = e->line, .col = e->col };
+            emit(c->f, chk);
+            if (ty_kind(pt->elem) != OK_ARRAY) {
+                IrInst ld = { .kind = I_LOAD_AT, .type = pt->elem,
+                              .line = e->line, .col = e->col };
+                emit(c->f, ld);
+            }
+            break;
+        }
         build_expr(c, e->a);
         IrInst inst = { .kind = I_UNOP, .uop = e->uop, .type = e->a->rtype,
                         .line = e->line, .col = e->col };
@@ -310,17 +415,28 @@ static void build_stmt(StmtCtx *sc, Node *s) {
         break;
     }
     case A_INDEXASSIGN: {
-        /* base[index] = value (m[i][j] nests: s->a is the inner index) */
+        /* base[index] = value (m[i][j] nests: s->a is the inner index);
+         * base may be an array (checked) or a pointer (unchecked, §12) */
         OkType base_ty = s->a->rtype;
-        if (!base_ty || ty_kind(base_ty) != OK_ARRAY) {
-            OK_ICE("A_INDEXASSIGN with non-array base at %zu:%zu", s->line, s->col);
+        if (!base_ty || (ty_kind(base_ty) != OK_ARRAY && !ty_is_ptr(base_ty))) {
+            OK_ICE("A_INDEXASSIGN with non-array non-pointer base at %zu:%zu", s->line, s->col);
         }
         OkType elem = base_ty->elem;
-        build_expr(c, s->a);                 /* base address */
-        build_expr(c, s->b);                 /* index (bits are the key) */
-        IrInst ix = { .kind = I_INDEX, .type = base_ty,
-                      .line = s->line, .col = s->col };
-        emit(f, ix);
+        build_expr(c, s->a);                 /* base address / pointer value */
+        if (ty_is_ptr(base_ty)) {
+            IrInst chk = { .kind = I_PTRCHK, .type = elem,
+                          .line = s->line, .col = s->col };
+            emit(f, chk);
+            build_expr(c, s->b);
+            IrInst sc = { .kind = I_PTR_SCALE, .type = base_ty,
+                         .line = s->line, .col = s->col };
+            emit(f, sc);
+        } else {
+            build_expr(c, s->b);
+            IrInst ix = { .kind = I_INDEX, .type = base_ty,
+                          .line = s->line, .col = s->col };
+            emit(f, ix);
+        }
         if (ty_kind(elem) == OK_ARRAY) {
             /* element is itself an array: value is its address, copy it */
             build_expr(c, s->c);
@@ -333,6 +449,38 @@ static void build_stmt(StmtCtx *sc, Node *s) {
                           .line = s->line, .col = s->col };
             emit(f, st);
         }
+        break;
+    }
+    case A_DEREFASSIGN: {
+        /* *p = value (spec §12): null-check, then store (or copy an array) */
+        OkType pt = s->a->rtype;
+        if (!ty_is_ptr(pt))
+            OK_ICE("A_DEREFASSIGN with non-pointer at %zu:%zu", s->line, s->col);
+        OkType elem = pt->elem;
+        build_expr(c, s->a);                 /* pointer value */
+        IrInst chk = { .kind = I_PTRCHK, .type = elem,
+                      .line = s->line, .col = s->col };
+        emit(f, chk);
+        if (ty_kind(elem) == OK_ARRAY) {
+            /* *p = arr: dst address already on the stack; copy src into it */
+            build_expr(c, s->c);
+            IrInst cp = { .kind = I_COPY, .type = elem, .i = ty_bytes(elem),
+                          .line = s->line, .col = s->col };
+            emit(f, cp);
+        } else {
+            build_operand_conv(c, s->c, elem);
+            IrInst st = { .kind = I_STORE_AT, .type = elem,
+                          .line = s->line, .col = s->col };
+            emit(f, st);
+        }
+        break;
+    }
+    case A_RELEASE: {
+        /* release(p): null is a no-op inside rt_release (spec §12) */
+        build_expr(c, s->a);
+        IrInst rel = { .kind = I_RELEASE, .type = s->a->rtype,
+                       .line = s->line, .col = s->col };
+        emit(f, rel);
         break;
     }
     case A_EXPRSTMT: {
@@ -828,6 +976,24 @@ void ir_fold(IrFunc *f) {
         case I_STORE_AT: case I_COPY:
             if (sp >= 2) sp -= 2;
             break;
+        case I_ALLOC:
+            if (sp > 0) sp--;   /* count */
+            stack[sp++] = (FoldVal){ .known = false, .type = in.type };
+            break;
+        case I_RELEASE:
+            if (sp > 0) sp--;
+            break;
+        case I_PTRCHK:
+            if (sp > 0) stack[sp - 1].known = false; /* trap edge */
+            break;
+        case I_PTR_SCALE:
+            if (sp >= 2) sp -= 2;
+            stack[sp++] = (FoldVal){ .known = false, .type = in.type };
+            break;
+        case I_PTR_DIFF:
+            if (sp >= 2) sp -= 2;
+            stack[sp++] = (FoldVal){ .known = false, .type = ty_number };
+            break;
         case I_CALL:
             if ((size_t)in.nargs <= sp) sp -= (size_t)in.nargs;
             if (in.type != ty_void) stack[sp++] = (FoldVal){ .known = false, .type = in.type };
@@ -881,6 +1047,11 @@ static const char *ir_kind_name(IrKind k) {
     case I_LOAD_AT: return "LOAD_AT";
     case I_STORE_AT: return "STORE_AT";
     case I_COPY: return "COPY";
+    case I_ALLOC: return "ALLOC";
+    case I_RELEASE: return "RELEASE";
+    case I_PTRCHK: return "PTRCHK";
+    case I_PTR_SCALE: return "PTR_SCALE";
+    case I_PTR_DIFF: return "PTR_DIFF";
     }
     return "?";
 }
@@ -920,6 +1091,11 @@ void ir_dump(IrModule *im) {
             case I_INDEX: case I_LOAD_AT: case I_STORE_AT:
                 printf(" [%s]", ok_type_name(in->type)); break;
             case I_COPY: printf(" %llu bytes", (unsigned long long)in->i); break;
+            case I_ALLOC: printf(" [%s]", ok_type_name(in->type)); break;
+            case I_RELEASE: printf(" [%s]", ok_type_name(in->type)); break;
+            case I_PTRCHK: printf(" [%s]", ok_type_name(in->type)); break;
+            case I_PTR_SCALE: case I_PTR_DIFF:
+                printf(" [%s]", ok_type_name(in->type)); break;
             default: break;
             }
             printf("\n");

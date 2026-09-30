@@ -59,6 +59,15 @@ static void dump_stmt(Node *s, int ind) {
         dump_expr(s->b, ind + 2);
         dump_expr(s->c, ind + 2);
         break;
+    case A_DEREFASSIGN:
+        printf("deref-assign\n");
+        dump_expr(s->a, ind + 2);
+        dump_expr(s->c, ind + 2);
+        break;
+    case A_RELEASE:
+        printf("release\n");
+        dump_expr(s->a, ind + 2);
+        break;
     case A_WHEN:
         printf("when\n");
         dump_expr(s->a, ind + 2);
@@ -139,7 +148,16 @@ static void dump_expr(Node *e, int ind) {
         dump_expr(e->b, ind + 2);
         break;
     case A_UN:
-        printf("unop %s\n", e->uop == UN_NEG ? "-" : "not");
+        printf("unop %s\n",
+               e->uop == UN_NEG ? "-" : e->uop == UN_NOT ? "not"
+               : e->uop == UN_ADDR ? "&" : "*");
+        dump_expr(e->a, ind + 2);
+        break;
+    case A_NULL:
+        printf("null\n");
+        break;
+    case A_ALLOC:
+        printf("alloc -> %s\n", ok_type_name(e->otype));
         dump_expr(e->a, ind + 2);
         break;
     case A_ARRAYLIT:

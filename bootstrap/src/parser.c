@@ -115,7 +115,7 @@ static bool parse_type_prefix(Parser *p, OkType *out) {
     if (!expect(p, T_DOT, "`.` after `type` (as in `type.number`)")) return false;
     Tok *name = cur(p);
     if (!is(p, T_IDENT)) {
-        perr(p, name, "expected a type name after `type.` (number, decimal, text, bool, array<...>), but found %s.",
+        perr(p, name, "expected a type name after `type.` (number, decimal, text, bool, ptr<...>, array<...>), but found %s.",
              tok_kind_name(name->kind));
         return false;
     }
@@ -149,9 +149,25 @@ static bool parse_type_prefix(Parser *p, OkType *out) {
         *out = arr;
         return true;
     }
+    if (strcmp(name->text, "ptr") == 0) {
+        /* type.ptr<type.number> (spec §12) */
+        if (!expect(p, T_LT, "`<` after `ptr` (as in `type.ptr<type.number>`"))
+            return false;
+        OkType elem;
+        if (!parse_type_prefix(p, &elem)) return false;
+        if (!expect(p, T_GT, "`>` to close the pointer type")) return false;
+        if (!elem || ty_kind(elem) == OK_VOID || ty_kind(elem) == OK_NULL) {
+            perr(p, name, "a pointer needs a value type to point at (as in `type.ptr<type.number>`).");
+            return false;
+        }
+        OkType pt = ty_ptr(elem);
+        if (!pt) { perr(p, name, "this pointer type is too deep to intern."); return false; }
+        *out = pt;
+        return true;
+    }
     if (!ty_from_scalar_name(name->text, out)) {
         Diag *d = perr(p, name, "unknown type `%s`.", name->text);
-        diag_note(d, "the 0.3 types are: number, decimal, text, bool, int8, int16, int32, int64, uint8, uint16, uint32, uint64, byte, array<type, count>.");
+        diag_note(d, "the 0.4 types are: number, decimal, text, bool, int8, int16, int32, int64, uint8, uint16, uint32, uint64, byte, ptr<type, count>, array<type, count>.");
         diag_note(d, "`byte` is an alias of uint8; `int64` of number; `f64` of decimal.");
         return false;
     }
@@ -171,9 +187,23 @@ static bool parse_bare_type(Parser *p, OkType *out) {
         return false;
     }
     advance(p);
+    /* bare pointer form: ptr<number>.p (the full form type.ptr<type.number>.p
+     * also works through the T_KW_TYPE branch above) */
+    if (strcmp(name->text, "ptr") == 0 && is(p, T_LT)) {
+        advance(p); /* < */
+        OkType elem;
+        if (!parse_bare_type(p, &elem)) return false;
+        if (!expect(p, T_GT, "`>` to close the pointer type")) return false;
+        if (!elem || ty_kind(elem) == OK_VOID || ty_kind(elem) == OK_NULL) {
+            perr(p, name, "a pointer needs a value type to point at (as in `ptr<number>`).");
+            return false;
+        }
+        *out = ty_ptr(elem);
+        return *out != NULL;
+    }
     if (!ty_from_scalar_name(name->text, out)) {
         Diag *d = perr(p, name, "unknown type `%s`.", name->text);
-        diag_note(d, "the 0.3 types are: number, decimal, text, bool, int8, int16, int32, int64, uint8, uint16, uint32, uint64, byte, array<type, count>.");
+        diag_note(d, "the 0.4 types are: number, decimal, text, bool, int8, int16, int32, int64, uint8, uint16, uint32, uint64, byte, ptr<type, count>, array<type, count>.");
         diag_note(d, "array parameters use the full form: `type.array<type.number, 3>.xs`.");
         return false;
     }
@@ -247,6 +277,35 @@ static Node *parse_primary(Parser *p) {
         if (!expect(p, T_RPAREN, "`)` to close the parenthesized expression"))
             return NULL;
         return e;
+    }
+    case T_KW_NULL: {
+        /* the null pointer literal (spec §12) */
+        Node *n = node_new(p->ar, A_NULL, t->line, t->col);
+        advance(p);
+        return n;
+    }
+    case T_KW_ALLOC: {
+        /* alloc<type.T>(count) — manual heap allocation (spec §12) */
+        Node *n = node_new(p->ar, A_ALLOC, t->line, t->col);
+        advance(p);
+        if (!expect(p, T_LT, "`<` after `alloc` (as in `alloc<type.number>(1)`"))
+            { sync_stmt(p); return NULL; }
+        OkType elem;
+        if (!parse_type_prefix(p, &elem)) { sync_stmt(p); return NULL; }
+        if (!expect(p, T_GT, "`>` to close the allocated type")) { sync_stmt(p); return NULL; }
+        if (!elem || ty_kind(elem) == OK_VOID || ty_kind(elem) == OK_NULL) {
+            perr(p, t, "`alloc` needs a value type (as in `alloc<type.number>(1)`).");
+            sync_stmt(p);
+            return NULL;
+        }
+        OkType pt = ty_ptr(elem);
+        if (!pt) { perr(p, t, "this allocated type is too deep to intern."); sync_stmt(p); return NULL; }
+        n->otype = pt;
+        if (!expect(p, T_LPAREN, "`(` after the allocated type")) { sync_stmt(p); return NULL; }
+        n->a = parse_expr(p);
+        if (!n->a) { sync_stmt(p); return NULL; }
+        if (!expect(p, T_RPAREN, "`)` to close the allocation")) { sync_stmt(p); return NULL; }
+        return n;
     }
     case T_KW_WRITE:
         perr(p, t, "`write(...)` is a statement, not a value — it returns nothing.");
@@ -348,6 +407,25 @@ static Node *parse_unary(Parser *p) {
         if (!e) return NULL;
         Node *n = node_new(p->ar, A_UN, t->line, t->col);
         n->uop = UN_NOT; n->a = e;
+        return n;
+    }
+    if (is(p, T_AMP)) {
+        /* &x — address-of (spec §12) */
+        Tok *t = cur(p); advance(p);
+        Node *e = parse_unary(p);
+        if (!e) return NULL;
+        Node *n = node_new(p->ar, A_UN, t->line, t->col);
+        n->uop = UN_ADDR; n->a = e;
+        return n;
+    }
+    if (is(p, T_STAR)) {
+        /* *p — dereference (spec §12); in prefix position `*` is never
+         * multiplication (binary `*` always follows its left operand) */
+        Tok *t = cur(p); advance(p);
+        Node *e = parse_unary(p);
+        if (!e) return NULL;
+        Node *n = node_new(p->ar, A_UN, t->line, t->col);
+        n->uop = UN_DEREF; n->a = e;
         return n;
     }
     return parse_postfix(p);
@@ -572,6 +650,39 @@ static Node *parse_stmt(Parser *p) {
         Node *n = node_new(p->ar, A_PRINT, t->line, t->col);
         advance(p);
         return n;
+    }
+    case T_KW_RELEASE: {
+        /* release(p) — return a heap block (spec §12) */
+        Node *n = node_new(p->ar, A_RELEASE, t->line, t->col);
+        advance(p);
+        if (!expect(p, T_LPAREN, "`(` after `release`")) { sync_stmt(p); return n; }
+        n->a = parse_expr(p);
+        if (!n->a) { sync_stmt(p); return n; }
+        if (!expect(p, T_RPAREN, "`)` to close `release(...)`")) { sync_stmt(p); return n; }
+        return n;
+    }
+    case T_STAR: {
+        /* *p = value — dereference assignment (spec §12) */
+        Node *e = parse_unary(p);
+        if (!e) return NULL;
+        if (is(p, T_EQ)) {
+            advance(p);
+            Node *val = parse_expr(p);
+            if (!val) return NULL;
+            if (e->kind == A_UN && e->uop == UN_DEREF) {
+                Node *n = node_new(p->ar, A_DEREFASSIGN, t->line, t->col);
+                n->a = e->a;
+                n->c = val;
+                return n;
+            }
+            Diag *d = perr(p, t, "the left side of `=` must be a name, an array element, or a dereference.");
+            diag_note(d, "pointer stores use `*p = value` or `p[index] = value`.");
+            return NULL;
+        }
+        Diag *d = perr(p, t, "a statement that starts with `*` must be a pointer store (`*p = value`).");
+        (void)d;
+        sync_stmt(p);
+        return NULL;
     }
     case T_KW_BREAK: {
         Node *n = node_new(p->ar, A_BREAK, t->line, t->col);

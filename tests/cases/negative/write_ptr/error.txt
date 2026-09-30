@@ -1,0 +1,1 @@
+`write` does not print pointer values in 0.4

@@ -1,0 +1,88 @@
+# pointers.ok — manual memory in Okular 0.4 (spec §12).
+# Address-of, dereference, pointer arithmetic, alloc/release, null.
+
+type.text=1
+
+type.number hits = 0
+
+function.bump(ptr<number>.p, number.by) {
+    *p = *p + by
+}
+
+function.max_of(ptr<number>.a, ptr<number>.b) -> ptr<number> {
+    when (*a >= *b) { return a }
+    return b
+}
+
+function.swap(ptr<number>.a, ptr<number>.b) {
+    type.number tmp = *a
+    *a = *b
+    *b = tmp
+}
+
+function.walk_sum(ptr<number>.cells, number.n) -> number {
+    type.number total = 0
+    type.ptr<type.number> cur = cells
+    loop (i from 0 until n) {
+        total = total + *cur
+        cur = cur + 1
+    }
+    return total
+}
+
+function.run() -> number {
+    write("--- address-of and dereference ---")
+    print
+    type.number x = 10
+    type.number y = 30
+    bump(&x, 5)
+    bump(&y, 5)
+    write(x)
+    print
+    write(y)
+    print
+
+    write("--- pointers as function results ---")
+    print
+    type.ptr<type.number> best = max_of(&x, &y)
+    write(*best)
+    print
+
+    write("--- swap through pointers ---")
+    print
+    swap(&x, &y)
+    write(x)
+    print
+    write(y)
+    print
+
+    write("--- heap allocation ---")
+    print
+    type.ptr<type.number> cells = alloc<type.number>(5)
+    loop (i from 0 until 5) {
+        cells[i] = (i + 1) * 10
+    }
+    write(walk_sum(cells, 5))
+    print
+
+    type.ptr<type.number> walker = cells + 1
+    write(*walker)
+    print
+    write(walker - cells)
+    print
+    release(cells)
+
+    write("--- null discipline ---")
+    print
+    type.ptr<type.number> spare = null
+    when (spare == null) { write(true) }
+    print
+    release(spare)
+
+    bump(&hits, 1)
+    write(hits)
+    print
+    return 0
+}
+
+run()

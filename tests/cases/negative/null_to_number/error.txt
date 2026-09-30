@@ -1,0 +1,1 @@
+variable `x` is `number`, but the initializer is `null`

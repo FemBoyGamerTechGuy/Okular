@@ -1,0 +1,8 @@
+type.text=1
+function.run() -> number {
+    type.ptr<type.number> p = null
+    write(*p)
+    print
+    return 0
+}
+run()

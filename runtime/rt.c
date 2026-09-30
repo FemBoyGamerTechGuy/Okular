@@ -16,6 +16,9 @@
  *   rt_text_eq(lptr, llen, rptr, rlen) -> bool
  *   rt_bounds_trap(index, length)  array index out of bounds (spec §8.4)
  *   rt_div_trap()                  integer division by zero (spec §13)
+ *   rt_null_trap()                 dereference of null (spec §12/§13)
+ *   rt_alloc(bytes) -> ptr         heap allocation, first-fit + split (§12)
+ *   rt_release(ptr)                heap release with coalescing (§12)
  *   rt_trap(msg, len, code)      fatal runtime error (spec §13)
  */
 
@@ -169,8 +172,140 @@ void rt_div_trap(void) {
     sys_exit(71);
 }
 
-/* spec §8.4: array indexing is always bounds-checked; a violation is a
- * fatal runtime trap naming the index and the array length. */
+/* ---------------- heap allocator (spec §12, 0.4) ----------------
+ *
+ * A real allocator, not a stub: mmap-backed pools carved into blocks with
+ * 16-byte headers, a first-fit free list with splitting, and
+ * address-ordered insertion with neighbor coalescing on release.
+ *
+ * Block layout:  [ header 16B: size u64 + pad ][ payload ... ]
+ * All sizes are multiples of 16, so a released pointer whose header has a
+ * bogus size (double release, corruption) is detected and traps rather
+ * than silently corrupting the heap.
+ *
+ * Honest limits (documented in spec §12): use-after-release is NOT
+ * detected (no quarantine), and pointer indexing is unchecked. */
+
+#define HEAP_CHUNK (1 << 20)          /* 1 MiB growth unit */
+#define HEAP_ALIGN ((u64)16)
+
+typedef struct FreeBlock {
+    u64 size;                         /* payload bytes (mirrors the header) */
+    struct FreeBlock *next;           /* address-ordered free list */
+} FreeBlock;
+
+static FreeBlock *heap_free = 0;      /* sorted by address, ascending */
+static u64 heap_total = 0;
+
+static i64 sys_mmap(u64 len) {
+    i64 ret;
+    register i64 r10 __asm__("r10") = 0x22;   /* MAP_PRIVATE|MAP_ANONYMOUS */
+    register i64 r8  __asm__("r8")  = -1;
+    register i64 r9  __asm__("r9")  = 0;
+    __asm__ volatile ("syscall"
+                      : "=a"(ret)
+                      : "a"(9L), "D"(0UL), "S"(len), "d"(3L),
+                        "r"(r10), "r"(r8), "r"(r9)
+                      : "rcx", "r11", "memory");
+    return ret;
+}
+
+static void heap_grow(u64 need) {
+    u64 len = (need + HEAP_ALIGN + HEAP_CHUNK - 1) & ~(HEAP_CHUNK - 1);
+    i64 p = sys_mmap(len);
+    if (p < 0 && p > -4096)
+        rt_trap("heap exhausted (mmap failed)", 29, 74);
+    u8 *base = (u8 *)(u64)p;
+    u64 payload = len - HEAP_ALIGN;
+    *(u64 *)base = payload;                       /* first block header */
+    FreeBlock *fb = (FreeBlock *)(base + HEAP_ALIGN);
+    fb->size = payload;
+    /* the fresh chunk is the highest address: append to the list tail */
+    FreeBlock **pp = &heap_free;
+    while (*pp) pp = &(*pp)->next;
+    fb->next = 0;
+    *pp = fb;
+    heap_total += len;
+}
+
+/* rt_alloc(bytes) -> pointer (traps on zero/negative-shaped requests) */
+void *rt_alloc(u64 bytes) {
+    if (bytes == 0)
+        rt_trap("allocation of zero bytes", 25, 74);
+    u64 need = (bytes + HEAP_ALIGN - 1) & ~(HEAP_ALIGN - 1);
+
+    /* first fit with splitting */
+    FreeBlock **pp = &heap_free;
+    while (*pp) {
+        FreeBlock *fb = *pp;
+        if (fb->size >= need) {
+            u64 rem = fb->size - need;
+            if (rem >= HEAP_ALIGN + HEAP_ALIGN) {
+                /* split: allocate the front, free the tail */
+                u8 *data = (u8 *)fb;
+                u8 *tail = data + need;
+                u64 tail_payload = rem - HEAP_ALIGN;
+                *(u64 *)(tail - HEAP_ALIGN) = tail_payload;   /* tail header */
+                FreeBlock *nb = (FreeBlock *)tail;
+                nb->size = tail_payload;
+                nb->next = fb->next;
+                *pp = nb;
+                *(u64 *)(data - HEAP_ALIGN) = need;           /* allocated hdr */
+                return data;
+            }
+            /* close fit: hand out the whole block */
+            *pp = fb->next;
+            *(u64 *)((u8 *)fb - HEAP_ALIGN) = fb->size;
+            return fb;
+        }
+        pp = &fb->next;
+    }
+    heap_grow(need + HEAP_ALIGN);
+    /* the fresh chunk satisfies the request by construction */
+    return rt_alloc(bytes);
+}
+
+/* rt_release(ptr): null is a no-op; header shape is validated */
+void rt_release(void *ptr) {
+    if (!ptr) return;
+    u8 *data = (u8 *)ptr;
+    u64 size = *(u64 *)(data - HEAP_ALIGN);
+    if (size == 0 || (size & (HEAP_ALIGN - 1)) != 0)
+        rt_trap("release of an invalid or already-released heap pointer", 47, 74);
+    FreeBlock *fb = (FreeBlock *)data;
+    fb->size = size;
+    /* poison the header: a second release of this pointer reads a size
+     * with low bits set and traps (double-release detection) */
+    *(u64 *)(data - HEAP_ALIGN) = 1;
+
+    /* address-ordered insertion (remember the predecessor for coalescing) */
+    FreeBlock **pp = &heap_free;
+    while (*pp && (u8 *)*pp < data) pp = &(*pp)->next;
+    fb->next = *pp;
+    *pp = fb;
+
+    /* coalesce forward (with the next block) */
+    if (fb->next && (u8 *)fb + HEAP_ALIGN + fb->size == (u8 *)fb->next) {
+        fb->size += HEAP_ALIGN + fb->next->size;
+        fb->next = fb->next->next;
+        *(u64 *)(data - HEAP_ALIGN) = fb->size;   /* keep the header honest */
+    }
+    /* coalesce backward (with the previous block) */
+    FreeBlock *prev = 0, *cur = heap_free;
+    while (cur && cur != fb) { prev = cur; cur = cur->next; }
+    if (prev && (u8 *)prev + HEAP_ALIGN + prev->size == (u8 *)fb) {
+        prev->size += HEAP_ALIGN + fb->size;
+        prev->next = fb->next;
+    }
+}
+
+/* spec §12/§13: dereferencing or indexing through null traps (exit 73) */
+void rt_null_trap(void) {
+    sys_write(2, "okular runtime error: ", 22);
+    sys_write(2, "dereference of null pointer\n", 28);
+    sys_exit(73);
+}
+
 void rt_bounds_trap(i64 index, u64 length) {
     char msg[96];
     u64 n = 0;

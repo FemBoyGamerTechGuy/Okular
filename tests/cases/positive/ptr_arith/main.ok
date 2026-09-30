@@ -1,0 +1,59 @@
+type.text=1
+
+function.run() -> number {
+    type.ptr<type.number> p = alloc<type.number>(8)
+    loop (i from 0 until 8) {
+        p[i] = i * i
+    }
+    type.number sum = 0
+    loop (i from 0 until 8) {
+        sum = sum + p[i]
+    }
+    write(sum)
+    print
+
+    type.ptr<type.number> mid = p + 4
+    write(mid - p)
+    print
+    write(*mid)
+    print
+
+    type.ptr<type.number> back = mid - 2
+    write(*back)
+    print
+
+    write(*(p + 7))
+    print
+
+    type.number diff = (p + 7) - (p + 2)
+    write(diff)
+    print
+
+    type.ptr<type.number> left = p
+    type.ptr<type.number> right = p + 3
+    when (left == p) { write(true) }
+    print
+    when (left != right) { write(true) }
+    print
+
+    loop (i from 0 until 4) {
+        *(p + i) = 100 + i
+    }
+    write(p[0] + p[3])
+    print
+
+    type.ptr<type.int16> w = alloc<type.int16>(4)
+    w[0] = 1000
+    w[1] = 2000
+    type.ptr<type.int16> w2 = w + 1
+    write(w2 - w)
+    print
+    write(*w2)
+    print
+    release(w)
+
+    release(p)
+    return 0
+}
+
+run()

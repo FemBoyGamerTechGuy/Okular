@@ -3,11 +3,12 @@
 A simple, fast programming language designed for building large
 applications with minimal code.
 
-**Status:** Okular 0.3 — milestone M3 (systems types) underway. The C
+**Status:** Okular 0.4 — milestone M3 (systems types) underway. The C
 bootstrap compiler builds and runs real Okular programs natively on
-x86-64 Linux — fixed-length arrays with value semantics, and now the
-full fixed-width integer family with wrapping semantics and the
-`T.to_U(x)` conversion builtins.
+x86-64 Linux — arrays with value semantics, the full fixed-width integer
+family, and now pointers with manual memory: `&x`, `*p`, `p[i]`,
+`alloc<T>(n)` / `release(p)` over a real heap allocator, `null` checks,
+and scaled pointer arithmetic.
 
 ```ok
 type.text=1
@@ -62,15 +63,15 @@ docs/         getting started, language basics, architecture, roadmap
 examples/     runnable Okular programs (HelloProject = full project)
 tests/        the test suite (positive / negative / policy / flags)
 tools/        run_tests.sh and future tooling
-std/          standard library (empty in 0.3 — planned)
+std/          standard library (empty in 0.4 — planned)
 build/        build artifacts
 ```
 
 ## Documentation
 
 * [Getting started](docs/getting-started.md) — build, compile, run
-* [Language basics](docs/language-basics.md) — a tour of Okular 0.3
-* [Specification v0.3](specs/spec-v0.3.md) — the definition, with an
+* [Language basics](docs/language-basics.md) — a tour of Okular 0.4
+* [Specification v0.4](specs/spec-v0.4.md) — the definition, with an
   implementation status table that says exactly what works
 * [Architecture](docs/architecture.md) — how the bootstrap compiler is
   built and how it will self-host
@@ -80,7 +81,7 @@ build/        build artifacts
 
 ```console
 $ make test
-passed: 243   failed: 0
+passed: 301   failed: 0
 ALL TESTS PASSED
 ```
 

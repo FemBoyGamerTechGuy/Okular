@@ -1,0 +1,2 @@
+type.number x = 5
+release(x)

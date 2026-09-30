@@ -24,11 +24,13 @@ typedef enum {
     /* fixed-width integers (spec §4.2); int64 == number above */
     OK_INT8, OK_INT16, OK_INT32,
     OK_UINT8, OK_UINT16, OK_UINT32, OK_UINT64,
+    OK_PTR,        /* pointer to elem (spec §12)           */
+    OK_NULL,       /* the type of the `null` literal        */
 } TypeKind;
 
 typedef struct Type {
     TypeKind kind;
-    struct Type *elem;   /* OK_ARRAY: element type   */
+    struct Type *elem;   /* OK_ARRAY/OK_PTR: element/pointee type */
     size_t count;        /* OK_ARRAY: element count  */
     char *name;          /* rendered name, owned     */
     int bits;            /* integer types: 8/16/32/64 (0 otherwise) */
@@ -42,11 +44,17 @@ typedef struct Type *OkType;
 extern OkType ty_void, ty_number, ty_decimal, ty_text, ty_bool;
 extern OkType ty_int8, ty_int16, ty_int32;
 extern OkType ty_uint8, ty_uint16, ty_uint32, ty_uint64;
+extern OkType ty_null;   /* the literal `null`; assignable to any ptr<T> */
 
 static inline TypeKind ty_kind(OkType t) { return t ? t->kind : OK_VOID; }
 
 /* interned array type; count must be 1..OK_MAX_ARRAY_LEN */
 OkType ty_array(OkType elem, size_t count);
+
+/* interned pointer type ptr<T> (spec §12); elem must not be void/null */
+OkType ty_ptr(OkType elem);
+
+static inline bool ty_is_ptr(OkType t) { return t && t->kind == OK_PTR; }
 
 /* "number" (etc.) from a name; false for unknown names or "array".
  * Accepts the fixed-width family and the aliases int64/byte/f64. */

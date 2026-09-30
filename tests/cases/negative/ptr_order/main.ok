@@ -1,0 +1,5 @@
+type.number x = 1
+type.number y = 2
+type.ptr<type.number> p = &x
+type.ptr<type.number> q = &y
+when (p < q) { write(true) }

@@ -1,0 +1,32 @@
+type.text=1
+
+type.ptr<type.number> gp = null
+type.array<type.ptr<type.number>, 3> table = {null, null, null}
+
+function.run() -> number {
+    type.ptr<type.number> p = null
+    when (p == null) { write(true) }
+    print
+    when (p != null) { write(true) } else { write(false) }
+    print
+
+    release(p)
+
+    when (gp == null) { write(true) }
+    print
+
+    when (table[1] == null) { write(true) }
+    print
+
+    type.ptr<type.number> heap = alloc<type.number>(1)
+    when (heap != null) { write(true) }
+    print
+    *heap = 5
+    release(heap)
+    heap = null
+    when (heap == null) { write(true) }
+    print
+    return 0
+}
+
+run()

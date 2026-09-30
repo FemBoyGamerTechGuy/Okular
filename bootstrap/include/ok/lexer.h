@@ -18,7 +18,7 @@ typedef enum {
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PERCENT,
     T_EQ, T_EQEQ, T_BANGEQ, T_LT, T_LE, T_GT, T_GE,
     T_ARROW,       /* -> */
-    T_DOT, T_COMMA,
+    T_DOT, T_COMMA, T_AMP,
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE, T_LBRACKET, T_RBRACKET,
     /* active keywords */
     T_KW_TYPE, T_KW_FUNCTION, T_KW_STRUCT, T_KW_WHEN, T_KW_ELSE,
@@ -26,6 +26,8 @@ typedef enum {
     T_KW_BREAK, T_KW_CONTINUE, T_KW_RETURN,
     T_KW_PRINT, T_KW_WRITE, T_KW_TRUE, T_KW_FALSE,
     T_KW_AND, T_KW_OR, T_KW_NOT, T_KW_END,
+    /* memory keywords (0.4, spec §12) */
+    T_KW_ALLOC, T_KW_RELEASE, T_KW_NULL,
     /* reserved for designed-but-unimplemented features (spec §1.5) */
     T_KW_RESERVED,
 } TokKind;

@@ -1,0 +1,76 @@
+type.text=1
+
+type.array<type.number, 3> source = {7, 8, 9}
+
+function.run() -> number {
+    type.ptr<type.number> p = alloc<type.number>(3)
+    p[0] = 10
+    p[1] = 20
+    p[2] = 30
+    write(p[0] + p[1] + p[2])
+    print
+    release(p)
+
+    type.ptr<type.number> q = alloc<type.number>(2)
+    *q = 5
+    *(q + 1) = 7
+    write(*q + *(q + 1))
+    print
+    release(q)
+
+    type.ptr<type.int32> small = alloc<type.int32>(4)
+    small[0] = -1
+    small[1] = -2
+    small[2] = -3
+    small[3] = -4
+    write(small[0] + small[1] + small[2] + small[3])
+    print
+    release(small)
+
+    type.ptr<type.uint8> bytes = alloc<type.uint8>(4)
+    bytes[0] = 200
+    bytes[1] = 100
+    bytes[2] = 50
+    bytes[3] = 6
+    write(bytes[0] + bytes[1] + bytes[2] + bytes[3])
+    print
+    release(bytes)
+
+    type.ptr<type.decimal> d = alloc<type.decimal>(2)
+    d[0] = 1.5
+    d[1] = 2.25
+    write(d[0] + d[1])
+    print
+    release(d)
+
+    type.ptr<type.bool> flags = alloc<type.bool>(2)
+    flags[0] = true
+    flags[1] = false
+    when (flags[0]) { write(true) }
+    print
+    release(flags)
+
+    type.ptr<type.text> words = alloc<type.text>(2)
+    words[0] = "heap"
+    words[1] = "text"
+    write(words[0])
+    print
+    release(words)
+
+    type.ptr<type.array<type.number, 3>> ap = alloc<type.array<type.number, 3>>(1)
+    *ap = source
+    write((*ap)[0])
+    print
+    write((*ap)[2])
+    print
+    release(ap)
+
+    type.ptr<type.number> fresh = alloc<type.number>(1)
+    *fresh = 42
+    write(*fresh)
+    print
+    release(fresh)
+    return 0
+}
+
+run()

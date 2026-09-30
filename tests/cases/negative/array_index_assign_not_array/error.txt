@@ -1,1 +1,1 @@
-only array elements can be indexed for assignment
+this value is a `number` — only array elements or pointers can be indexed for assignment

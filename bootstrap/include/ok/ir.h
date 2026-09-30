@@ -41,6 +41,12 @@ typedef enum {
     I_LOAD_AT,       /* type; pop addr -> value at addr          */
     I_STORE_AT,      /* type; pop value, pop addr                */
     I_COPY,          /* i: bytes; pop src addr, pop dst addr     */
+    /* pointers + manual memory (spec §12, 0.4) */
+    I_ALLOC,         /* type: pointee; pop count -> ptr (rt_alloc)   */
+    I_RELEASE,       /* pop ptr -> (rt_release; null is a no-op)     */
+    I_PTRCHK,        /* pop ptr, trap if null, push back            */
+    I_PTR_SCALE,     /* type: ptr<T>; pop index, pop ptr -> elem addr */
+    I_PTR_DIFF,      /* type: ptr<T>; pop q, pop p -> number (p-q)/size(T) */
 } IrKind;
 
 typedef struct IrInst {

@@ -1,0 +1,28 @@
+type.text=1
+function.run() -> number {
+    type.number total = 0
+    loop (i from 0 until 200) {
+        type.ptr<type.number> a = alloc<type.number>(4)
+        a[0] = i
+        a[1] = i + 1
+        a[2] = i + 2
+        a[3] = i + 3
+        type.ptr<type.number> b = alloc<type.number>(8)
+        b[0] = a[0] + a[3]
+        total = total + b[0]
+        release(a)
+        release(b)
+    }
+    write(total)
+    print
+    type.ptr<type.number> c = alloc<type.number>(2)
+    c[0] = 7
+    release(c)
+    type.ptr<type.number> d = alloc<type.number>(2)
+    d[0] = 9
+    write(d[0])
+    print
+    release(d)
+    return 0
+}
+run()

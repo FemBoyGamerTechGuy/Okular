@@ -62,14 +62,16 @@ static const KwEntry keywords[] = {
     {"true", T_KW_TRUE},       {"false", T_KW_FALSE},
     {"and", T_KW_AND},         {"or", T_KW_OR},
     {"not", T_KW_NOT},         {"end", T_KW_END},
+    /* memory keywords (0.4, spec §12) */
+    {"alloc", T_KW_ALLOC},     {"release", T_KW_RELEASE},
+    {"null", T_KW_NULL},
     /* reserved: designed features, not implemented (spec §1.5 / §20) */
     {"union", T_KW_RESERVED},  {"pointer", T_KW_RESERVED},
-    {"alloc", T_KW_RESERVED},  {"release", T_KW_RESERVED},
-    {"null", T_KW_RESERVED},   {"guard", T_KW_RESERVED},
+    {"guard", T_KW_RESERVED},
     {"fail", T_KW_RESERVED},   {"with", T_KW_RESERVED},
     {"priv", T_KW_RESERVED},   {"pub", T_KW_RESERVED},
     {"match", T_KW_RESERVED},  {"case", T_KW_RESERVED},
-    {"const", T_KW_RESERVED},  {"ptr", T_KW_RESERVED},
+    {"const", T_KW_RESERVED},
 };
 
 static bool kw_lookup(const char *s, size_t n, TokKind *out) {
@@ -99,6 +101,7 @@ const char *tok_kind_name(TokKind k) {
     case T_GT: return "`>`";     case T_GE: return "`>=`";
     case T_ARROW: return "`->`";
     case T_DOT: return "`.`";    case T_COMMA: return "`,`";
+    case T_AMP: return "`&`";
     case T_LPAREN: return "`(`"; case T_RPAREN: return "`)`";
     case T_LBRACE: return "`{`"; case T_RBRACE: return "`}`";
     case T_LBRACKET: return "`[`"; case T_RBRACKET: return "`]`";
@@ -112,6 +115,8 @@ const char *tok_kind_name(TokKind k) {
     case T_KW_TRUE: return "`true`"; case T_KW_FALSE: return "`false`";
     case T_KW_AND: return "`and`"; case T_KW_OR: return "`or`";
     case T_KW_NOT: return "`not`"; case T_KW_END: return "`end`";
+    case T_KW_ALLOC: return "`alloc`"; case T_KW_RELEASE: return "`release`";
+    case T_KW_NULL: return "`null`";
     case T_KW_RESERVED: return "reserved keyword";
     }
     return "?";
@@ -350,6 +355,7 @@ TokList *lex_file(SourceFile *f, DiagEngine *de) {
             break;
         case '.': advance(&lx); push_tok(&lx, T_DOT, line, col, off, 1); break;
         case ',': advance(&lx); push_tok(&lx, T_COMMA, line, col, off, 1); break;
+        case '&': advance(&lx); push_tok(&lx, T_AMP, line, col, off, 1); break;
         case '(': advance(&lx); push_tok(&lx, T_LPAREN, line, col, off, 1); lx.paren_depth++; break;
         case ')': advance(&lx); push_tok(&lx, T_RPAREN, line, col, off, 1);
             if (lx.paren_depth) lx.paren_depth--;

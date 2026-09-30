@@ -1,0 +1,3 @@
+type.number x = 1
+type.ptr<type.number> p = &x
+type.ptr<type.number> bad = p + 1.5

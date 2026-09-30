@@ -1,0 +1,58 @@
+type.text=1
+
+type.number counter = 1000
+
+function.bump(ptr<number>.p) {
+    *p = *p + 1
+}
+
+function.set_to(ptr<number>.p, number.v) {
+    *p = v
+}
+
+function.pick(ptr<number>.a, ptr<number>.b) -> ptr<number> {
+    when (*a >= *b) { return a }
+    return b
+}
+
+function.run() -> number {
+    type.number x = 41
+    type.ptr<type.number> p = &x
+    write(*p)
+    print
+
+    *p = *p + 1
+    write(x)
+    print
+
+    bump(&x)
+    write(x)
+    print
+
+    set_to(&x, 500)
+    write(x)
+    print
+
+    type.number y = 900
+    type.ptr<type.number> winner = pick(&x, &y)
+    write(*winner)
+    print
+
+    type.ptr<type.number> gp = &counter
+    write(*gp)
+    print
+    *gp = *gp + 1
+    write(counter)
+    print
+
+    type.ptr<type.number> nullp = null
+    when (nullp == null) { write(true) }
+    print
+    when (p != null) { write(true) }
+    print
+    when (null == nullp) { write(true) }
+    print
+    return 0
+}
+
+run()

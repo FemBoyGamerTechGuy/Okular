@@ -1,6 +1,6 @@
 # Okular Bootstrap Compiler — Architecture
 
-**Version:** 0.3
+**Version:** 0.4
 **Applies to:** `bootstrap/` (the C implementation)
 
 > The C implementation is scaffolding. It exists because Okular does not yet
@@ -207,7 +207,9 @@ x86-64, Linux, freestanding:
 * output buffer management (`rt_write_*`, `rt_print`)
 * integer/decimal/unsigned formatting, `text` concatenation via a static
   bump arena
-* runtime traps (`rt_trap`: message + exit code 70; `rt_div_trap`: exit 71)
+* runtime traps (`rt_trap`; `rt_div_trap`: exit 71; `rt_null_trap`: exit 73)
+* a real heap allocator (`rt_alloc`/`rt_release`): mmap-backed pools,
+  16-byte headers, first-fit with splitting, coalescing free list
 
 It is scaffolding in the same sense the C compiler is: milestone M4 rewrites
 it in Okular against the syscall module. The *language* depends on none of

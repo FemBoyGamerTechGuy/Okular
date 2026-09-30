@@ -1,0 +1,6 @@
+type.text name = "x"
+function.run() -> number {
+    type.ptr<type.number> p = &name
+    return 0
+}
+run()
