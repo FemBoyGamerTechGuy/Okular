@@ -1,2 +1,1 @@
-type.text s = "42"
-type.number n = text.to_number(s)
+type.number n = text.to_number("abc")

@@ -1,13 +1,12 @@
 # Okular Language Specification
 
-**Version:** 0.5 (structs)
+**Version:** 0.6 (text conversions)
 **Status:** Evolving draft
 **Implementation:** bootstrap compiler in C (`bootstrap/`)
 
-> 0.5 adds **structs** — named record types with predictable layout,
-> positional literals, field access (with pointer auto-deref), value
-> semantics, nesting, arrays of structs, and structs on the heap (§8.3) —
-> on top of 0.4's pointers. See the changelog in §23.
+> 0.6 completes the conversion story: **`T.to_text` and `text.to_number` /
+> `text.to_decimal`** are real (constant folding included), closing the
+> last gap in §4.4's designed set. See the changelog in §23.
 
 > This specification is the source of truth for the Okular language.
 > When the implementation changes the language, this document changes with it.
@@ -384,8 +383,14 @@ type.number b = bool.to_number(true)    # 1
   width).
 * Conversions of constants fold at compile time — including global
   initializers (`type.byte convb = number.to_byte(515)`).
-* `text` conversions (`text.to_number`, `number.to_text`) are designed but
-  **not implemented** — the compiler says so plainly. `T.to_bool` does not
+* **Text conversions are implemented (0.6)**: `number.to_text(n)`,
+  `uint64.to_text(u)`, `decimal.to_text(d)` (the documented 6-fraction
+  write format), `bool.to_text(b)`, `text.to_number(s)`,
+  `text.to_decimal(s)`. Converting a constant folds at compile time —
+  including global initializers (`type.text label = "n=" +
+  number.to_text(7)`). Parsing is strict (`[+-]?digits`, optional fraction
+  for decimals); malformed text is a compile error for constants and a
+  fatal runtime trap (exit 76) for dynamic text. `T.to_bool` does not
   exist: compare explicitly (`x != 0`).
 * Array types never convert.
 
@@ -865,8 +870,8 @@ Okular's memory model is now real, not just designed:
   array bounds and text-arena exhaustion exit 70; **integer division by zero
   (0.3) exits 71**; **null dereference (0.4) exits 73**; **invalid or
   zero-sized allocation / invalid release (0.4) exits 74**; output-buffer
-  overflow exits 75; internal runtime errors use 76+. Implemented for the
-  cases the runtime can hit.
+  overflow exits 75; **malformed text in `text.to_number`/`text.to_decimal`
+  (0.6) exits 76**. Implemented for the cases the runtime can hit.
 * **Recoverable errors** — designed model: valued functions can signal
   failure through a `guard`/`fail` mechanism with explicit propagation:
 
@@ -1129,7 +1134,7 @@ An implementation claiming "Okular 0.1" must:
 | Array value semantics (copy on assign/pass) | §8.4 | implemented |
 | Bounds checks + runtime trap | §8.4/13 | implemented |
 | Fixed-width integers (all widths, wrap, lattice) | §4.2 | implemented |
-| Conversion builtins `T.to_U(x)` | §4.4 | implemented (text pairs planned) |
+| Conversion builtins `T.to_U(x)` | §4.4 | implemented (text pairs included, 0.6) |
 | `f32` | §4.2 | NOT IMPLEMENTED (float milestone) |
 | `type.text=1` gate | §5 | implemented |
 | Variables, scoping, reassignment | §8.1 | implemented |
@@ -1157,6 +1162,23 @@ An implementation claiming "Okular 0.1" must:
 ---
 
 ## 23. Changelog
+
+### 0.6
+
+* **Text conversion builtins** (§4.4): `number.to_text`, `uint64.to_text`,
+  `decimal.to_text`, `bool.to_text`, `text.to_number`, `text.to_decimal`.
+  Constant arguments fold at compile time (global initializers included,
+  and conversions nested inside foldable expressions); dynamic conversions
+  call the runtime. `decimal` travels through the internal ABI as raw bits
+  in integer registers, exactly as documented.
+* Parsing is strict (`[+-]?digits[.digits]`); malformed literals are
+  compile errors, malformed runtime text traps with exit 76 — loud
+  failures, never silent zeros (the `guard`/`fail` model remains the
+  designed recoverable path).
+* Integer literal arguments to conversions take the source type when they
+  fit (`uint64.to_text(5)` formats unsigned — contextual typing, §4.2).
+* Tests: 343 → 349 checks (conversions of every kind, constant folds,
+  the parse trap); spec 0.5 → 0.6.
 
 ### 0.5
 

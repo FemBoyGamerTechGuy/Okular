@@ -60,6 +60,7 @@ static void push_rax(Buf *o)      { buf_puts(o, "    push rax\n"); }
 static void push_xmm0(Buf *o)     { buf_puts(o, "    sub rsp, 8\n    movsd QWORD PTR [rsp], xmm0\n"); }
 static void push_pair_rax_rdx(Buf *o) { buf_puts(o, "    push rdx\n    push rax\n"); }
 static void pop_rax(Buf *o)       { buf_puts(o, "    pop rax\n"); }
+static void pop_rdx(Buf *o)       { buf_puts(o, "    pop rdx\n"); }
 static void pop_xmm0(Buf *o)      { buf_puts(o, "    movsd xmm0, QWORD PTR [rsp]\n    add rsp, 8\n"); }
 static void pop_pair_rax_rdx(Buf *o) { buf_puts(o, "    pop rax\n    pop rdx\n"); }
 
@@ -507,6 +508,48 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
     case I_CONV: {
         OkType src = in->type, dst = in->type2;
         if (src == dst) break; /* identity: no code */
+        if (dst == ty_text) {
+            /* T.to_text(v): rt_*_to_text(out16, v) with the outgoing-area
+             * slot 0 as scratch, then push the (ptr, len) pair (§4.4, 0.6) */
+            buf_printf(o, "    lea rdi, [rbp-%zu]\n", fc->oa_base);
+            if (src == ty_decimal) {
+                pop_xmm0(o);
+                buf_puts(o, "    movq rsi, xmm0\n");
+                call_aligned(o, "rt_decimal_to_text");
+            } else if (src == ty_bool) {
+                pop_rax(o);
+                buf_puts(o, "    mov rsi, rax\n");
+                call_aligned(o, "rt_bool_to_text");
+            } else if (src == ty_uint64) {
+                pop_rax(o);
+                buf_puts(o, "    mov rsi, rax\n");
+                call_aligned(o, "rt_uint_to_text");
+            } else {
+                pop_rax(o);
+                buf_puts(o, "    mov rsi, rax\n");
+                call_aligned(o, "rt_number_to_text");
+            }
+            buf_printf(o, "    mov rax, [rbp-%zu]\n", fc->oa_base);
+            buf_printf(o, "    mov rdx, [rbp-%zu]\n", fc->oa_base - 8);
+            push_pair_rax_rdx(o);
+            break;
+        }
+        if (src == ty_text) {
+            /* text.to_number / text.to_decimal(s) */
+            pop_rax(o); /* ptr */
+            pop_rdx(o); /* len */
+            buf_puts(o, "    mov rdi, rax\n    mov rsi, rdx\n");
+            if (dst == ty_decimal) {
+                call_aligned(o, "rt_text_to_decimal");
+                buf_puts(o, "    movq xmm0, rax\n");
+                push_xmm0(o);
+            } else {
+                call_aligned(o, "rt_text_to_number");
+                emit_reencode(o, dst);
+                push_rax(o);
+            }
+            break;
+        }
         if (src == ty_decimal) {
             pop_xmm0(o);
             buf_puts(o, "    cvttsd2si rax, xmm0\n"); /* NaN/overflow -> INT64_MIN sentinel */
@@ -866,7 +909,7 @@ bool codegen_module(IrModule *im, const char *out_path) {
     Buf o;
     buf_init(&o);
 
-    buf_puts(&o, "# Okular 0.5 bootstrap — x86-64 Linux assembly\n");
+    buf_puts(&o, "# Okular 0.6 bootstrap — x86-64 Linux assembly\n");
     buf_puts(&o, "# module: ");
     buf_puts(&o, im->mod->name);
     buf_puts(&o, "\n    .intel_syntax noprefix\n\n    .text\n");

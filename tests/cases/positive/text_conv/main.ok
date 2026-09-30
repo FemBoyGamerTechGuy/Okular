@@ -1,0 +1,50 @@
+type.text=1
+
+type.text banner = number.to_text(42)
+type.text label = "n=" + number.to_text(7)
+
+function.run() -> number {
+    write(number.to_text(42))
+    print
+    write(number.to_text(-7))
+    print
+    write(uint64.to_text(18446744073709551615))
+    print
+    write(uint8.to_text(250))
+    print
+    write(int32.to_text(-2000000000))
+    print
+    write(decimal.to_text(3.5))
+    print
+    write(decimal.to_text(-0.25))
+    print
+    write(bool.to_text(true))
+    print
+    write(bool.to_text(false))
+    print
+    write("9" + "-" + number.to_text(11))
+    print
+    write(text.to_number("123"))
+    print
+    write(text.to_number("-45"))
+    print
+    write(text.to_number("+8"))
+    print
+    type.decimal f = text.to_decimal("2.25")
+    write(f * 2)
+    print
+    write(text.to_decimal("-0.5"))
+    print
+    when (text.to_number("8") == 8) { write(true) }
+    print
+    write(banner)
+    print
+    write(label)
+    print
+    type.text live = number.to_text(6 * 7)
+    write(live)
+    print
+    return 0
+}
+
+run()

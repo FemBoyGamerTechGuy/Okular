@@ -12,6 +12,8 @@
  *   rt_write_number(long)        rt_write_decimal(double)
  *   rt_write_text(ptr, len)      rt_write_bool(int)
  *   rt_write_uint(u64)           rt_print()
+ *   rt_{number,uint,decimal,bool}_to_text(out16, v)   spec §4.4 (0.6)
+ *   rt_text_to_number(ptr, len) / rt_text_to_decimal(ptr, len)
  *   rt_concat(out16, lptr, llen, rptr, rlen)
  *   rt_text_eq(lptr, llen, rptr, rlen) -> bool
  *   rt_bounds_trap(index, length)  array index out of bounds (spec §8.4)
@@ -26,6 +28,7 @@ typedef long           i64;
 typedef unsigned long  u64;
 typedef unsigned char  u8;
 typedef int            b32;
+typedef _Bool           bool;
 
 #define OUTBUF_BYTES 65536
 #define TEXT_ARENA_BYTES (1 << 20)
@@ -108,6 +111,160 @@ void rt_write_uint(u64 v) {
     out_reserve((u64)(24 - i));
     for (; i < 24; i++)
         outbuf[outlen++] = (u8)tmp[i];
+}
+
+/* ---- text conversion builtins (spec §4.4, 0.6) ----
+ * to_text forms write a (ptr, len) pair to *out16 and return nothing;
+ * bytes live in the text arena (the same bump region concatenation uses).
+ * Parsing traps on malformed text or overflow (exit 76) — the recoverable
+ * `guard`/`fail` model is the designed future; until then failures are
+ * loud, never silent zeros. */
+
+static u8 *text_take(u64 len) {
+    if (arena_used + len > TEXT_ARENA_BYTES)
+        rt_trap("text arena exhausted (1 MiB of text per run)",
+                62, 71);
+    u8 *dst = text_arena + arena_used;
+    arena_used += len;
+    return dst;
+}
+
+static u64 put_dec(u64 v, u8 *dst) { /* decimal digits; returns length */
+    char tmp[20];
+    int n = 0;
+    do { tmp[n++] = (char)('0' + (v % 10)); v /= 10; } while (v != 0);
+    for (int k = n - 1; k >= 0; k--) *dst++ = (u8)tmp[k];
+    return (u64)n;
+}
+
+void rt_number_to_text(void *out16, i64 v) {
+    u8 buf[24];
+    u64 n = 0;
+    u64 u;
+    if (v < 0) {
+        u = (u64)(-(v + 1)) + 1; /* INT64_MIN-safe */
+        buf[n++] = '-';
+    } else {
+        u = (u64)v;
+    }
+    n += put_dec(u, buf + n);
+    u8 *dst = text_take(n);
+    for (u64 i = 0; i < n; i++) dst[i] = buf[i];
+    *(u8 **)out16 = dst;
+    *(u64 *)((u8 *)out16 + 8) = n;
+}
+
+void rt_uint_to_text(void *out16, u64 v) {
+    u8 buf[20];
+    u64 n = put_dec(v, buf);
+    u8 *dst = text_take(n);
+    for (u64 i = 0; i < n; i++) dst[i] = buf[i];
+    *(u8 **)out16 = dst;
+    *(u64 *)((u8 *)out16 + 8) = n;
+}
+
+void rt_decimal_to_text(void *out16, u64 bits) {
+    /* the Okular internal ABI carries decimals as raw bits in integer
+     * registers (docs/architecture.md §3.5) */
+    union { u64 b; double d; } cvt;
+    cvt.b = bits;
+    double x = cvt.d;
+    /* same documented format as rt_write_decimal: 6 fractional digits,
+     * integer-only for |x| >= 1e15, NaN/Inf named */
+    if (x != x || x > 1.7976931348623157e308 || x < -1.7976931348623157e308) {
+        const char *s = (x != x) ? "nan" : (x > 0 ? "inf" : "-inf");
+        u64 n = (x != x) ? 3 : (x > 0 ? 3 : 4);
+        u8 *dst = text_take(n);
+        for (u64 i = 0; i < n; i++) dst[i] = (u8)s[i];
+        *(u8 **)out16 = dst;
+        *(u64 *)((u8 *)out16 + 8) = n;
+        return;
+    }
+    u8 buf[48];
+    u64 n = 0;
+    if (x < 0.0) { buf[n++] = '-'; x = -x; }
+    if (x >= 1e15) {
+        n += put_dec((u64)x, buf + n);
+    } else {
+        i64 ip = (i64)x;
+        double frac = x - (double)ip;
+        i64 f6 = (i64)(frac * 1000000.0 + 0.5);
+        if (f6 == 1000000) { ip += 1; f6 = 0; }
+        n += put_dec((u64)ip, buf + n);
+        buf[n++] = '.';
+        char d[6];
+        for (int k = 5; k >= 0; k--) { d[k] = (char)('0' + (f6 % 10)); f6 /= 10; }
+        for (int k = 0; k < 6; k++) buf[n++] = (u8)d[k];
+    }
+    u8 *dst = text_take(n);
+    for (u64 i = 0; i < n; i++) dst[i] = buf[i];
+    *(u8 **)out16 = dst;
+    *(u64 *)((u8 *)out16 + 8) = n;
+}
+
+void rt_bool_to_text(void *out16, i64 b) {
+    /* static bytes: text values are immutable */
+    if (b) { *(const u8 **)out16 = (const u8 *)"true";  *(u64 *)((u8 *)out16 + 8) = 4; }
+    else   { *(const u8 **)out16 = (const u8 *)"false"; *(u64 *)((u8 *)out16 + 8) = 5; }
+}
+
+/* parse helpers: strict [+-]?digits (and .digits for decimal) */
+static void text_number_trap(const u8 *p, u64 len) {
+    sys_write(2, "okular runtime error: ", 22);
+    sys_write(2, "text is not a number: \"", 23);
+    sys_write(2, p, len > 32 ? 32 : len);
+    sys_write(2, "\"\n", 2);
+    sys_exit(76);
+}
+
+i64 rt_text_to_number(const u8 *p, u64 len) {
+    u64 i = 0;
+    bool neg = 0;
+    if (i < len && (p[i] == '-' || p[i] == '+')) { neg = (p[i] == '-'); i++; }
+    if (i >= len) text_number_trap(p, len);
+    u64 v = 0;
+    u64 digits = 0;
+    for (; i < len; i++) {
+        if (p[i] < '0' || p[i] > '9') text_number_trap(p, len);
+        u64 d = (u64)(p[i] - '0');
+        if (v > (0x7FFFFFFFFFFFFFFFULL - d) / 10)
+            text_number_trap(p, len); /* overflow */
+        v = v * 10 + d;
+        digits++;
+    }
+    if (digits == 0 || digits > 19) text_number_trap(p, len);
+    if (neg) return -(i64)v;
+    if (v > 0x7FFFFFFFFFFFFFFFULL) text_number_trap(p, len);
+    return (i64)v;
+}
+
+u64 rt_text_to_decimal(const u8 *p, u64 len) {  /* returns raw bits */
+    u64 i = 0;
+    bool neg = 0;
+    if (i < len && (p[i] == '-' || p[i] == '+')) { neg = (p[i] == '-'); i++; }
+    if (i >= len) text_number_trap(p, len);
+    double ip = 0.0;
+    u64 int_digits = 0;
+    for (; i < len && p[i] >= '0' && p[i] <= '9'; i++) {
+        ip = ip * 10.0 + (double)(p[i] - '0');
+        int_digits++;
+    }
+    if (int_digits == 0) text_number_trap(p, len);
+    double frac = 0.0, scale = 0.1;
+    if (i < len && p[i] == '.') {
+        i++;
+        u64 frac_digits = 0;
+        for (; i < len && p[i] >= '0' && p[i] <= '9'; i++) {
+            frac += (double)(p[i] - '0') * scale;
+            scale *= 0.1;
+            frac_digits++;
+        }
+        if (frac_digits == 0) text_number_trap(p, len);
+    }
+    if (i != len) text_number_trap(p, len); /* trailing garbage */
+    union { double d; u64 b; } cvt;
+    cvt.d = neg ? -(ip + frac) : (ip + frac);
+    return cvt.b;
 }
 
 void rt_write_decimal(double x) {

@@ -1,6 +1,6 @@
 # Okular Bootstrap Compiler — Architecture
 
-**Version:** 0.5
+**Version:** 0.6
 **Applies to:** `bootstrap/` (the C implementation)
 
 > The C implementation is scaffolding. It exists because Okular does not yet
@@ -211,6 +211,9 @@ x86-64, Linux, freestanding:
 -nostdlib -fno-stack-protector -fno-builtin`) provides:
 
 * output buffer management (`rt_write_*`, `rt_print`)
+* text conversions (`rt_{number,uint,decimal,bool}_to_text`,
+  `rt_text_to_number`, `rt_text_to_decimal`) — decimals travel as raw
+  bits in integer registers per the internal ABI
 * integer/decimal/unsigned formatting, `text` concatenation via a static
   bump arena
 * runtime traps (`rt_trap`; `rt_div_trap`: exit 71; `rt_null_trap`: exit 73)

@@ -1,0 +1,8 @@
+type.text=1
+function.run() -> number {
+    type.number n = text.to_number("12x3")
+    write(n)
+    print
+    return 0
+}
+run()

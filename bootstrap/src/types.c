@@ -282,7 +282,11 @@ OkType ty_common(OkType a, OkType b) {
 bool ty_convertible(OkType from, OkType to) {
     if (!from || !to) return false;
     if (from == to) return true; /* identity is a legal explicit conversion */
-    if (from == ty_text || to == ty_text) return false; /* planned, not built */
+    /* text conversion builtins (0.6, spec §4.4) */
+    if (from == ty_text)
+        return to == ty_number || ty_is_integer(to) || to == ty_decimal;
+    if (to == ty_text)
+        return ty_is_integer(from) || from == ty_decimal || from == ty_bool;
     if (ty_kind(from) == OK_ARRAY || ty_kind(to) == OK_ARRAY) return false;
     if (ty_kind(from) == OK_STRUCT || ty_kind(to) == OK_STRUCT) return false;
     if (ty_kind(from) == OK_NAMED || ty_kind(to) == OK_NAMED) return false;

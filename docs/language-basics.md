@@ -1,7 +1,7 @@
 # Okular Language Basics (0.1)
 
 A tour of what Okular 0.1 does today. The specification
-(`specs/spec-v0.5.md`) is the source of truth; this page is the friendly
+(`specs/spec-v0.6.md`) is the source of truth; this page is the friendly
 version. Everything shown here compiles and runs with the bootstrap
 compiler.
 
@@ -46,7 +46,8 @@ type.int64 same_as_number = 1 # aliases; f64 = decimal
 Fixed-width arithmetic **wraps** (`int8 127 + 1` is `-128`; `uint8 255 + 1`
 is `0`), comparisons use the type's signedness, and division by zero is a
 runtime trap. Conversions are explicit builtins — `number.to_uint8(300)` is
-`44`, `decimal.to_int32(3.99)` is `3` — and constants fold at compile time.
+`44`, `decimal.to_int32(3.99)` is `3`, `number.to_text(42)` is `"42"`,
+`text.to_number("123")` is `123` — and constants fold at compile time.
 
 Assignment widens safely and silently (`int8` → `number`, `uint8` →
 `int16`/`number`, any integer → `decimal` with a `-w` warning when it isn't
@@ -272,14 +273,13 @@ Structs copy by value (assignment, parameters); `value.field` reads
 fields — on variables, through namespaces, on array elements, and on
 pointers (auto-dereferenced and null-checked). Nesting, arrays of
 structs, structs on the heap (`alloc<type.Rect>(2)`), and
-self-referential `ptr` fields all work. See `specs/spec-v0.5.md` §8.3.
+self-referential `ptr` fields all work. See `specs/spec-v0.6.md` §8.3.
 
-## What 0.5 does not have (yet)
+## What 0.6 does not have (yet)
 
 Unions, dynamic-length arrays, FFI, threads, match expressions, type
 inference, constants, aliases, and visibility modifiers are all
-**designed** (see `specs/spec-v0.5.md` §20 and
+**designed** (see `specs/spec-v0.6.md` §20 and
 `docs/roadmap.md`) and **not implemented**. The same goes for `f32` (a true
-32-bit float) and the `text` conversion builtins (`text.to_number`,
-`number.to_text`). The compiler says so plainly
+32-bit float). The compiler says so plainly
 when you use a reserved construct — it never pretends.

@@ -13,6 +13,7 @@
  *   global A_VARDECL          -> sym->cval (constant initializer)
  */
 #include "ok/sema.h"
+#include <errno.h>
 
 typedef struct SemaCtx {
     DiagEngine *de;
@@ -489,13 +490,80 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
         return false;
     }
     case A_CONV: {
-        /* conversion of a constant folds at compile time (spec §4.4) */
+        /* conversion of a constant folds at compile time (spec §4.4),
+         * including the text conversions (0.6) */
         ConstVal v;
         if (!const_eval(c, e->a, &v)) return false;
         if (!v.valid) return false;
         OkType dst = e->otype;
         if (v.type == dst) { *out = v; return true; }
         if (!ty_convertible(v.type, dst)) return false;
+        if (v.type == ty_text && (dst == ty_number || ty_is_integer(dst))) {
+            /* parse the literal; malformed text is a compile error */
+            char buf[65];
+            size_t n = v.t_len < sizeof buf - 1 ? v.t_len : sizeof buf - 1;
+            memcpy(buf, v.t, n);
+            buf[n] = 0;
+            char *end = NULL;
+            errno = 0;
+            long long parsed = strtoll(buf, &end, 10);
+            if (end == buf || *end != 0 || errno == ERANGE) {
+                serr(c, e, "text is not a number: \"%s\".", buf);
+                return false;
+            }
+            out->valid = true;
+            out->type = (dst == ty_number) ? ty_number : dst;
+            out->i = ty_reencode((uint64_t)parsed, out->type);
+            return true;
+        }
+        if (v.type == ty_text && dst == ty_decimal) {
+            char buf[65];
+            size_t n = v.t_len < sizeof buf - 1 ? v.t_len : sizeof buf - 1;
+            memcpy(buf, v.t, n);
+            buf[n] = 0;
+            char *end = NULL;
+            double parsed = strtod(buf, &end);
+            if (end == buf || *end != 0) {
+                serr(c, e, "text is not a number: \"%s\".", buf);
+                return false;
+            }
+            out->valid = true;
+            out->type = ty_decimal;
+            out->d = parsed;
+            return true;
+        }
+        if ((ty_is_integer(v.type) || v.type == ty_decimal || v.type == ty_bool)
+            && dst == ty_text) {
+            char buf[48];
+            size_t n;
+            if (v.type == ty_bool) {
+                n = v.b ? 4 : 5;
+                memcpy(buf, v.b ? "true" : "false", n);
+            } else if (v.type == ty_decimal) {
+                /* match rt_decimal_to_text's documented format */
+                int w = snprintf(buf, sizeof buf, "%.6f", v.d);
+                if (w < 0 || (size_t)w >= sizeof buf) w = (int)sizeof buf - 1;
+                /* large values print integer-only like the runtime */
+                if (v.d >= 1e15 || v.d <= -1e15) {
+                    w = snprintf(buf, sizeof buf, "%lld", (long long)v.d);
+                    if (w < 0 || (size_t)w >= sizeof buf) w = (int)sizeof buf - 1;
+                }
+                n = (size_t)w;
+            } else if (v.type == ty_uint64) {
+                n = (size_t)snprintf(buf, sizeof buf, "%llu", (unsigned long long)v.i);
+            } else {
+                /* semantic value, signed */
+                n = (size_t)snprintf(buf, sizeof buf, "%lld",
+                                     v.type == ty_number ? (long long)v.i
+                                     : (long long)ty_reencode(v.i, v.type));
+            }
+            out->valid = true;
+            out->type = ty_text;
+            out->t = ok_xmalloc(n);
+            memcpy(out->t, buf, n);
+            out->t_len = n;
+            return true;
+        }
         if (v.type == ty_decimal && ty_is_integer(dst)) {
             out->valid = true; out->type = dst; out->i = ty_dec_to_int(v.d, dst);
             return true;
@@ -1008,12 +1076,23 @@ static OkType check_conv_builtin(SemaCtx *c, Node *n, OkType from, OkType to) {
     }
     Node *arg = n->args.items[0];
     OkType at = check_expr(c, arg);
+    /* an integer literal argument takes the SOURCE type when it fits
+     * (contextual typing, spec §4.2): uint64.to_text(5) formats unsigned */
+    if (ty_is_integer(from) && from != ty_number && at == ty_number &&
+        arg->kind == A_INT && ty_uint_fits(arg->ival, from)) {
+        arg->rtype = from;
+        at = from;
+    }
+    if (ty_is_integer(from) && from != ty_number && at == ty_number &&
+        arg->kind == A_UN && arg->uop == UN_NEG && arg->a->kind == A_INT) {
+        int64_t v = -(int64_t)arg->a->ival;
+        if (ty_sint_fits(v, from)) {
+            arg->rtype = from;
+            at = from;
+        }
+    }
     if (!ty_convertible(at, to)) {
-        if (at == ty_text || to == ty_text) {
-            Diag *d = serr(c, arg, "text conversions such as `%s` are planned but not implemented yet.",
-                           full);
-            diag_note(d, "they arrive with the text-processing milestone (spec §4.4).");
-        } else if (to == ty_bool) {
+        if (to == ty_bool) {
             Diag *d = serr(c, arg, "there is no conversion to `bool` — compare explicitly instead.");
             diag_note(d, "for example `x != 0` produces the `bool` you probably meant.");
         } else {
@@ -1936,9 +2015,9 @@ static void check_column(SemaCtx *c, Node *col, Scope *ns) {
             if (!okc) {
                 c->cur_scope = ns;
                 check_expr(c, mem->a); /* validate (+ rewrite conversion builtins) */
-                if (mem->a->kind == A_CONV && c->de->errors == mark) {
+                if (c->de->errors == mark) {
                     mark = c->de->errors;
-                    okc = const_eval(c, mem->a, &cv); /* retry as a folded conversion */
+                    okc = const_eval(c, mem->a, &cv); /* retry: convs may fold now */
                 }
             }
             if (!okc) {
@@ -2021,8 +2100,9 @@ static void check_module(SemaCtx *c, OkModule *m, Scope *scope) {
             if (!okc) {
                 c->cur_scope = scope;
                 check_expr(c, n->a); /* validate (+ rewrite conversion builtins) */
-                /* a conversion builtin is now an A_CONV node: retry folding */
-                if (n->a->kind == A_CONV && c->de->errors == mark) {
+                /* conversions anywhere inside the initializer became
+                 * A_CONV nodes: retry the fold once when checking was clean */
+                if (c->de->errors == mark) {
                     mark = c->de->errors;
                     okc = const_eval(c, n->a, &cv);
                 }
