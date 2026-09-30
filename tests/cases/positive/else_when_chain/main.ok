@@ -1,0 +1,38 @@
+type.text=1
+
+function.grade(number.score) -> text {
+    when (score >= 90) {
+        return "A"
+    }
+    else when (score >= 80) {
+        return "B"
+    }
+    else when (score >= 70) {
+        return "C"
+    }
+    else {
+        return "F"
+    }
+}
+
+loop (s from 62 to 98) {
+    write(s)
+    write(" ")
+    write(grade(s))
+    print
+}
+
+# chains without a final else work too
+type.number x = 3
+when (x == 1) {
+    write("one")
+    print
+}
+else when (x == 3) {
+    write("three")
+    print
+}
+
+# a chain where every branch returns proves return-checking through nesting
+write(grade(85))
+print

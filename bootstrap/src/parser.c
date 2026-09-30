@@ -461,6 +461,15 @@ static Node *parse_when(Parser *p) {
     skip_nl(p);
     if (is(p, T_KW_ELSE)) {
         advance(p);
+        if (is(p, T_KW_WHEN)) {
+            /* `else when (...) { ... }` chain (spec §10): the nested when
+             * statement IS this branch's body; it may chain onward itself */
+            Node *nested = parse_when(p);
+            if (!nested) return n;
+            vec_init(&n->body_else);
+            vec_push(&n->body_else, nested);
+            return n;
+        }
         vec_init(&n->body_else);
         if (!parse_stmt_list(p, &n->body_else, T_RBRACE)) return n;
     } else {

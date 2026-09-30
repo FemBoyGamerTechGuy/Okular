@@ -175,6 +175,20 @@ type.number n = -5                 # unary minus
 Comparisons do not chain (`1 < x and x < 10` instead). Equality works on
 `text`. `and`/`or`/`not` operate on `bool`. `%` is integer remainder.
 
+`when` selects among several conditions with `else when` chains:
+
+```ok
+when (score >= 90) {
+    write("A")
+}
+else when (score >= 80) {
+    write("B")
+}
+else {
+    write("F")
+}
+```
+
 ## Diagnostics you'll meet
 
 ```

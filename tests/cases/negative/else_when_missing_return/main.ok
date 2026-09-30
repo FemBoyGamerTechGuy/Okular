@@ -1,0 +1,12 @@
+type.text=1
+
+function.sign(number.x) -> text {
+    when (x < 0) {
+        return "negative"
+    }
+    else when (x > 0) {
+        return "positive"
+    }
+}
+write(sign(5))
+print

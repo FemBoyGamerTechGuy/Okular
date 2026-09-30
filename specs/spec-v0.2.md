@@ -610,8 +610,26 @@ else {
 * Parenthesized condition — explicit, unambiguous, easy to parse, and it
   reads as a unit with the block.
 * Brace body — consistent with function bodies and columns.
-* `else` binds to the nearest open `when`. `else when (...)` chaining is
-  planned.
+* `else` binds to the nearest open `when`.
+* **`else when (…) { … }` chains** select among several conditions:
+
+  ```ok
+  when (score >= 90) {
+      write("A")
+  }
+  else when (score >= 80) {
+      write("B")
+  }
+  else {
+      write("F")
+  }
+  ```
+
+  Conditions test top to bottom; the first true branch runs and the rest are
+  skipped. A chain may end with a plain `else` or with nothing. The final
+  `else` (or its absence) participates in return checking exactly like a
+  nested `when`: a function whose chain covers every branch with `return`s
+  satisfies the return analysis.
 
 Rationale (§15 of the brief demanded an Okular-specific conditional):
 `when (…) { … } else { … }` is instantly readable to C/Rust/Python
@@ -819,7 +837,8 @@ statement       = vardecl | assignment | exprstmt
                 | "break" | "continue"
                 | "print" ;
 
-whenstmt        = "when" "(" expr ")" block [ "else" block ] ;
+whenstmt        = "when" "(" expr ")" block
+                  { "else" ( whenstmt | block ) } ;
 loopstmt        = "loop" "(" loophead ")" block ;
 loophead        = IDENT "from" expr ("to" | "until") expr
                 | expr ;
@@ -975,6 +994,7 @@ An implementation claiming "Okular 0.1" must:
 | Structs | §8.3 | NOT IMPLEMENTED (reserved) |
 | Expressions, precedence, constant folding | §9 | implemented |
 | `when`/`else` | §10 | implemented |
+| `else when` chains | §10 | implemented |
 | `loop` counted (to/until) + conditional | §10 | implemented |
 | `break`/`continue` | §10 | implemented |
 | `write`/`print` buffer model | §11 | implemented |
@@ -997,6 +1017,8 @@ An implementation claiming "Okular 0.1" must:
 
 ### 0.2
 
+* **`else when` chains** (§10): multi-branch condition selection on the
+  `when` foundation; return analysis understands chains.
 * **Arrays** (§8.4): fixed-length, value-copied, bounds-checked. Declaration
   `type.array<type.number, 5> xs = { ... }`; indexing `xs[i]`; indexed store
   `xs[i] = v`; nesting `grid[i][j]`; function parameters by value; global and
