@@ -8,7 +8,7 @@
 struct Node;
 struct OkModule;
 
-typedef enum { SYM_FUNC, SYM_VAR, SYM_NS, SYM_TYPE } SymKind;
+typedef enum { SYM_FUNC, SYM_VAR, SYM_NS, SYM_TYPE, SYM_CONST } SymKind;
 
 typedef struct FuncInfo {
     char *name;             /* simple name */

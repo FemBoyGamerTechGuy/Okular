@@ -1,0 +1,29 @@
+type.text=1
+
+function.next(number.n) -> number {
+    return n + 1
+}
+
+function.main() -> number {
+    type.auto a = 5
+    write(a)
+    print
+    type.auto b = a * 3 + 1
+    write(b)
+    print
+    type.auto c = next(41)
+    write(c)
+    print
+    type.auto d = 1.5
+    write(d)
+    print
+    type.auto t = "auto"
+    write(t)
+    print
+    type.auto flag = a > 3
+    write(flag)
+    print
+    return 0
+}
+
+main()

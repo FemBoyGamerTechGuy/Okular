@@ -175,6 +175,10 @@ static bool parse_type_prefix(Parser *p, OkType *out) {
             return false;
         OkType elem;
         if (!parse_type_prefix(p, &elem)) return false;
+        if (elem && elem == ty_auto) {
+            perr(p, name, "array elements cannot use `type.auto` — write the element type explicitly.");
+            return false;
+        }
         if (!expect(p, T_COMMA, "`,` between the element type and the length")) return false;
         Tok *cnt = cur(p);
         if (!is(p, T_INT)) {
@@ -204,6 +208,10 @@ static bool parse_type_prefix(Parser *p, OkType *out) {
             return false;
         OkType elem;
         if (!parse_type_prefix(p, &elem)) return false;
+        if (elem && elem == ty_auto) {
+            perr(p, name, "a pointer cannot use `type.auto` — write the pointee type explicitly.");
+            return false;
+        }
         if (!expect(p, T_GT, "`>` to close the pointer type")) return false;
         if (!elem || ty_kind(elem) == OK_VOID || ty_kind(elem) == OK_NULL) {
             perr(p, name, "a pointer needs a value type to point at (as in `type.ptr<type.number>`).");
@@ -800,6 +808,13 @@ static Node *parse_stmt(Parser *p) {
         skip_column_region(p);
         return NULL;
     }
+    case T_KW_CONST: {
+        Diag *d = perr(p, t, "constants are declared at the top of a file or inside a column (`const.limit = 100`), not inside function bodies.");
+        (void)d;
+        advance(p);
+        sync_stmt(p);
+        return NULL;
+    }
     case T_KW_RESERVED:
         perr(p, t, "`%s` is reserved for a future Okular feature and is not available in 0.7 (specs/spec-v0.7.md §20).", t->text);
         advance(p);
@@ -991,6 +1006,11 @@ static Node *parse_recorddecl(Parser *p, bool is_union) {
         }
         OkType fty;
         if (!parse_type_prefix(p, &fty)) { sync_stmt(p); continue; }
+        if (fty == ty_auto) {
+            perr(p, cur(p), "%s members cannot use `type.auto` — write the member type explicitly.", kw);
+            sync_stmt(p);
+            continue;
+        }
         if (!is(p, T_IDENT)) {
             perr(p, cur(p), "expected a member name in %s `%s`, but found %s.",
                  kw, n->name, tok_kind_name(cur(p)->kind));
@@ -1023,6 +1043,37 @@ static Node *parse_recorddecl(Parser *p, bool is_union) {
         free(pa);
     }
     free(fv.items);
+    return n;
+}
+
+/* `const.name = expr` — a folded, module-scope constant (0.8, spec §8.1).
+ * Single line, like variable declarations. The value must fold at
+ * compile time; sema enforces and stores the folded ConstVal. */
+static Node *parse_constdecl(Parser *p) {
+    Tok *t = cur(p);
+    advance(p); /* const */
+    if (!expect(p, T_DOT, "`.` after `const` (as in `const.limit`)")) {
+        sync_stmt(p);
+        return NULL;
+    }
+    Tok *name = cur(p);
+    if (!is(p, T_IDENT)) {
+        perr(p, name, "expected a constant name after `const.` (as in `const.limit`), but found %s.",
+             tok_kind_name(name->kind));
+        sync_stmt(p);
+        return NULL;
+    }
+    advance(p);
+    Node *n = node_new(p->ar, A_CONSTDECL, t->line, t->col);
+    n->name = ok_xstrdup(name->text);
+    if (!expect(p, T_EQ, "`=` and a constant value")) { free(n->name); sync_stmt(p); return NULL; }
+    if (is(p, T_LBRACE)) {
+        perr(p, cur(p), "constants are single scalar or text values — `{ ... }` literals initialize variables, not constants.");
+        sync_stmt(p);
+        return n;
+    }
+    n->a = parse_expr(p);
+    if (!n->a) { free(n->name); return NULL; }
     return n;
 }
 
@@ -1090,6 +1141,11 @@ static Node *parse_devcol(Parser *p) {
             if (m) vec_push(&n->body, m);
             continue;
         }
+        if (is(p, T_KW_CONST)) {
+            m = parse_constdecl(p);
+            if (m) vec_push(&n->body, m);
+            continue;
+        }
         if (is(p, T_IDENT) && isk(p, 1, T_EQ) && isk(p, 2, T_LBRACE)) {
             m = parse_devcol(p);
             if (m) vec_push(&n->body, m);
@@ -1131,6 +1187,11 @@ static Node *parse_toplevel_function(Parser *p) {
         for (;;) {
             OkType ty;
             if (!parse_bare_type(p, &ty)) { sync_stmt(p); break; }
+            if (ty == ty_auto) {
+                perr(p, cur(p), "parameters cannot use `type.auto` — write the parameter type explicitly (inference is for initializers, spec §8.1).");
+                sync_stmt(p);
+                break;
+            }
             if (!expect(p, T_DOT, "`.` between the parameter type and name (as in `number.a`)")) {
                 sync_stmt(p);
                 break;
@@ -1168,6 +1229,11 @@ static Node *parse_toplevel_function(Parser *p) {
         advance(p);
         OkType ty;
         if (!parse_bare_type(p, &ty)) { sync_stmt(p); return n; }
+        if (ty == ty_auto) {
+            perr(p, cur(p), "return types cannot use `type.auto` — write the return type explicitly (inference is for initializers, spec §8.1).");
+            sync_stmt(p);
+            return n;
+        }
         if (ty && ty_kind(ty) == OK_ARRAY) {
             Diag *d = perr(p, cur(p), "functions cannot return arrays directly in Okular.");
             diag_note(d, "return `ptr<array<T, N>>` instead (spec §12), or an element.");
@@ -1244,6 +1310,8 @@ static Node *parse_toplevel(Parser *p) {
         return parse_recorddecl(p, false);
     case T_KW_UNION:
         return parse_recorddecl(p, true);
+    case T_KW_CONST:
+        return parse_constdecl(p);
     case T_IDENT: {
         if (isk(p, 1, T_EQ) && isk(p, 2, T_LBRACE))
             return parse_devcol(p);

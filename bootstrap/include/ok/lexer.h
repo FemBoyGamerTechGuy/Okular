@@ -30,6 +30,8 @@ typedef enum {
     T_KW_ALLOC, T_KW_RELEASE, T_KW_NULL,
     /* overlap keyword (0.7, spec §8.5) */
     T_KW_UNION,
+    /* constant keyword (0.8, spec §8.1) */
+    T_KW_CONST,
     /* reserved for designed-but-unimplemented features (spec §1.5) */
     T_KW_RESERVED,
 } TokKind;

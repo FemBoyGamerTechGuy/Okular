@@ -43,6 +43,7 @@ typedef enum {
     A_DEVCOL,        /* name = { members }.end  (namespace) */
     A_STRUCTDECL,    /* struct.Name = { fields }.end — params[] are the fields (0.5) */
     A_UNIONDECL,     /* union.Name = { members }.end — params[] are the members (0.7, spec §8.5) */
+    A_CONSTDECL,     /* const.name = expr — folded at compile time (0.8, spec §8.1) */
     A_FUNC,          /* function.<name>(params) -> ret { body } */
     A_FILE,          /* one parsed .ok file */
 } NodeKind;

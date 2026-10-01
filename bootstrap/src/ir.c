@@ -56,6 +56,23 @@ static void build_expr(Ctx *c, Node *e);
 static void build_structlit(Ctx *c, Node *lit, Symbol *into, size_t base_off, OkType st);
 static void build_unionlit(Ctx *c, Node *lit, Symbol *into, size_t base_off, OkType ut);
 
+/* lower a rewritten member chain's ADDRESS (address-of a record field,
+ * spec §12): emit the base, every deref check, and the offsets — but NOT
+ * the final value load. `m` is the LAST A_MEMBER of the chain; everything
+ * below it lowers through build_expr (intermediate record members stay
+ * addresses by construction). */
+static void build_member_addr(Ctx *c, Node *m) {
+    build_expr(c, m->a);
+    if (m->autoderef) {
+        IrInst chk = { .kind = I_PTRCHK, .type = m->a->rtype,
+                       .line = m->line, .col = m->col };
+        emit(c->f, chk);
+    }
+    IrInst off = { .kind = I_ADDOFF, .i = m->offset,
+                   .line = m->line, .col = m->col };
+    emit(c->f, off);
+}
+
 /* build operand and convert to `want` when a conversion exists (implicit
  * widening, or the literal rule sema already approved — both lower to the
  * same I_CONV; explicit A_CONV nodes come through build_expr) */
@@ -235,6 +252,33 @@ static void build_expr(Ctx *c, Node *e) {
     case A_PATH: {
         Symbol *s = e->sym;
         if (!s) { OK_ICE("A_PATH without a resolved symbol at %zu:%zu", e->line, e->col); }
+        if (s->kind == SYM_CONST) {
+            /* constants inline their folded value (0.8, spec §8.1): no
+             * storage, no load — the value IS the code */
+            ConstVal *cv = &s->cval;
+            if (!cv->valid) { OK_ICE("SYM_CONST without a folded value at %zu:%zu", e->line, e->col); }
+            if (cv->type == ty_text) {
+                int idx = intern_text(c->im, cv->t, cv->t_len);
+                IrInst txt = { .kind = I_CONST_TEXT, .type = ty_text, .text_idx = idx,
+                               .line = e->line, .col = e->col };
+                emit(c->f, txt);
+            } else if (cv->type == ty_decimal) {
+                IrInst dec = { .kind = I_CONST_DEC, .type = ty_decimal, .d = cv->d,
+                               .line = e->line, .col = e->col };
+                emit(c->f, dec);
+            } else if (cv->type == ty_bool) {
+                IrInst bo = { .kind = I_CONST_BOOL, .type = ty_bool, .b = cv->b,
+                              .line = e->line, .col = e->col };
+                emit(c->f, bo);
+            } else {
+                /* integer family (number and fixed-width): the folded value
+                 * already carries the target width's encoding */
+                IrInst in = { .kind = I_CONST_INT, .type = cv->type, .i = cv->i,
+                              .line = e->line, .col = e->col };
+                emit(c->f, in);
+            }
+            break;
+        }
         if (ty_kind(s->type) == OK_ARRAY) {
             /* arrays evaluate to their storage address (value semantics are
              * preserved by explicit copies; spec §8.4) */
@@ -417,7 +461,14 @@ static void build_expr(Ctx *c, Node *e) {
             /* &x — address-of (spec §12): variables, array elements,
              * pointer-indexed elements, and dereferences */
             if (e->a->kind == A_PATH && e->a->sym) {
-                build_addr(c, e->a->sym, 0);
+                if (e->a->a) {
+                    /* rewritten field path `&var.f1.f2`: the chain root is
+                     * the LAST member — emit checks and offsets but skip the
+                     * final value load, leaving the member's ADDRESS */
+                    build_member_addr(c, e->a->a);
+                } else {
+                    build_addr(c, e->a->sym, 0);
+                }
                 break;
             }
             if (e->a->kind == A_INDEX) {
@@ -859,6 +910,7 @@ IrModule *ir_build_module(OkModule *m) {
             switch (n->kind) {
             case A_DIRECTIVE: case A_LANGCOL: case A_FUNC:
             case A_VARDECL: case A_DEVCOL: case A_STRUCTDECL: case A_UNIONDECL:
+            case A_CONSTDECL:
                 break;
             default:
                 build_stmt(&sc, n);

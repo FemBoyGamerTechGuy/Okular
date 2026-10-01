@@ -1,0 +1,26 @@
+type.text=1
+
+const.limit = 100
+const.factor = 3
+const.combined = limit * factor + 2
+const.greeting = "hi"
+const.ratio = 0.5
+const.active = true
+
+function.main() -> number {
+    write(limit)
+    print
+    write(combined)
+    print
+    write(greeting)
+    print
+    write(ratio)
+    print
+    write(active)
+    print
+    write(limit * 2)
+    print
+    return 0
+}
+
+main()

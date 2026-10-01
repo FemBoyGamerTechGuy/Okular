@@ -13,6 +13,7 @@ static Type t_dec_s    = { OK_DECIMAL, NULL, 0, "decimal", 0, false, NULL, 0 };
 static Type t_text_s   = { OK_TEXT,   NULL, 0, "text",     0, false, NULL, 0 };
 static Type t_bool_s   = { OK_BOOL,   NULL, 0, "bool",     0, false, NULL, 0 };
 static Type t_null_s   = { OK_NULL,   NULL, 0, "null",     0, false, NULL, 0 };
+static Type t_auto_s   = { OK_AUTO,   NULL, 0, "auto",     0, false, NULL, 0 };
 
 static Type t_i8_s     = { OK_INT8,   NULL, 0, "int8",     8, true,  NULL, 0 };
 static Type t_i16_s    = { OK_INT16,  NULL, 0, "int16",   16, true,  NULL, 0 };
@@ -28,6 +29,7 @@ OkType ty_decimal = &t_dec_s;
 OkType ty_text    = &t_text_s;
 OkType ty_bool    = &t_bool_s;
 OkType ty_null    = &t_null_s;
+OkType ty_auto    = &t_auto_s;   /* `type.auto` marker (0.8, spec §8.1) */
 
 OkType ty_int8    = &t_i8_s;
 OkType ty_int16   = &t_i16_s;
@@ -182,6 +184,7 @@ bool ty_from_scalar_name(const char *s, OkType *out) {
     if (strcmp(s, "uint64") == 0) { *out = ty_uint64; return true; }
     if (strcmp(s, "byte") == 0)   { *out = ty_uint8; return true; }   /* alias */
     if (strcmp(s, "f64") == 0)    { *out = ty_decimal; return true; } /* alias */
+    if (strcmp(s, "auto") == 0)   { *out = ty_auto; return true; }    /* 0.8 inference marker */
     return false;
 }
 

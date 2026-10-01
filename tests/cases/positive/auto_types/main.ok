@@ -1,0 +1,29 @@
+type.text=1
+
+struct.Point = {
+    type.number x
+    type.number y
+}.end
+
+type.Point base = {3, 4}
+
+function.main() -> number {
+    type.auto p = &base.x
+    write(*p)
+    print
+    type.auto r = base
+    r.x = 30
+    write(r.x)
+    print
+    write(base.x)
+    print
+    type.auto n = base.x + base.y
+    write(n)
+    print
+    type.auto u = 1.25
+    write(u)
+    print
+    return 0
+}
+
+main()

@@ -1,0 +1,1 @@
+parameters cannot use `type.auto`

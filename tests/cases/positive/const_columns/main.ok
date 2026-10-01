@@ -1,0 +1,23 @@
+type.text=1
+
+config = {
+    const.capacity = 512
+    const.threshold = 0.75
+    function.is_big(number.n) -> bool {
+        return n > capacity
+    }
+}.end
+
+function.main() -> number {
+    write(config.capacity)
+    print
+    write(config.threshold)
+    print
+    write(config.is_big(600))
+    print
+    write(config.is_big(10))
+    print
+    return 0
+}
+
+main()

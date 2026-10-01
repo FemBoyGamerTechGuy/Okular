@@ -1,0 +1,4 @@
+function.main() -> number {
+    type.auto x = {1, 2}
+    return 0
+}

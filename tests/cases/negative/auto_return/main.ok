@@ -1,0 +1,3 @@
+function.f() -> auto {
+    return 5
+}

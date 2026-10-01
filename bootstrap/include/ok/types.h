@@ -29,6 +29,7 @@ typedef enum {
     OK_STRUCT,     /* named record type (spec §8.3, 0.5)    */
     OK_UNION,      /* named overlap type (spec §8.5, 0.7)   */
     OK_NAMED,      /* parser placeholder: unresolved struct/union name */
+    OK_AUTO,       /* internal: `type.auto` inference marker (0.8) */
 } TypeKind;
 
 /* OkType is a pointer to an interned descriptor. */
@@ -57,6 +58,7 @@ extern OkType ty_void, ty_number, ty_decimal, ty_text, ty_bool;
 extern OkType ty_int8, ty_int16, ty_int32;
 extern OkType ty_uint8, ty_uint16, ty_uint32, ty_uint64;
 extern OkType ty_null;   /* the literal `null`; assignable to any ptr<T> */
+extern OkType ty_auto;   /* internal marker for `type.auto` (never a value type) */
 
 static inline TypeKind ty_kind(OkType t) { return t ? t->kind : OK_VOID; }
 

@@ -67,13 +67,14 @@ static const KwEntry keywords[] = {
     {"null", T_KW_NULL},
     /* overlap keyword (0.7, spec §8.5) */
     {"union", T_KW_UNION},
+    /* constant keyword (0.8, spec §8.1) */
+    {"const", T_KW_CONST},
     /* reserved: designed features, not implemented (spec §1.5 / §20) */
     {"pointer", T_KW_RESERVED},
     {"guard", T_KW_RESERVED},
     {"fail", T_KW_RESERVED},   {"with", T_KW_RESERVED},
     {"priv", T_KW_RESERVED},   {"pub", T_KW_RESERVED},
     {"match", T_KW_RESERVED},  {"case", T_KW_RESERVED},
-    {"const", T_KW_RESERVED},
 };
 
 static bool kw_lookup(const char *s, size_t n, TokKind *out) {
@@ -120,6 +121,7 @@ const char *tok_kind_name(TokKind k) {
     case T_KW_ALLOC: return "`alloc`"; case T_KW_RELEASE: return "`release`";
     case T_KW_NULL: return "`null`";
     case T_KW_UNION: return "`union`";
+    case T_KW_CONST: return "`const`";
     case T_KW_RESERVED: return "reserved keyword";
     }
     return "?";

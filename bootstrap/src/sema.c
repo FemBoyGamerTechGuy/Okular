@@ -334,6 +334,43 @@ static Node *mk_field_chain(SemaCtx *c, Node *origin, char **parts, size_t npart
 static void collect_devcol(SemaCtx *c, OkModule *m, Node *col, Scope *parent,
                             char *colpath_in);
 
+/* fold one `const` declaration and register it (0.8, spec §8.1). Consts
+ * live at module/column scope and must fold from literals, other consts,
+ * and constant expressions — exactly the global-initializer rules. The
+ * folded ConstVal rides on the symbol; reads inline the value. */
+static void register_const_decl(SemaCtx *c, Scope *scope, Node *n) {
+    Symbol *ex = scope_insert(scope, n->name, SYM_CONST, n->line, n->col);
+    if (ex->kind != SYM_CONST || (ex->decl && ex->decl != n)) {
+        serr(c, n, "duplicate definition of `%s` in this scope.", n->name);
+        return;
+    }
+    ex->decl = n;
+    n->sym = ex;
+
+    Scope *saved = c->cur_scope;
+    c->cur_scope = scope;   /* const_eval resolves paths from here */
+    size_t mark = c->de->errors;
+    ConstVal cv;
+    bool ok = const_eval(c, n->a, &cv);
+    c->cur_scope = saved;
+    if (!ok || c->de->errors != mark || !cv.valid) {
+        if (c->de->errors == mark)
+            serr(c, n, "the value of `const.%s` is not a compile-time constant.", n->name);
+        ex->type = ty_number;  /* recover */
+        return;
+    }
+    if (ty_kind(cv.type) == OK_ARRAY || ty_is_record(cv.type) || cv.type == ty_null
+        || cv.type == ty_auto || cv.type == ty_void) {
+        serr(c, n, "constants are number, decimal, text, bool, or fixed-width values.");
+        ex->type = ty_number;
+        return;
+    }
+    ex->type = cv.type;
+    ex->cval = cv;
+    ex->is_global = true;   /* name lives at module/column scope */
+    ex->used = true;
+}
+
 static void collect_toplevel(SemaCtx *c, OkModule *m, Node *file, Scope *scope) {
     c->cur_mod = m;
     for (size_t i = 0; i < file->body.len; i++) {
@@ -344,6 +381,9 @@ static void collect_toplevel(SemaCtx *c, OkModule *m, Node *file, Scope *scope) 
             m->features[n->feature] = (n->fvalue != 0);
             break;
         }
+        case A_CONSTDECL:
+            register_const_decl(c, scope, n);
+            break;
         case A_LANGCOL: {
             const char *p = path_join_str(n->parts, n->nparts);
             if (strcmp(p, "source.files.use") != 0 && strcmp(p, "libs.use") != 0) {
@@ -479,6 +519,9 @@ static void collect_devcol(SemaCtx *c, OkModule *m, Node *col, Scope *parent,
             n->sym = vs;
             break;
         }
+        case A_CONSTDECL:
+            register_const_decl(c, ns, n);
+            break;
         case A_DEVCOL:
             collect_devcol(c, m, n, ns, colpath);
             break;
@@ -493,6 +536,24 @@ static void collect_devcol(SemaCtx *c, OkModule *m, Node *col, Scope *parent,
 static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
     memset(out, 0, sizeof *out);
     switch (e->kind) {
+    case A_PATH: {
+        /* a constant reference folds to its stored value (0.8, spec §8.1):
+         * walk namespaces, then require a SYM_CONST with a valid cval.
+         * Plain variables — even global with constant initializers — do
+         * not fold: their storage is runtime state. */
+        if (!c->cur_scope) return false;
+        Symbol *cur = scope_lookup(c->cur_scope, e->parts[0]);
+        size_t i = 1;
+        while (i < e->nparts && cur && cur->kind == SYM_NS && cur->ns) {
+            cur = scope_find_local(cur->ns, e->parts[i]);
+            i++;
+        }
+        if (!cur || cur->kind != SYM_CONST || i != e->nparts) return false;
+        if (!cur->cval.valid) return false;
+        *out = cur->cval;   /* shallow copy; text bytes alias (process-lifetime) */
+        out->mtype = NULL;  /* union consts are rejected at registration */
+        return true;
+    }
     case A_INT:  out->valid = true; out->type = ty_number; out->i = e->ival; return true;
     case A_DEC:  out->valid = true; out->type = ty_decimal; out->d = e->dval; return true;
     case A_BOOL: out->valid = true; out->type = ty_bool; out->b = e->bval; return true;
@@ -1142,6 +1203,31 @@ static OkType check_expr(SemaCtx *c, Node *e);
 static void check_stmt_list(SemaCtx *c, Vec *body);
 static void check_stmt(SemaCtx *c, Node *s);
 
+/* `type.auto name = init` (0.8, spec §8.1): infer the variable's type
+ * from the initializer and PATCH the declaration in place — otype and,
+ * when the symbol already exists (globals/column members, registered
+ * during collection), its type too. Literals cannot drive inference
+ * (no target type to check against); void/null/auto-typed values cannot
+ * either. Recovery type: number. */
+static void infer_auto_type(SemaCtx *c, Node *s) {
+    if (s->otype != ty_auto) return;
+    OkType it = NULL;
+    if (s->a->kind != A_ARRAYLIT) it = check_expr(c, s->a);
+    if (!it) {
+        Diag *d = serr(c, s, "`type.auto` cannot infer the type of `%s` from this initializer.", s->name);
+        diag_note(d, "literals like `{ ... }` need a target type; write the type explicitly (spec §8.1).");
+        (void)d;
+    } else if (it == ty_void || it == ty_null || it == ty_auto) {
+        Diag *d = serr(c, s, "`type.auto` cannot infer the type of `%s` from a `%s` initializer.",
+                       s->name, ok_type_name(it));
+        diag_note(d, "`null` needs a pointer type; write it explicitly (`type.ptr<type.number> p = null`).");
+        (void)d;
+        it = NULL;
+    }
+    s->otype = it ? it : ty_number;   /* recover as number */
+    if (s->sym) s->sym->type = s->otype;
+}
+
 /* Resolve a dotted path to a symbol; reports and returns NULL on failure. */
 static Symbol *resolve_path(SemaCtx *c, Node *n, bool want_var) {
     const char *full = path_join_str(n->parts, n->nparts);
@@ -1154,9 +1240,9 @@ static Symbol *resolve_path(SemaCtx *c, Node *n, bool want_var) {
         return NULL;
     }
     if (n->nparts == 1) {
-        if (want_var && first->kind != SYM_VAR) {
+        if (want_var && first->kind != SYM_VAR && first->kind != SYM_CONST) {
             serr(c, n, "`%s` is a %s, not a variable — it cannot be assigned or read as a value.",
-                 full, first->kind == SYM_FUNC ? "function" : "namespace");
+                 full, first->kind == SYM_FUNC ? "function" : first->kind == SYM_NS ? "namespace" : "type");
             return NULL;
         }
         if (first->kind == SYM_VAR) first->used = true;
@@ -1182,9 +1268,9 @@ static Symbol *resolve_path(SemaCtx *c, Node *n, bool want_var) {
         }
         cur = next;
     }
-    if (want_var && cur->kind != SYM_VAR) {
+    if (want_var && cur->kind != SYM_VAR && cur->kind != SYM_CONST) {
         serr(c, n, "`%s` is a %s, not a variable — it cannot be assigned or read as a value.",
-             full, cur->kind == SYM_FUNC ? "function" : "namespace");
+             full, cur->kind == SYM_FUNC ? "function" : cur->kind == SYM_NS ? "namespace" : "type");
         return NULL;
     }
     if (cur->kind == SYM_VAR) cur->used = true;
@@ -1580,6 +1666,15 @@ static OkType check_expr(SemaCtx *c, Node *e) {
         }
         Symbol *s = resolve_path(c, e, true);
         if (!s) { e->rtype = ty_number; return ty_number; }
+        if (s->type == ty_auto) {
+            /* auto globals are patched in file order; earlier uses cannot
+             * know the type yet (0.8, spec §8.1) */
+            Diag *d = serr(c, e, "the type of `%s` is not known yet — `type.auto` declarations must precede their uses.",
+                           path_join_str(e->parts, e->nparts));
+            (void)d;
+            e->rtype = ty_number;
+            return ty_number;
+        }
         e->sym = s;
         e->rtype = s->type;
         return s->type;
@@ -1670,9 +1765,12 @@ static OkType check_expr(SemaCtx *c, Node *e) {
         if (e->uop == UN_ADDR) {
             /* &x — address-of (spec §12): variables, array elements,
              * and dereferences are addressable; all yield ptr<T> where
-             * T is the operand's type */
+             * T is the operand's type. For rewritten field paths
+             * (`&pkt.len` → A_MEMBER chain) the pointee is the FIELD's
+             * type — e->a->rtype carries it (0.5 regression: the base
+             * symbol's type was used, pointing at the whole record) */
             if (e->a->kind == A_PATH && e->a->sym) {
-                e->rtype = ty_ptr(e->a->sym->type);
+                e->rtype = ty_ptr(e->a->rtype);
             } else if (e->a->kind == A_INDEX) {
                 e->rtype = ty_ptr(e->a->rtype);
             } else if (e->a->kind == A_UN && e->a->uop == UN_DEREF) {
@@ -1778,6 +1876,7 @@ static void check_func_body(SemaCtx *c, Node *fn, FuncInfo *fi) {
 static void check_stmt(SemaCtx *c, Node *s) {
     switch (s->kind) {
     case A_VARDECL: {
+        infer_auto_type(c, s);
         if (ty_is_record(s->otype)) {
             if (s->a->kind == A_ARRAYLIT) {
                 check_struct_lit_runtime(c, s->a, s->otype, s->name);
@@ -1872,6 +1971,13 @@ static void check_stmt(SemaCtx *c, Node *s) {
         }
         Symbol *target = resolve_path(c, s, true);
         if (!target) break;
+        if (target->kind == SYM_CONST) {
+            Diag *d = serr(c, s, "`%s` is a constant — its value is fixed at compile time and cannot be assigned.",
+                           path_join_str(s->parts, s->nparts));
+            (void)d;
+            check_expr(c, s->a);
+            break;
+        }
         s->sym = target;
         OkType vt = check_expr(c, s->a);
         if (ty_is_record(target->type) || ty_kind(target->type) == OK_ARRAY || ty_kind(vt) == OK_ARRAY) {
@@ -2128,6 +2234,9 @@ static void check_column(SemaCtx *c, Node *col, Scope *ns) {
                 check_func_body(c, mem, mem->finfo);
             }
         } else if (mem->kind == A_VARDECL) {
+            c->cur_scope = ns;
+            infer_auto_type(c, mem);
+            c->cur_scope = ns;
             if (ty_is_record(mem->otype)) {
                 char what[192];
                 snprintf(what, sizeof what, "%s `%s.%s`",
@@ -2216,6 +2325,9 @@ static void check_module(SemaCtx *c, OkModule *m, Scope *scope) {
         }
         case A_VARDECL: {
             /* global: initializer must be a compile-time constant (spec §7) */
+            c->cur_scope = scope;
+            infer_auto_type(c, n);
+            c->cur_scope = scope;
             if (ty_is_record(n->otype)) {
                 char what[160];
                 snprintf(what, sizeof what, "global %s `%s`",
@@ -2289,7 +2401,7 @@ static void check_module(SemaCtx *c, OkModule *m, Scope *scope) {
         }
         case A_DIRECTIVE:
         case A_LANGCOL:
-        case A_STRUCTDECL: case A_UNIONDECL:
+        case A_STRUCTDECL: case A_UNIONDECL: case A_CONSTDECL:
             /* collected/validated in phase 1; no body to check */
             break;
         default:

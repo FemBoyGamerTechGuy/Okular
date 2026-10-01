@@ -1,0 +1,42 @@
+type.text=1
+
+struct.Point = {
+    type.number x
+    type.number y
+}.end
+
+struct.Rect = {
+    type.Point corner
+    type.uint16 w
+}.end
+
+type.Point base = {3, 4}
+type.Rect r = {{1, 2}, 10}
+
+function.bump(ptr<number>.p) {
+    *p = *p + 10
+}
+
+function.grow(ptr<uint16>.w) {
+    *w = *w + 5
+}
+
+function.main() -> number {
+    type.ptr<type.number> p = &base.x
+    write(*p)
+    print
+    bump(&base.y)
+    write(base.y)
+    print
+    type.auto q = &r.corner.y
+    write(*q)
+    print
+    grow(&r.w)
+    write(r.w)
+    print
+    write(r.corner.x)
+    print
+    return 0
+}
+
+main()

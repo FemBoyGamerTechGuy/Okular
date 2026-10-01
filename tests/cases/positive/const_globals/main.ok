@@ -1,0 +1,30 @@
+type.text=1
+
+struct.Point = {
+    type.number x
+    type.number y
+}.end
+
+const.limit = 100
+const.base = 7
+type.array<type.number, 3> xs = { limit, base, limit + base }
+type.Point origin = { limit, base }
+type.auto g = limit * 2
+
+function.main() -> number {
+    write(xs[0])
+    print
+    write(xs[1])
+    print
+    write(xs[2])
+    print
+    write(origin.x)
+    print
+    write(origin.y)
+    print
+    write(g)
+    print
+    return 0
+}
+
+main()

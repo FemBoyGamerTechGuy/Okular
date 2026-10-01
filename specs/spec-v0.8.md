@@ -1,13 +1,13 @@
 # Okular Language Specification
 
-**Version:** 0.7 (unions)
+**Version:** 0.8 (constants and type inference)
 **Status:** Evolving draft
 **Implementation:** bootstrap compiler in C (`bootstrap/`)
 
-> 0.7 adds **unions** (spec §8.5): the overlap type with type-directed
-> literals, documented reinterpretation semantics, and full nesting —
-> arrays of unions, unions in structs, on the heap, and as constants in
-> `.data`. See the changelog in §23.
+> 0.8 adds **constants** (`const.name = value`, folded and inlined —
+> spec §8.1) and **type inference** (`type.auto x = init`, initializer-
+> driven — spec §8.1), and fixes a 0.5 defect: `&record.field` now yields
+> a pointer to the FIELD (was: the whole record). See the changelog in §23.
 
 > This specification is the source of truth for the Okular language.
 > When the implementation changes the language, this document changes with it.
@@ -77,10 +77,10 @@ are reserved for compiler internals.
 
 ### 1.5 Keywords
 
-Active in 0.7:
+Active in 0.8:
 
 ```
-type  function  struct  union  when  else  loop  from  to  until
+type  function  struct  union  const  when  else  loop  from  to  until
 break  continue  return  print  write  true  false
 and  or  not  end  alloc  release  null
 ```
@@ -90,7 +90,7 @@ is a compile error, so future adoption is non-breaking):
 
 ```
 pointer  guard  fail  with
-priv  pub  match  case  const
+priv  pub  match  case
 ```
 
 `libs`, `source`, `use`, `array`, and `ptr` are not keywords: they are
@@ -535,9 +535,56 @@ type.array<type.number, 5> scores = {10, 20, 30, 40, 50}
 * Reassignment: `count = count + 1` (same type only).
 * Scope: block-scoped locals; file/module-scoped globals; column-scoped
   members.
-* Constants (`const`) are designed; keyword reserved.
-* Type inference (`type.auto x = f()`) is planned but not in 0.1 — explicit
-  types first.
+
+#### Constants (implemented in 0.8)
+
+```ok
+const.limit = 100
+const.greeting = "hi"
+const.combined = limit * 3 + 2        # folds: 302
+
+config = {
+    const.capacity = 512
+    function.is_big(number.n) -> bool {
+        return n > capacity
+    }
+}.end
+```
+
+* `const.name = expr` declares a named constant at file or column scope —
+  single line, like variable declarations. Not inside function bodies.
+* The value must fold at compile time: literals, other constants,
+  constant arithmetic, conversions. Anything runtime-dependent is a
+  compile error with the `const` context named.
+* Constants are `number`, `decimal`, `text`, `bool`, or fixed-width values —
+  the scalar world. Arrays, structs, unions, and pointers are not constants.
+* Reads **inline the folded value** — no storage, no load; the value is the
+  code. Constants fold into other constants, global initializers (array
+  elements, struct fields), and constant expressions.
+* Constants cannot be assigned (`limit = 5` is a compile error) and cannot
+  collide with variable/type/function names in the same scope.
+* Array lengths still require literals in 0.8 (`type.array<type.number,
+  limit>` is designed, not implemented — it needs module-aware parsing).
+
+#### Type inference (implemented in 0.8)
+
+```ok
+type.auto x = limit + 5          # number
+type.auto d = 1.5                # decimal
+type.auto t = "hi" + "!"         # text
+type.auto p = &base.x            # ptr<number> — the FIELD's type
+type.auto r = existing_rect      # Rect (copies)
+```
+
+* `type.auto name = init` infers the type from the initializer's checked
+  type — locals, globals, and column members.
+* Cannot infer from `{ ... }` literals (they need a target type), from
+  `null` (needs a pointer type), or from void expressions. Each rejection
+  says so precisely.
+* Parameters, return types, struct/union members, array elements, and
+  pointer pointees stay explicit — inference is for initializers only.
+* An auto global must precede its uses in file order (its type is not
+  known before it is checked).
 
 ### 8.2 Functions
 
@@ -1144,13 +1191,14 @@ Major decisions and their rationale (required by the engineering brief §4.10):
 | D24 | Bounds checks always on, trap with index+length, exit 70 | safety is opt-out, not opt-in (§12); the low-level escape arrives with `type.mem=1` |
 | D25 | `type.array<T, N>` mirrors the committed `type.ptr<T>` shape (§12) | one type-reference grammar; the count lives in the type, not the value |
 | D26 | Union literals are type-directed: the FIRST member whose type accepts the value is activated (§8.5) | every member sits at offset 0, so selection affects only checking and the store's type; declaration order breaks ties predictably |
+| D27 | Constants inline their folded value (no storage, no load); `type.auto` infers from the initializer only | consts stay compile-time facts; inference stays local to declarations — params/returns/members stay explicit |
 
 ---
 
 ## 20. What 0.2 Deliberately Does NOT Contain
 
 Slices, structs, ~~unions~~ (0.7), pointers, manual allocation, FFI, threads,
-match expressions, type inference, constants, aliases, `priv`, block
+match expressions, ~~type inference, constants~~ (0.8), aliases, `priv`, block
 comments, scientific-notation literals, method calls, debug symbols,
 optimization beyond constant folding, an optimizer framework, and the
 self-hosted compiler. Each is designed in `docs/roadmap.md` with a milestone.
@@ -1197,6 +1245,9 @@ An implementation claiming "Okular 0.1" must:
 | Functions, recursion, return checking | §8.2 | implemented |
 | Structs (layout, literals, fields, value copies) | §8.3 | implemented (explicit layout attributes planned) |
 | Unions (overlap layout, type-directed literals, reinterpretation) | §8.5 | implemented (0.7) |
+| Constants `const.name = value` (fold, inline, no storage) | §8.1 | implemented (0.8) |
+| Type inference `type.auto x = init` | §8.1 | implemented (0.8) |
+| Constants as array lengths | §8.1 | NOT IMPLEMENTED (needs module-aware parsing) |
 | Expressions, precedence, constant folding | §9 | implemented |
 | `when`/`else` | §10 | implemented |
 | `else when` chains | §10 | implemented |
@@ -1219,6 +1270,28 @@ An implementation claiming "Okular 0.1" must:
 ---
 
 ## 23. Changelog
+
+### 0.8
+
+* **Constants** (§8.1): `const.name = expr` at file or column scope. The
+  value folds at compile time (literals, other consts, constant arithmetic,
+  conversions); reads inline the folded value — no storage, no load.
+  Constants fold into other constants and into global initializers
+  (array elements, struct fields). Assignment to a constant and duplicate
+  names are compile errors. Consts are scalar/text only.
+* **Type inference** (§8.1): `type.auto name = init` for locals, globals,
+  and column members. Inference is initializer-driven; literals, `null`,
+  and void expressions are rejected with precise messages. Parameters,
+  returns, record members, array elements, and pointees stay explicit.
+* **Fix (0.5 defect)**: `&record.field` now yields a pointer to the FIELD
+  (type and address) — previously it silently took the whole record's
+  address with the record's type. Nested paths (`&r.corner.y`) and pointer
+  parameters now write through the correct member. Regression test:
+  `positive/field_addr`.
+* Tests: 388 → 430 checks (5 positive: const basics/columns/globals, auto
+  basics/types, field_addr regression; 8 negative: non-constant, assignment,
+  in-function, duplicates, auto literal/null/param/return);
+  `examples/consts`; spec 0.7 → 0.8.
 
 ### 0.7
 

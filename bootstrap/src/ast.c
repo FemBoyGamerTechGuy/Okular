@@ -225,6 +225,10 @@ static void dump_top(Node *n, int ind) {
         }
         pad(ind); printf("}.end\n");
         break;
+    case A_CONSTDECL:
+        printf("const %s = ", n->name);
+        dump_expr(n->a, 0);
+        break;
     case A_FUNC:
         printf("func %s(", n->name);
         for (size_t i = 0; i < n->nparams; i++)

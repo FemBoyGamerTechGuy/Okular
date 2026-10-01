@@ -1,0 +1,3 @@
+function.f(auto.x) -> number {
+    return x
+}

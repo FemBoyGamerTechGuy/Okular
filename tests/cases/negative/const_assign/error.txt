@@ -1,0 +1,1 @@
+is a constant — its value is fixed at compile time and cannot be assigned

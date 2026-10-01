@@ -1,0 +1,6 @@
+const.limit = 100
+
+function.main() -> number {
+    limit = 5
+    return 0
+}

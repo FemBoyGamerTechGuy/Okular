@@ -1,0 +1,53 @@
+# consts.ok — Okular 0.8 constants and type.auto (spec §8.1).
+# `const.name = value` folds at compile time; `type.auto x = init`
+# infers the type from the initializer.
+
+type.text=1
+
+const.limit = 100
+const.greeting = "hi"
+const.factor = 3
+const.combined = limit * factor + 2
+
+config = {
+    const.capacity = 512
+    function.is_big(number.n) -> bool {
+        return n > capacity
+    }
+}.end
+
+struct.Point = {
+    type.number x
+    type.number y
+}.end
+
+type.Point origin = { limit, factor }
+
+function.main() -> number {
+    write(combined)
+    print
+    write(greeting)
+    print
+    write(config.capacity)
+    print
+    write(config.is_big(600))
+    print
+    write(origin.x)
+    print
+
+    type.auto twice = limit * 2
+    write(twice)
+    print
+    type.auto d = 1.5
+    write(d)
+    print
+    type.auto t = greeting + "!"
+    write(t)
+    print
+    type.auto p = &origin.y
+    write(*p)
+    print
+    return 0
+}
+
+main()

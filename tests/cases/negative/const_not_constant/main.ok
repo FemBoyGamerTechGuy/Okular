@@ -1,0 +1,5 @@
+function.f() -> number {
+    return 5
+}
+
+const.x = f()

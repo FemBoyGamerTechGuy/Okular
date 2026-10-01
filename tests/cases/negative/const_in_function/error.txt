@@ -1,0 +1,1 @@
+constants are declared at the top of a file or inside a column
