@@ -1,0 +1,10 @@
+type.text=1
+
+const.bad = 1 << 64
+
+function.main() -> number {
+    write(bad)
+    return 0
+}
+
+main()

@@ -13,7 +13,7 @@
 #include <stdbool.h>
 #include <stdarg.h>
 
-#define OK_VERSION "0.10"
+#define OK_VERSION "0.11"
 #define OK_MAX_ERRORS 50
 #define OK_OUTBUF_BYTES 65536
 #define OK_TEXT_ARENA_BYTES (1 << 20)

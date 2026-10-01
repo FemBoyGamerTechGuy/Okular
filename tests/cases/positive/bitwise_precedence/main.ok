@@ -1,0 +1,35 @@
+type.text=1
+
+function.main() -> number {
+    # & binds tighter than == (Rust ordering): (flags & 0xF0) == 0xF0
+    type.uint32 flags = 0xF0
+    when (flags & 0xF0 == 0xF0) {
+        write("eq-after-and")
+        print
+    }
+    when (0 | 1 == 1) {
+        write("eq-after-or")
+        print
+    }
+
+    # shifts are looser than + (like C and Rust): 1 << (2+3)
+    write(1 << 2 + 3)
+    print
+    write(16 >> 1 + 2)
+    print
+    write(2 + 3 << 1 + 1)
+    print
+
+    # & tighter than ^ tighter than |
+    write(1 | 2 ^ 3 & 5)
+    print
+    write(3 & 5 | 8)
+    print
+
+    # shifts sit between & and +
+    write(1 << 3 & 1)
+    print
+    return 0
+}
+
+main()

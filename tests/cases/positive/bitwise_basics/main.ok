@@ -1,0 +1,32 @@
+type.text=1
+
+function.main() -> number {
+    type.uint32 a = 0xF0F0
+    type.uint32 b = 0x0FF0
+    write(a & b)
+    print
+
+    write(a | b)
+    print
+
+    write(a ^ b)
+    print
+
+    write(~a)
+    print
+
+    type.int16 s = -1
+    write(s & 0xFF)
+    print
+
+    type.number n = 0x55AA
+    write(n & 0xFF)
+    print
+
+    type.uint16 u = 0xABCD
+    write(u ^ 0xFFFF)
+    print
+    return 0
+}
+
+main()

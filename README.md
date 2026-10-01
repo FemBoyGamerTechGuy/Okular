@@ -3,13 +3,14 @@
 A simple, fast programming language designed for building large
 applications with minimal code.
 
-**Status:** Okular 0.10 — milestone M3 (systems types) underway. The C
+**Status:** Okular 0.11 — milestone M2→M3 (systems types). The C
 bootstrap compiler builds and runs real Okular programs natively on
 x86-64 Linux — arrays and structs with value semantics, the full
-fixed-width integer family, and pointers with manual memory: `&x`, `*p`,
+fixed-width integer family, pointers with manual memory: `&x`, `*p`,
 `alloc<T>(n)` / `release(p)` over a real heap allocator, null checks,
-scaled pointer arithmetic, records with predictable layout, unions with type-directed literals (spec §8.5), and the full conversion builtin set
-(`number.to_text`, `text.to_number`, ...).
+scaled pointer arithmetic, records with predictable layout, unions with type-directed literals (spec §8.5), the full conversion builtin set
+(`number.to_text`, `text.to_number`, ...), and **bitwise operations**
+(`& | ^ ~ << >>` with range-checked shifts — spec §9).
 
 ```ok
 type.text=1
@@ -25,6 +26,13 @@ type.uint16 port = 443
 type.uint32 flags = 0x8000_0000
 type.uint64 huge = 18446744073709551615
 write(huge)
+print
+
+when (flags & 0x8000_0000 == 0x8000_0000) {
+    write("high bit set")
+    print
+}
+write(1 << 20)
 print
 ```
 
@@ -71,8 +79,8 @@ build/        build artifacts
 ## Documentation
 
 * [Getting started](docs/getting-started.md) — build, compile, run
-* [Language basics](docs/language-basics.md) — a tour of Okular 0.10
-* [Specification v0.10](specs/spec-v0.10.md) — the definition, with an
+* [Language basics](docs/language-basics.md) — a tour of Okular 0.11
+* [Specification v0.11](specs/spec-v0.11.md) — the definition, with an
   implementation status table that says exactly what works
 * [Architecture](docs/architecture.md) — how the bootstrap compiler is
   built and how it will self-host
@@ -82,7 +90,7 @@ build/        build artifacts
 
 ```console
 $ make test
-passed: 468   failed: 0
+passed: 514   failed: 0
 ALL TESTS PASSED
 ```
 

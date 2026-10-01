@@ -376,12 +376,36 @@ static void emit_binop(FnCtx *fc, IrInst *in) {
      * type's width (spec §4.2). Comparisons use the type's signedness. */
     bool is_bool = (in->type == ty_bool);
     bool is_unsigned = ty_is_integer(in->type) && !in->type->is_signed;
-    bool is_arith = (in->op <= OP_MOD); /* add/sub/mul/div/mod */
+    /* arith + bitwise + shifts re-encode to the result width (0.11);
+     * comparisons yield bool and never re-encode */
+    bool is_intop = (in->op <= OP_MOD || in->op >= OP_BAND);
     buf_puts(o, "    pop rcx\n    pop rax\n"); /* rcx = right, rax = left */
     switch (in->op) {
     case OP_ADD: buf_puts(o, "    add rax, rcx\n"); break;
     case OP_SUB: buf_puts(o, "    sub rax, rcx\n"); break;
     case OP_MUL: buf_puts(o, "    imul rax, rcx\n"); break;
+    case OP_BAND: buf_puts(o, "    and rax, rcx\n"); break;
+    case OP_BOR:  buf_puts(o, "    or rax, rcx\n"); break;
+    case OP_XOR:  buf_puts(o, "    xor rax, rcx\n"); break;
+    case OP_SHL: case OP_SHR: {
+        /* rcx = count (i64), rax = value. Out-of-range counts are fatal
+         * traps (0.11, spec §13, exit 72): count >= width, including
+         * negative counts (huge as unsigned, so `jae` catches them) */
+        size_t sv = fc->div_seq++;
+        /* jb = count < width: the good path; fallthrough (count >= width,
+         * negative counts included — huge as unsigned) hits the trap */
+        buf_printf(o, "    cmp rcx, %d\n    jb .Lsvk_%zu_%zu\n",
+                   in->type ? in->type->bits : 64, fc->func_seq, sv);
+        buf_puts(o, "    mov rdi, rcx\n");
+        buf_puts(o, "    call rt_shift_trap\n"); /* never returns */
+        buf_printf(o, ".Lsvk_%zu_%zu:\n", fc->func_seq, sv);
+        if (in->op == OP_SHL) buf_puts(o, "    shl rax, cl\n");
+        else if (in->type && in->type->is_signed)
+            buf_puts(o, "    sar rax, cl\n");   /* arithmetic (spec §4.2) */
+        else
+            buf_puts(o, "    shr rax, cl\n");   /* logical */
+        break;
+    }
     case OP_DIV: case OP_MOD: {
         /* division by zero is a fatal runtime trap (spec §13, exit 71);
          * signed INT64_MIN / -1 wraps (idiv would fault #DE) */
@@ -431,7 +455,7 @@ static void emit_binop(FnCtx *fc, IrInst *in) {
         break;
     default: OK_ICE("bad integer binop %d", (int)in->op);
     }
-    if (is_arith && !is_bool)
+    if (is_intop && !is_bool)
         emit_reencode(o, in->type); /* wrap to the result width */
     push_rax(o);
 }
@@ -610,6 +634,13 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
             pop_rax(o);
             buf_puts(o, "    neg rax\n");
             emit_reencode(o, in->type); /* wrap (uint8 0 -> 0; int8 -128 -> -128) */
+            push_rax(o);
+        } else if (in->uop == UN_BNOT) {
+            /* ~x — bitwise not (0.11, spec §9); re-encode because `not`
+            * flips the high bits above the type's width */
+            pop_rax(o);
+            buf_puts(o, "    not rax\n");
+            emit_reencode(o, in->type);
             push_rax(o);
         } else {
             pop_rax(o);

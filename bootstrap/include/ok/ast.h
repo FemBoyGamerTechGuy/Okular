@@ -54,9 +54,12 @@ typedef enum {
     OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
     OP_EQ, OP_NEQ, OP_LT, OP_LE, OP_GT, OP_GE,
     OP_AND, OP_OR,
+    /* bitwise (0.11, spec §9) — appended after OP_OR so the existing
+     * `op <= OP_MOD` (arith) and `OP_EQ..OP_GE` (comparison) ranges hold */
+    OP_BAND, OP_BOR, OP_XOR, OP_SHL, OP_SHR,
 } BinOp;
 
-typedef enum { UN_NEG, UN_NOT, UN_ADDR, UN_DEREF } UnOp;
+typedef enum { UN_NEG, UN_NOT, UN_ADDR, UN_DEREF, UN_BNOT } UnOp;
 
 /* text builtin sub-operations (A_TEXTOP, 0.9 spec §4.5) */
 typedef enum { TOP_LEN, TOP_BYTE, TOP_SLICE } TextOp;

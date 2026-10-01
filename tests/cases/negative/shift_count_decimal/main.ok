@@ -1,0 +1,9 @@
+type.text=1
+
+function.main() -> number {
+    type.decimal c = 1.5
+    write(1 << c)
+    return 0
+}
+
+main()

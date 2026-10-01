@@ -1,7 +1,7 @@
-# Okular Language Basics (0.1)
+# Okular Language Basics (0.11)
 
-A tour of what Okular 0.1 does today. The specification
-(`specs/spec-v0.10.md`) is the source of truth; this page is the friendly
+A tour of what Okular 0.11 does today. The specification
+(`specs/spec-v0.11.md`) is the source of truth; this page is the friendly
 version. Everything shown here compiles and runs with the bootstrap
 compiler.
 
@@ -250,7 +250,7 @@ type.array<type.number, 5> copy = {0, 0, 0, 0, 0}
 copy = scores           # whole-array copy
 ```
 
-See `specs/spec-v0.10.md` §8.4 for the complete rules.
+See `specs/spec-v0.11.md` §8.4 for the complete rules.
 
 ## Structs
 
@@ -273,12 +273,12 @@ Structs copy by value (assignment, parameters); `value.field` reads
 fields — on variables, through namespaces, on array elements, and on
 pointers (auto-dereferenced and null-checked). Nesting, arrays of
 structs, structs on the heap (`alloc<type.Rect>(2)`), and
-self-referential `ptr` fields all work. See `specs/spec-v0.10.md` §8.3.
+self-referential `ptr` fields all work. See `specs/spec-v0.11.md` §8.3.
 
 ## Unions
 
 One storage, several member views — the reinterpretation type
-(0.7, `specs/spec-v0.10.md` §8.5):
+(0.7, `specs/spec-v0.11.md` §8.5):
 
 ```ok
 union.Word = {
@@ -312,7 +312,33 @@ write(fs.exists("out.txt"))             # true
 `fs.read` loads a whole file into the immutable text arena; `fs.save`
 writes text (create/truncate) and returns the byte count; `fs.exists`
 probes. Failures are fatal traps (exit 77) naming the path — never silent
-empty text. See `specs/spec-v0.10.md` §6.4.
+empty text. See `specs/spec-v0.11.md` §6.4.
+
+## Bitwise operations (0.11)
+
+```ok
+type.uint32 flags = 0xF0F0
+write(flags & 0x0FF0)          # 240   — mask
+write(flags | 0x000F)          # 61695 — set bits
+write(flags ^ 0x0FF0)          # 65280 — toggle
+write(~flags)                  # 4294905615 — invert (uint32 wrap)
+write(1 << 20)                 # 1048576 — shift left
+type.int8 s = -16
+write(s >> 2)                  # -4 — arithmetic shift (signed)
+type.uint8 u = 0xF0
+write(u >> 2)                  # 60 — logical shift (unsigned)
+```
+
+`&`, `|`, `^`, `~`, `<<`, `>>` work on every integer type. Bitwise
+operators combine through the widening lattice like `%`; comparisons bind
+looser than bitwise (Rust ordering), so `flags & MASK == FLAG` groups as
+`(flags & MASK) == FLAG`; shifts bind looser than `+`/`-` (C/Rust
+ordering). `>>` is arithmetic for signed types and logical for unsigned
+ones. A shift count outside `[0, width)` is a bug, not a wrap: constants
+fail to compile, runtime counts trap fatally (exit 72). Prefix `&` is
+still address-of; infix `&` is bitwise AND — parse position decides, and
+`type.ptr<type.ptr<type.number>>` still parses (the `>>` closes both type arguments).
+See `specs/spec-v0.11.md` §9.
 
 ## Text operations (0.9)
 
@@ -326,7 +352,7 @@ type.text word = text.slice(s, 0, 5)   # "hello" — end-exclusive, O(1)
 `text.length` counts bytes; `text.byte_at` reads one bounds-checked byte;
 `text.slice(s, from, to)` is the substring `[from, to)` sharing the
 original's immutable bytes — pointer arithmetic, not a copy. All three
-fold at compile time when their operands do. See `specs/spec-v0.10.md` §4.5.
+fold at compile time when their operands do. See `specs/spec-v0.11.md` §4.5.
 
 ## Constants and type.auto (0.8)
 
@@ -344,13 +370,13 @@ load. They work at file and column scope, fold into other constants and
 global initializers, and reject assignment. `type.auto` infers a
 declaration's type from its initializer (locals, globals, column
 members); literals and `null` cannot drive inference, and params/returns/
-members stay explicit. See `specs/spec-v0.10.md` §8.1.
+members stay explicit. See `specs/spec-v0.11.md` §8.1.
 
-## What 0.10 does not have (yet)
+## What 0.11 does not have (yet)
 
 Dynamic-length arrays, FFI, threads, match expressions, aliases, and
 visibility modifiers are all
-**designed** (see `specs/spec-v0.10.md` §20 and
+**designed** (see `specs/spec-v0.11.md` §20 and
 `docs/roadmap.md`) and **not implemented**. The same goes for `f32` (a true
 32-bit float). The compiler says so plainly
 when you use a reserved construct — it never pretends.

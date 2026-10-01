@@ -105,6 +105,11 @@ const char *tok_kind_name(TokKind k) {
     case T_ARROW: return "`->`";
     case T_DOT: return "`.`";    case T_COMMA: return "`,`";
     case T_AMP: return "`&`";
+    case T_PIPE: return "`|`";
+    case T_CARET: return "`^`";
+    case T_TILDE: return "`~`";
+    case T_SHL: return "`<<`";
+    case T_SHR: return "`>>`";
     case T_LPAREN: return "`(`"; case T_RPAREN: return "`)`";
     case T_LBRACE: return "`{`"; case T_RBRACE: return "`}`";
     case T_LBRACKET: return "`[`"; case T_RBRACKET: return "`]`";
@@ -351,13 +356,22 @@ TokList *lex_file(SourceFile *f, DiagEngine *de) {
         case '<':
             advance(&lx);
             if (!at_end(&lx) && peek(&lx) == '=') { advance(&lx); push_tok(&lx, T_LE, line, col, off, 2); }
+            else if (!at_end(&lx) && peek(&lx) == '<') { advance(&lx); push_tok(&lx, T_SHL, line, col, off, 2); }
             else push_tok(&lx, T_LT, line, col, off, 1);
             break;
         case '>':
             advance(&lx);
             if (!at_end(&lx) && peek(&lx) == '=') { advance(&lx); push_tok(&lx, T_GE, line, col, off, 2); }
+            else if (!at_end(&lx) && peek(&lx) == '>') {
+                /* one `>>` token: the parser splits it back into two `>`
+                 * closings when a nested type argument ends (ptr<ptr<T>>, 0.11) */
+                advance(&lx); push_tok(&lx, T_SHR, line, col, off, 2);
+            }
             else push_tok(&lx, T_GT, line, col, off, 1);
             break;
+        case '|': advance(&lx); push_tok(&lx, T_PIPE, line, col, off, 1); break;
+        case '^': advance(&lx); push_tok(&lx, T_CARET, line, col, off, 1); break;
+        case '~': advance(&lx); push_tok(&lx, T_TILDE, line, col, off, 1); break;
         case '.': advance(&lx); push_tok(&lx, T_DOT, line, col, off, 1); break;
         case ',': advance(&lx); push_tok(&lx, T_COMMA, line, col, off, 1); break;
         case '&': advance(&lx); push_tok(&lx, T_AMP, line, col, off, 1); break;

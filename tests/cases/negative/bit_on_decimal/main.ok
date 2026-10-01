@@ -1,0 +1,10 @@
+type.text=1
+
+function.main() -> number {
+    type.decimal d = 1.5
+    type.decimal e = 2.5
+    write(d & e)
+    return 0
+}
+
+main()

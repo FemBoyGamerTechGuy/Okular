@@ -585,6 +585,14 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
             }
             return false;
         }
+        if (e->uop == UN_BNOT) {
+            if (v.type && ty_is_integer(v.type)) {
+                out->valid = true; out->type = v.type;
+                out->i = ty_reencode(~v.i, v.type);
+                return true;
+            }
+            return false;
+        }
         if (v.type == ty_bool) { out->valid = true; out->type = ty_bool; out->b = !v.b; return true; }
         return false;
     }
@@ -716,8 +724,38 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
     case A_BIN: {
         ConstVal l, r;
         if (!const_eval(c, e->a, &l) || !const_eval(c, e->b, &r)) return false;
+        /* shifts fold before the same-type guard: the count may be any
+         * integer type while the value keeps its own type (0.11) */
+        if (e->op == OP_SHL || e->op == OP_SHR) {
+            if (!l.valid || !r.valid) return false;
+            if (!ty_is_integer(l.type)) return false;
+            if (!ty_is_integer(r.type)) return false;
+            int64_t cnt = (int64_t)r.i;
+            int width = l.type->bits;
+            if (cnt < 0 || (uint64_t)cnt >= (uint64_t)width) {
+                serr(c, e, "shift count %lld is out of range for `%s` (width %d) in a constant expression.",
+                     (long long)cnt, ok_type_name(l.type), width);
+                return false;
+            }
+            uint64_t a = l.i;
+            uint64_t res;
+            if (e->op == OP_SHL) {
+                res = a << cnt;                 /* wraps through reencode */
+            } else if (l.type->is_signed) {
+                res = (uint64_t)(((int64_t)a) >> cnt);   /* arithmetic */
+            } else {
+                res = a >> cnt;                 /* logical */
+            }
+            out->valid = true;
+            out->type = l.type;
+            out->i = ty_reencode(res, l.type);
+            return true;
+        }
         if (l.type != r.type) return false;
         switch (e->op) {
+        /* shifts never reach this switch: they fold above, before the
+         * same-type guard (the count may differ in type from the value) */
+        case OP_SHL: case OP_SHR: return false;
         case OP_ADD:
             if (l.type == ty_number) { out->valid = true; out->type = ty_number; out->i = l.i + r.i; return true; }
             if (l.type == ty_decimal) { out->valid = true; out->type = ty_decimal; out->d = l.d + r.d; return true; }
@@ -765,6 +803,21 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
             return false;
         case OP_AND: if (l.type == ty_bool) { out->valid = true; out->type = ty_bool; out->b = l.b && r.b; return true; } return false;
         case OP_OR:  if (l.type == ty_bool) { out->valid = true; out->type = ty_bool; out->b = l.b || r.b; return true; } return false;
+        case OP_BAND: case OP_BOR: case OP_XOR: {
+            /* bitwise folding (0.11, spec §9): operands already carry the
+             * common type; fold on the register representation, then
+             * re-encode to the width (signed reps stay sign-extended) */
+            if (!ty_is_integer(l.type)) return false;
+            uint64_t a = l.i, b = r.i, res;
+            switch (e->op) {
+            case OP_BAND: res = a & b; break;
+            case OP_BOR:  res = a | b; break;
+            default:      res = a ^ b; break;
+            }
+            out->valid = true; out->type = l.type;
+            out->i = ty_reencode(res, l.type);
+            return true;
+        }
         case OP_EQ: case OP_NEQ: case OP_LT: case OP_LE: case OP_GT: case OP_GE: {
             out->type = ty_bool;
             bool res = false;
@@ -1776,6 +1829,48 @@ static OkType check_bin(SemaCtx *c, Node *e) {
         e->rtype = ty_number;
         return ty_number;
     }
+    case OP_BAND: case OP_BOR: case OP_XOR: {
+        /* bitwise and/or/xor (0.11, spec §9): both operands integer,
+         * combined through the widening lattice like `%` */
+        if (ct && ct != ty_decimal && ty_is_integer(ct)) {
+            e->rtype = ct;
+            return ct;
+        }
+        if (lt == ty_text || rt == ty_text || lt == ty_decimal || rt == ty_decimal
+            || lt == ty_bool || rt == ty_bool) {
+            serr(c, e, "`%s` combines two integer values, but `%s` and `%s` were given.",
+                 binop_name(e->op), ok_type_name(lt), ok_type_name(rt));
+        } else {
+            Diag *d = serr(c, e, "`%s` needs integer operands of combinable types, but `%s` and `%s` were given.",
+                           binop_name(e->op), ok_type_name(lt), ok_type_name(rt));
+            diag_note(d, "mixed signedness or widths that do not widen safely need an explicit conversion (for example `int32.to_uint8(x)`).");
+        }
+        e->rtype = ty_number;
+        return ty_number;
+    }
+    case OP_SHL: case OP_SHR: {
+        /* shifts (0.11, spec §9): the result carries the LEFT operand's
+         * type; the count may be any integer type and is range-checked
+         * (compile time for constants, runtime trap otherwise) */
+        if (!ty_is_integer(lt)) {
+            serr(c, e, "`%s` shifts an integer value, but `%s` was given as the value.",
+                 binop_name(e->op), ok_type_name(lt));
+            e->otype = ty_number;
+            e->rtype = ty_number;
+            return ty_number;
+        }
+        if (!ty_is_integer(rt)) {
+            serr(c, e, "the shift count for `%s` must be an integer, but `%s` was given.",
+                 binop_name(e->op), ok_type_name(rt));
+            e->otype = ty_number;
+            e->rtype = ty_number;
+            return ty_number;
+        }
+        OkType vt = (lt_eff && ty_is_integer(lt_eff)) ? lt_eff : lt;
+        e->otype = vt;
+        e->rtype = vt;
+        return vt;
+    }
     }
 arith: ;
     if (ct) {
@@ -1937,6 +2032,14 @@ static OkType check_expr(SemaCtx *c, Node *e) {
                 serr(c, e, "`not` needs a `bool`, but `%s` was given.", ok_type_name(t));
             e->rtype = ty_bool;
             return ty_bool;
+        }
+        if (e->uop == UN_BNOT) {
+            /* ~x — bitwise not (0.11, spec §9); integers only */
+            if (!ty_is_integer(t))
+                serr(c, e, "`~` (bitwise not) needs an integer, but `%s` was given.",
+                     ok_type_name(t));
+            e->rtype = t;
+            return t;
         }
         if (e->uop == UN_ADDR) {
             /* &x — address-of (spec §12): variables, array elements,

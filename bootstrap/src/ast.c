@@ -19,6 +19,9 @@ const char *binop_name(BinOp op) {
     case OP_LT:  return "<";  case OP_LE: return "<=";
     case OP_GT:  return ">";  case OP_GE: return ">=";
     case OP_AND: return "and"; case OP_OR: return "or";
+    case OP_BAND: return "&";  case OP_BOR: return "|";
+    case OP_XOR: return "^";  case OP_SHL: return "<<";
+    case OP_SHR: return ">>";
     }
     return "?";
 }

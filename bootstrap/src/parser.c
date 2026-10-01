@@ -97,6 +97,17 @@ static Diag *perr(Parser *p, Tok *t, const char *fmt, ...) {
 
 /* expect a kind; on mismatch emit a precise diagnostic and return NULL */
 static Tok *expect(Parser *p, TokKind k, const char *what) {
+    /* `>>` splitting (0.11): nested type arguments close with adjacent
+     * `>` (`ptr<ptr<number>>`, `alloc<type.array<..., 3>>(...)`). The lexer
+     * emits one T_SHR; when a type-argument close needs `>`, split the token
+     * in place — one `>` is consumed, the other stays current (as a plain
+     * T_GT) for the enclosing close to consume next. */
+    if (k == T_GT && is(p, T_SHR)) {
+        Tok *t = cur(p);
+        t->kind = T_GT;
+        t->off += 1; t->col += 1; t->len = 1;
+        return t; /* deliberately NOT advancing */
+    }
     if (is(p, k)) {
         Tok *t = cur(p);
         advance(p);
@@ -514,6 +525,15 @@ static Node *parse_unary(Parser *p) {
         n->uop = UN_ADDR; n->a = e;
         return n;
     }
+    if (is(p, T_TILDE)) {
+        /* ~x — bitwise NOT (0.11, spec §9); integer types only */
+        Tok *t = cur(p); advance(p);
+        Node *e = parse_unary(p);
+        if (!e) return NULL;
+        Node *n = node_new(p->ar, A_UN, t->line, t->col);
+        n->uop = UN_BNOT; n->a = e;
+        return n;
+    }
     if (is(p, T_STAR)) {
         /* *p — dereference (spec §12); in prefix position `*` is never
          * multiplication (binary `*` always follows its left operand) */
@@ -564,8 +584,62 @@ static Node *parse_add(Parser *p) {
     }
 }
 
-static Node *parse_cmp(Parser *p) {
+/* shifts (0.11, spec §9): looser than `+`/`-` (like C and Rust —
+ * `1 << 2 + 3` shifts by 5), tighter than `&`. The count may be any
+ * integer type; sema checks its range at compile time / runtime. */
+static Node *parse_shift(Parser *p) {
     Node *e = parse_add(p);
+    if (!e) return NULL;
+    for (;;) {
+        BinOp op;
+        if (is(p, T_SHL)) op = OP_SHL;
+        else if (is(p, T_SHR)) op = OP_SHR;
+        else return e;
+        advance(p);
+        Node *r = parse_add(p);
+        if (!r) return NULL;
+        e = mkbin(p, op, e, r);
+    }
+}
+
+static Node *parse_band(Parser *p) {
+    Node *e = parse_shift(p);
+    if (!e) return NULL;
+    while (is(p, T_AMP)) {   /* infix `&`: prefix `&` is address-of (§12) */
+        advance(p);
+        Node *r = parse_shift(p);
+        if (!r) return NULL;
+        e = mkbin(p, OP_BAND, e, r);
+    }
+    return e;
+}
+
+static Node *parse_bxor(Parser *p) {
+    Node *e = parse_band(p);
+    if (!e) return NULL;
+    while (is(p, T_CARET)) {
+        advance(p);
+        Node *r = parse_band(p);
+        if (!r) return NULL;
+        e = mkbin(p, OP_XOR, e, r);
+    }
+    return e;
+}
+
+static Node *parse_bor(Parser *p) {
+    Node *e = parse_bxor(p);
+    if (!e) return NULL;
+    while (is(p, T_PIPE)) {
+        advance(p);
+        Node *r = parse_bxor(p);
+        if (!r) return NULL;
+        e = mkbin(p, OP_BOR, e, r);
+    }
+    return e;
+}
+
+static Node *parse_cmp(Parser *p) {
+    Node *e = parse_bor(p);
     if (!e) return NULL;
     BinOp op;
     switch (cur(p)->kind) {

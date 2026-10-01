@@ -1,0 +1,11 @@
+type.text=1
+
+function.main() -> number {
+    type.number n = -1
+    type.number v = 1
+    write(v << n)
+    print
+    return 0
+}
+
+main()

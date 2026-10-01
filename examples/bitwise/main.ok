@@ -1,0 +1,58 @@
+type.text=1
+
+# Bitwise operations (Okular 0.11, spec §9): masks, flags, packing.
+# Everything here folds or wraps per the fixed-width rules (§4.2).
+
+const.READ    = 0x1
+const.WRITE   = 0x2
+const.EXEC    = 0x4
+
+function.can(uint32.mode, uint32.want) -> bool {
+    return mode & want == want
+}
+
+function.pack(uint8.r, uint8.g, uint8.b) -> uint32 {
+    type.uint32 pixel = 0
+    pixel = pixel | uint8.to_uint32(r)
+    pixel = pixel | uint8.to_uint32(g) << 8
+    pixel = pixel | uint8.to_uint32(b) << 16
+    return pixel
+}
+
+function.popcount8(uint8.v) -> uint8 {
+    type.uint8 n = 0
+    loop (i from 0 until 8) {
+        n = n + (v & 1)
+        v = v >> 1
+    }
+    return n
+}
+
+function.main() -> number {
+    type.uint32 mode = READ | WRITE
+    write(mode)
+    print
+
+    when (can(mode, WRITE)) {
+        write("writable")
+        print
+    }
+    when (not can(mode, EXEC)) {
+        write("not executable")
+        print
+    }
+
+    type.uint32 px = pack(0x12, 0x34, 0x56)
+    write(px)
+    print
+    write(px >> 16 & 0xFF)
+    print
+
+    write(popcount8(0xF0))
+    print
+    write(~READ & 0xFF)
+    print
+    return 0
+}
+
+main()

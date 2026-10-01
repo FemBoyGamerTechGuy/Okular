@@ -1,0 +1,9 @@
+type.text=1
+
+function.main() -> number {
+    type.number x = 1
+    write(&x << 1)
+    return 0
+}
+
+main()

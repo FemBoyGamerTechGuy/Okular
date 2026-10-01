@@ -1,0 +1,32 @@
+type.text=1
+
+# globals: masks built at compile time, consumed through pointers
+
+type.uint64 g_mask_lo = 0x0000_0000_0000_00FF
+type.uint64 g_mask_hi = 0xFF00_0000_0000_0000
+
+function.apply_lo(uint64.v) -> uint64 {
+    return v & g_mask_lo
+}
+
+function.apply_hi(uint64.v) -> uint64 {
+    return v & g_mask_hi
+}
+
+function.main() -> number {
+    type.uint64 v = 0x1234_5678_9ABC_DEF0
+    write(apply_lo(v))
+    print
+    write(apply_hi(v) >> 56)
+    print
+
+    type.ptr<type.uint64> pv = &v
+    *pv = *pv | 0x0000_0000_0000_00FF
+    write(v & 0xFF)
+    print
+    write(v >> 4 & 0xFF)
+    print
+    return 0
+}
+
+main()

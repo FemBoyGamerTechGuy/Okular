@@ -1,0 +1,46 @@
+type.text=1
+
+function.main() -> number {
+    # left shifts, per-width wrapping (spec §4.2)
+    type.uint8 u = 1
+    write(u << 4)
+    print
+
+    type.uint8 w = 0x80
+    write(w << 1)
+    print
+
+    type.uint64 big = 1
+    write(big << 63)
+    print
+
+    type.int8 sw = 1
+    write(sw << 7)
+    print
+
+    # right shifts: logical for unsigned, arithmetic for signed
+    type.uint8 u2 = 0xF0
+    write(u2 >> 2)
+    print
+
+    type.int8 s = -16
+    write(s >> 2)
+    print
+
+    type.number n = 1024
+    write(n >> 5)
+    print
+
+    # unary minus binds tighter than shifts
+    write(-8 >> 1)
+    print
+
+    # the count may be a different integer type than the value
+    type.uint8 cnt = 3
+    type.number v = 200
+    write(v << cnt)
+    print
+    return 0
+}
+
+main()

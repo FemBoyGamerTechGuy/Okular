@@ -1,0 +1,11 @@
+type.text=1
+
+function.main() -> number {
+    type.uint8 v = 1
+    type.number n = 8
+    write(v << n)
+    print
+    return 0
+}
+
+main()

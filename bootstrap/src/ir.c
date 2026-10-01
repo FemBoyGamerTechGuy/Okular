@@ -444,6 +444,24 @@ static void build_expr(Ctx *c, Node *e) {
         break;
     }
     case A_BIN: {
+        /* shifts (0.11, spec §9) lower differently: the VALUE keeps its own
+         * type, the COUNT converts to `number` — there is no common type to
+         * widen both to, and the runtime range check reads the count as an
+         * i64. Sema stashed the value type on e->otype. */
+        if (e->op == OP_SHL || e->op == OP_SHR) {
+            OkType vt = e->otype;
+            if (!vt || !ty_is_integer(vt)) {
+                vt = e->a->rtype;
+                if (!vt || !ty_is_integer(vt)) vt = ty_number; /* recovery */
+                e->otype = vt;
+            }
+            build_operand_conv(c, e->a, vt);
+            build_operand_conv(c, e->b, ty_number);
+            IrInst inst = { .kind = I_BINOP, .op = e->op, .type = vt,
+                            .line = e->line, .col = e->col };
+            emit(c->f, inst);
+            break;
+        }
         /* operand type after literal adaptation + widening: sema stashed
          * the common type on the node (e->otype); recompute as fallback
          * for recovery paths (spec §4.4). Pointer arithmetic lowers here
@@ -1031,7 +1049,23 @@ void ir_fold(IrFunc *f) {
             FoldVal res = { .known = true };
             bool ok = true;
             bool is_cmp = (in.op >= OP_EQ && in.op <= OP_GE);
-            if (in.type == ty_decimal && l.type == ty_decimal && r.type == ty_decimal) {
+            /* shift folding (0.11): value type in in.type, count is number;
+             * out-of-range counts do NOT fold — the runtime trap stays */
+            if ((in.op == OP_SHL || in.op == OP_SHR)
+                && ty_is_integer(in.type) && l.type == in.type && r.type == ty_number) {
+                int64_t cnt = (int64_t)r.i;
+                if (cnt >= 0 && (uint64_t)cnt < (uint64_t)in.type->bits) {
+                    uint64_t a = l.i, v;
+                    if (in.op == OP_SHL) v = a << cnt;
+                    else if (in.type->is_signed) v = (uint64_t)(((int64_t)a) >> cnt);
+                    else v = a >> cnt;
+                    res.type = in.type;
+                    res.i = ty_reencode(v, in.type);
+                    ok = true;
+                } else {
+                    ok = false; /* count out of range: keep the trap */
+                }
+            } else if (in.type == ty_decimal && l.type == ty_decimal && r.type == ty_decimal) {
                 res.type = ty_decimal;
                 switch (in.op) {
                 case OP_ADD: res.d = l.d + r.d; break;
@@ -1052,6 +1086,9 @@ void ir_fold(IrFunc *f) {
                     case OP_ADD: res.i = a + b; break;
                     case OP_SUB: res.i = a - b; break;
                     case OP_MUL: res.i = a * b; break;
+                    case OP_BAND: res.i = a & b; break;
+                    case OP_BOR:  res.i = a | b; break;
+                    case OP_XOR:  res.i = a ^ b; break;
                     case OP_DIV:
                         if (b == 0) { ok = false; break; }        /* runtime trap */
                         if (sa == INT64_MIN && sb == -1) res.i = (uint64_t)INT64_MIN;
@@ -1079,6 +1116,9 @@ void ir_fold(IrFunc *f) {
                     case OP_ADD: res.i = a + b; break;
                     case OP_SUB: res.i = a - b; break;
                     case OP_MUL: res.i = a * b; break;
+                    case OP_BAND: res.i = a & b; break;
+                    case OP_BOR:  res.i = a | b; break;
+                    case OP_XOR:  res.i = a ^ b; break;
                     case OP_DIV: if (b == 0) { ok = false; break; } res.i = a / b; break;
                     case OP_MOD: if (b == 0) { ok = false; break; } res.i = a % b; break;
                     default:

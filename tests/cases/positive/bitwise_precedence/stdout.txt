@@ -1,0 +1,8 @@
+eq-after-and
+eq-after-or
+32
+2
+20
+3
+9
+0

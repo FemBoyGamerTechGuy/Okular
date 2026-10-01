@@ -1,0 +1,28 @@
+type.text=1
+
+function.main() -> number {
+    type.number x = 41
+    type.ptr<type.number> p = &x
+    type.ptr<type.ptr<type.number>> pp = &p
+    write(*(*pp) + 1)
+    print
+
+    type.array<type.number, 3> arr = {7, 8, 9}
+    type.ptr<type.array<type.number, 3>> pa = &arr
+    write((*pa)[2])
+    print
+
+    type.ptr<type.ptr<type.number>> nullpp = null
+    when (nullpp == null) {
+        write("null-ok")
+        print
+    }
+
+    type.ptr<type.ptr<type.number>> q = null
+    q = pp
+    write(**q & 0xFF)
+    print
+    return 0
+}
+
+main()

@@ -19,6 +19,11 @@ typedef enum {
     T_EQ, T_EQEQ, T_BANGEQ, T_LT, T_LE, T_GT, T_GE,
     T_ARROW,       /* -> */
     T_DOT, T_COMMA, T_AMP,
+    /* bitwise operators (0.11, spec §9): `&` stays T_AMP — prefix is
+     * address-of, infix is bitwise AND (parse position decides) */
+    T_PIPE, T_CARET, T_TILDE,
+    T_SHL,         /* << */
+    T_SHR,         /* >> — also splits into two `>` when closing nested type args */
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE, T_LBRACKET, T_RBRACKET,
     /* active keywords */
     T_KW_TYPE, T_KW_FUNCTION, T_KW_STRUCT, T_KW_WHEN, T_KW_ELSE,

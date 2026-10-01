@@ -18,6 +18,7 @@
  *   rt_text_eq(lptr, llen, rptr, rlen) -> bool
  *   rt_bounds_trap(index, length)  array index out of bounds (spec §8.4)
  *   rt_div_trap()                  integer division by zero (spec §13)
+ *   rt_shift_trap(count)           shift count out of range (0.11, spec §13)
  *   rt_null_trap()                 dereference of null (spec §12/§13)
  *   rt_alloc(bytes) -> ptr         heap allocation, first-fit + split (§12)
  *   rt_release(ptr)                heap release with coalescing (§12)
@@ -379,6 +380,36 @@ void rt_div_trap(void) {
     sys_write(2, "okular runtime error: ", 22);
     sys_write(2, "integer division by zero\n", 26);
     sys_exit(71);
+}
+
+/* 0.11: shift count >= the value's width (or negative) is a fatal trap
+ * (spec §13, exit 72) — shifting by the wrong width is a bug, and the
+ * x86 masking of counts to 6 bits would silently hide it */
+void rt_shift_trap(i64 count) {
+    char msg[96];
+    u64 n = 0;
+
+    const char *pre = "shift count ";
+    for (const char *c = pre; *c; c++) msg[n++] = *c;
+
+    u64 u;
+    if (count < 0) {
+        msg[n++] = '-';
+        u = (u64)(-(count + 1)) + 1; /* INT64_MIN-safe */
+    } else {
+        u = (u64)count;
+    }
+    char tmp[24];
+    int i = 24;
+    do { tmp[--i] = (char)('0' + (u % 10)); u /= 10; } while (u != 0);
+    for (; i < 24; i++) msg[n++] = tmp[i];
+
+    const char *suf = " is out of range for the value's width\n";
+    for (const char *c = suf; *c; c++) msg[n++] = *c;
+
+    sys_write(2, "okular runtime error: ", 22);
+    sys_write(2, msg, n);
+    sys_exit(72);
 }
 
 /* ---------------- heap allocator (spec §12, 0.4) ----------------

@@ -1,0 +1,40 @@
+type.text=1
+
+const.mask = 0xF0 | 0x0F
+const.inv = ~0xFF
+const.shifted = 1 << 12
+const.combo = 3 & 5 | 8
+const.half = 0xFF >> 1
+
+type.number g1 = 0xAA & 0x0F
+type.uint8 g2 = number.to_uint8(~0)
+type.uint16 g3 = 1 << 12
+type.uint32 g4 = 0xFFFF_0000 | 0x0000_F00F
+
+function.main() -> number {
+    write(mask)
+    print
+    write(inv)
+    print
+    write(shifted)
+    print
+    write(combo)
+    print
+    write(half)
+    print
+    write(g1)
+    print
+    write(g2)
+    print
+    write(g3)
+    print
+    write(g4)
+    print
+
+    type.auto folded = ~0xF0 & 0xFF
+    write(folded)
+    print
+    return 0
+}
+
+main()
