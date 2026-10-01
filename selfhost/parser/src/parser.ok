@@ -1,0 +1,2218 @@
+# parser.ok — the recursive descent parser, written in Okular (M4).
+#
+# A faithful port of bootstrap/src/parser.c (spec §16): the same grammar,
+# the same precedence ladder, the same recovery model (statements
+# synchronize at newline, `}`, `.end`, and EOF), the same `>>` splitting
+# for nested type arguments. It consumes the token buffer produced by the
+# toks module and builds a heap AST of struct.Node records.
+#
+# Node kinds are numbered to match bootstrap/include/ok/ast.h exactly:
+const.N_INT = 0
+const.N_DEC = 1
+const.N_TEXT = 2
+const.N_BOOL = 3
+const.N_PATH = 4
+const.N_CALL = 5
+const.N_WRITE = 6
+const.N_BIN = 7
+const.N_UN = 8
+const.N_ARRAYLIT = 9
+const.N_INDEX = 10
+const.N_CONV = 11
+const.N_NULL = 12
+const.N_ALLOC = 13
+const.N_MEMBER = 14
+const.N_TEXTOP = 15
+const.N_FSOP = 16
+const.N_ENVOP = 17
+const.N_VARDECL = 18
+const.N_ASSIGN = 19
+const.N_INDEXASSIGN = 20
+const.N_DEREFASSIGN = 21
+const.N_RELEASE = 22
+const.N_FIELDASSIGN = 23
+const.N_EXPRSTMT = 24
+const.N_WHEN = 25
+const.N_LOOP_COUNT = 26
+const.N_LOOP_COND = 27
+const.N_BREAK = 28
+const.N_CONTINUE = 29
+const.N_PRINT = 30
+const.N_RETURN = 31
+const.N_DIRECTIVE = 32
+const.N_LANGCOL = 33
+const.N_DEVCOL = 34
+const.N_STRUCTDECL = 35
+const.N_UNIONDECL = 36
+const.N_CONSTDECL = 37
+const.N_FUNC = 38
+const.N_FILE = 39
+
+# binary operators (ast.h BinOp order)
+const.OP_ADD = 0
+const.OP_SUB = 1
+const.OP_MUL = 2
+const.OP_DIV = 3
+const.OP_MOD = 4
+const.OP_EQ = 5
+const.OP_NEQ = 6
+const.OP_LT = 7
+const.OP_LE = 8
+const.OP_GT = 9
+const.OP_GE = 10
+const.OP_AND = 11
+const.OP_OR = 12
+const.OP_BAND = 13
+const.OP_BOR = 14
+const.OP_XOR = 15
+const.OP_SHL = 16
+const.OP_SHR = 17
+
+# unary operators (ast.h UnOp order)
+const.UN_NEG = 0
+const.UN_NOT = 1
+const.UN_ADDR = 2
+const.UN_DEREF = 3
+const.UN_BNOT = 4
+
+# feature directives (ok.h OkFeature order)
+const.FEAT_TEXT = 0
+
+# ---- type descriptors ----
+#
+# form 0: scalar (scalar = S_* code)   form 1: array (elem, count)
+# form 2: pointer (elem)               form 3: named struct/union (sname)
+
+const.F_SCALAR = 0
+const.F_ARRAY = 1
+const.F_PTR = 2
+const.F_NAMED = 3
+
+const.S_NUMBER = 0
+const.S_DECIMAL = 1
+const.S_TEXT = 2
+const.S_BOOL = 3
+const.S_INT8 = 4
+const.S_INT16 = 5
+const.S_INT32 = 6
+const.S_UINT8 = 7
+const.S_UINT16 = 8
+const.S_UINT32 = 9
+const.S_UINT64 = 10
+const.S_AUTO = 11
+const.S_VOID = -1
+
+struct.Ty = {
+    type.number form
+    type.number scalar
+    type.text sname
+    type.ptr<type.Ty> elem
+    type.number count
+}.end
+
+# ---- AST nodes ----
+
+struct.Node = {
+    type.number kind
+    type.number line
+    type.number col
+    type.number ival
+    type.number bval
+    type.text name
+    type.text str
+    type.ptr<type.text> parts
+    type.number nparts
+    type.ptr<type.ptr<type.Node>> body
+    type.number nbody
+    type.ptr<type.ptr<type.Node>> body_else
+    type.number nbody_else
+    type.ptr<type.ptr<type.Node>> args
+    type.number nargs
+    type.ptr<type.text> items
+    type.number nitems
+    type.ptr<type.Node> a
+    type.ptr<type.Node> b
+    type.ptr<type.Node> c
+    type.ptr<type.Ty> otype
+    type.ptr<type.ptr<type.Ty>> ptypes
+    type.ptr<type.text> pnames
+    type.number nparams
+    type.number op
+    type.number uop
+    type.number inclusive
+    type.number feature
+    type.number fvalue
+}.end
+
+# ---- parser state ----
+
+type.number pos = 0
+type.number nerr = 0
+type.ptr<type.number> err_lines = null
+type.ptr<type.number> err_cols = null
+type.ptr<type.text> err_msgs = null
+type.number err_cap = 0
+
+function.error_count() -> number {
+    return nerr
+}
+
+function.err_line_at(number.i) -> number {
+    return err_lines[i]
+}
+
+function.err_col_at(number.i) -> number {
+    return err_cols[i]
+}
+
+function.err_msg_at(number.i) -> text {
+    return err_msgs[i]
+}
+
+# ---- constructors ----
+
+function.new_ty() -> type.ptr<type.Ty> {
+    type.ptr<type.Ty> t = alloc<type.Ty>(1)
+    t.form = 0
+    t.scalar = 0
+    t.sname = ""
+    t.elem = null
+    t.count = 0
+    return t
+}
+
+function.new_node(number.kind, number.line, number.col) -> type.ptr<type.Node> {
+    type.ptr<type.Node> n = alloc<type.Node>(1)
+    n.kind = kind
+    n.line = line
+    n.col = col
+    n.ival = 0
+    n.bval = 0
+    n.name = ""
+    n.str = ""
+    n.parts = null
+    n.nparts = 0
+    n.body = null
+    n.nbody = 0
+    n.body_else = null
+    n.nbody_else = 0
+    n.args = null
+    n.nargs = 0
+    n.items = null
+    n.nitems = 0
+    n.a = null
+    n.b = null
+    n.c = null
+    n.otype = null
+    n.ptypes = null
+    n.pnames = null
+    n.nparams = 0
+    n.op = 0
+    n.uop = 0
+    n.inclusive = 0
+    n.feature = 0
+    n.fvalue = 0
+    return n
+}
+
+# ---- scalar type names ----
+
+function.scalar_code(text.name) -> number {
+    when (name == "number") { return S_NUMBER }
+    else when (name == "int64") { return S_NUMBER }
+    else when (name == "decimal") { return S_DECIMAL }
+    else when (name == "f64") { return S_DECIMAL }
+    else when (name == "text") { return S_TEXT }
+    else when (name == "bool") { return S_BOOL }
+    else when (name == "int8") { return S_INT8 }
+    else when (name == "int16") { return S_INT16 }
+    else when (name == "int32") { return S_INT32 }
+    else when (name == "uint8") { return S_UINT8 }
+    else when (name == "byte") { return S_UINT8 }
+    else when (name == "uint16") { return S_UINT16 }
+    else when (name == "uint32") { return S_UINT32 }
+    else when (name == "uint64") { return S_UINT64 }
+    else when (name == "auto") { return S_AUTO }
+    return -1
+}
+
+function.scalar_name(number.code) -> text {
+    when (code == S_NUMBER) { return "number" }
+    else when (code == S_DECIMAL) { return "decimal" }
+    else when (code == S_TEXT) { return "text" }
+    else when (code == S_BOOL) { return "bool" }
+    else when (code == S_INT8) { return "int8" }
+    else when (code == S_INT16) { return "int16" }
+    else when (code == S_INT32) { return "int32" }
+    else when (code == S_UINT8) { return "uint8" }
+    else when (code == S_UINT16) { return "uint16" }
+    else when (code == S_UINT32) { return "uint32" }
+    else when (code == S_UINT64) { return "uint64" }
+    else when (code == S_AUTO) { return "auto" }
+    return "?"
+}
+
+function.ty_bytes(type.ptr<type.Ty>.t) -> number {
+    # storage bytes of a parsed type; named types are unknown until sema
+    when (t == null) { return 0 }
+    when (t.form == F_SCALAR) {
+        when (t.scalar == S_NUMBER) { return 8 }
+        else when (t.scalar == S_DECIMAL) { return 8 }
+        else when (t.scalar == S_TEXT) { return 16 }
+        else when (t.scalar == S_BOOL) { return 1 }
+        else when (t.scalar == S_INT8) { return 1 }
+        else when (t.scalar == S_INT16) { return 2 }
+        else when (t.scalar == S_INT32) { return 4 }
+        else when (t.scalar == S_UINT8) { return 1 }
+        else when (t.scalar == S_UINT16) { return 2 }
+        else when (t.scalar == S_UINT32) { return 4 }
+        else when (t.scalar == S_UINT64) { return 8 }
+        else when (t.scalar == S_AUTO) { return 0 }
+    }
+    when (t.form == F_ARRAY) {
+        return t.count * ty_bytes(t.elem)
+    }
+    when (t.form == F_PTR) { return 8 }
+    return 0
+}
+
+function.ty_is_auto(type.ptr<type.Ty>.t) -> bool {
+    when (t == null) { return false }
+    return t.form == F_SCALAR and t.scalar == S_AUTO
+}
+
+function.ty_is_voidish(type.ptr<type.Ty>.t) -> bool {
+    # mirrors `ty_kind(elem) == OK_VOID || ty_kind(elem) == OK_NULL` in the
+    # C parser: only void/null were rejected; scalars never are. The parsed
+    # forms here never produce void, so only null (from failure) matches.
+    return t == null
+}
+
+# ---- the named-type registry (spec §8.3: one flat namespace, forward refs) ----
+
+type.ptr<type.text> nt_names = null
+type.ptr<type.ptr<type.Ty>> nt_types = null
+type.number nt_len = 0
+type.number nt_cap = 0
+
+function.named_type_exists(text.name) -> bool {
+    loop (i from 0 until nt_len) {
+        when (nt_names[i] == name) {
+            return true
+        }
+    }
+    return false
+}
+
+function.named_type(text.name) -> type.ptr<type.Ty> {
+    loop (i from 0 until nt_len) {
+        when (nt_names[i] == name) {
+            return nt_types[i]
+        }
+    }
+    when (nt_len == nt_cap) {
+        type.number newcap = 32
+        when (nt_cap > 0) {
+            newcap = nt_cap * 2
+        }
+        type.ptr<type.text> nn = alloc<type.text>(newcap)
+        type.ptr<type.ptr<type.Ty>> ntp = alloc<type.ptr<type.Ty>>(newcap)
+        loop (i from 0 until nt_len) {
+            nn[i] = nt_names[i]
+            ntp[i] = nt_types[i]
+        }
+        type.ptr<type.text> oldn = nt_names
+        type.ptr<type.ptr<type.Ty>> oldp = nt_types
+        nt_names = nn
+        nt_types = ntp
+        nt_cap = newcap
+        when (oldn != null) {
+            release(oldn)
+            release(oldp)
+        }
+    }
+    type.ptr<type.Ty> t = new_ty()
+    t.form = F_NAMED
+    t.sname = name
+    nt_names[nt_len] = name
+    nt_types[nt_len] = t
+    nt_len = nt_len + 1
+    return t
+}
+
+# pre-scan the token buffer for `struct . NAME = {` / `union . NAME = {`
+# so forward references resolve (mirrors parser_register_struct_names)
+function.register_struct_names() -> number {
+    type.number limit = toks.count() - 4
+    loop (i from 0 until limit) {
+        when (toks.kind(i) == toks.K_STRUCT or toks.kind(i) == toks.K_UNION) {
+            when (toks.kind(i + 1) == toks.K_DOT and toks.kind(i + 2) == toks.K_IDENT and toks.kind(i + 3) == toks.K_EQ and toks.kind(i + 4) == toks.K_LBRACE) {
+                named_type(toks.spelling(i + 2))
+            }
+        }
+    }
+    return 0
+}
+
+# seed the registry with names pre-registered project-wide (the bridge
+# passes them on the command line: --names a b c)
+function.seed_names(number.argc, number.argbase) -> number {
+    loop (i from argbase until argc) {
+        named_type(env.arg(i))
+    }
+    return 0
+}
+
+# ---- token helpers ----
+
+function.cur_kind() -> number {
+    return toks.kind(pos)
+}
+
+function.cur_line() -> number {
+    return toks.tline(pos)
+}
+
+function.cur_col() -> number {
+    return toks.tcol(pos)
+}
+
+function.at_kind(number.k) -> number {
+    type.number i = pos + k
+    when (i >= toks.count()) {
+        i = toks.count() - 1
+    }
+    return toks.kind(i)
+}
+
+function.is_at(number.k) -> bool {
+    return cur_kind() == k
+}
+
+function.advance() -> number {
+    when (cur_kind() != toks.K_EOF) {
+        pos = pos + 1
+    }
+    return 0
+}
+
+function.skip_nl() -> number {
+    loop (cur_kind() == toks.K_NL) {
+        advance()
+    }
+    return 0
+}
+
+# ---- diagnostics ----
+
+function.perr(number.l, number.c, text.msg) -> number {
+    when (nerr == err_cap) {
+        type.number newcap = 16
+        when (err_cap > 0) {
+            newcap = err_cap * 2
+        }
+        type.ptr<type.number> nl = alloc<type.number>(newcap)
+        type.ptr<type.number> nc = alloc<type.number>(newcap)
+        type.ptr<type.text> nm = alloc<type.text>(newcap)
+        loop (i from 0 until nerr) {
+            nl[i] = err_lines[i]
+            nc[i] = err_cols[i]
+            nm[i] = err_msgs[i]
+        }
+        type.ptr<type.number> oldl = err_lines
+        type.ptr<type.number> oldc = err_cols
+        type.ptr<type.text> oldm = err_msgs
+        err_lines = nl
+        err_cols = nc
+        err_msgs = nm
+        err_cap = newcap
+        when (oldl != null) {
+            release(oldl)
+            release(oldc)
+            release(oldm)
+        }
+    }
+    err_lines[nerr] = l
+    err_cols[nerr] = c
+    err_msgs[nerr] = msg
+    nerr = nerr + 1
+    return 0
+}
+
+# kind names for diagnostics (indexed by token kind)
+type.array<type.text, 59> KIND_NAMES = {
+    "end of file", "newline", "identifier", "number literal", "decimal literal", "text literal",
+    "`+`", "`-`", "`*`", "`/`", "`%`",
+    "`=`", "`==`", "`!=`", "`<`", "`<=`", "`>`", "`>=`",
+    "`->`", "`.`", "`,`", "`&`",
+    "`|`", "`^`", "`~`", "`<<`", "`>>`",
+    "`(`", "`)`", "`{`", "`}`", "`[`", "`]`",
+    "`type`", "`function`", "`struct`", "`when`", "`else`", "`loop`",
+    "`from`", "`to`", "`until`", "`break`", "`continue`", "`return`",
+    "`print`", "`write`", "`true`", "`false`", "`and`", "`or`",
+    "`not`", "`end`", "`alloc`", "`release`", "`null`", "`union`",
+    "`const`", "reserved word"
+}
+
+function.kind_name(number.k) -> text {
+    when (k >= 0 and k < 59) {
+        return KIND_NAMES[k]
+    }
+    return "unknown token"
+}
+
+# expect a kind; on mismatch record a diagnostic and return false.
+# The `>>` split (spec §9): when a type-argument close needs `>` and the
+# current token is `>>`, one `>` is consumed and the other stays current.
+function.expect(number.k) -> bool {
+    when (k == toks.K_GT and cur_kind() == toks.K_SHR) {
+        toks.split_gt(pos)
+        return true
+    }
+    when (cur_kind() == k) {
+        advance()
+        return true
+    }
+    perr(cur_line(), cur_col(), "expected " + kind_name(k) + ", but found " + kind_name(cur_kind()) + ".")
+    return false
+}
+
+# `.end` terminator of a column (spec §3.1)
+function.expect_end() -> bool {
+    when (expect(toks.K_DOT) == false) { return false }
+    when (expect(toks.K_END) == false) { return false }
+    return true
+}
+
+# sync: skip tokens until a statement boundary (recovery, brief §43)
+function.sync_stmt() -> number {
+    type.number steps = 0
+    loop (is_at(toks.K_EOF) == false and is_at(toks.K_NL) == false and is_at(toks.K_RBRACE) == false) {
+        advance()
+        steps = steps + 1
+        when (steps > 4096) {
+            return 0
+        }
+    }
+    when (is_at(toks.K_NL)) {
+        advance()
+    }
+    return 0
+}
+
+# skip a whole `{ ... }.end` region after a reported error
+function.skip_column_region() -> number {
+    type.number depth = 0
+    loop (is_at(toks.K_EOF) == false) {
+        when (is_at(toks.K_LBRACE)) {
+            depth = depth + 1
+        }
+        else when (is_at(toks.K_RBRACE)) {
+            depth = depth - 1
+            when (depth == 0) {
+                advance()
+                when (is_at(toks.K_DOT)) {
+                    advance()
+                }
+                when (is_at(toks.K_END)) {
+                    advance()
+                }
+                return 0
+            }
+        }
+        else when (is_at(toks.K_NL) and depth == 0) {
+            return 0
+        }
+        advance()
+    }
+    return 0
+}
+
+# ---- integer literal value from a spelling (hex or decimal, `_` groups) ----
+
+function.spell_int_value(text.sp) -> number {
+    type.number n = text.length(sp)
+    type.number v = 0
+    type.number i = 0
+    type.number hex = 0
+    when (n >= 2 and text.byte_at(sp, 0) == 48 and (text.byte_at(sp, 1) == 120 or text.byte_at(sp, 1) == 88)) {
+        hex = 1
+        i = 2
+        when (i == n) { return 0 }
+    }
+    loop (i from i until n) {
+        type.number b = text.byte_at(sp, i)
+        when (b == 95) {
+            # `_` group separator
+        }
+        else {
+            type.number d = 0
+            when (b >= 48 and b <= 57) { d = b - 48 }
+            else when (hex == 1 and b >= 97 and b <= 102) { d = b - 97 + 10 }
+            else when (hex == 1 and b >= 65 and b <= 70) { d = b - 65 + 10 }
+            else { return 0 }
+            when (hex == 1) { v = v * 16 + d }
+            else { v = v * 10 + d }
+        }
+    }
+    return v
+}
+
+# ---- types ----
+
+# `type.<T>` / `type.array<T, N>` used by variable declarations (spec §8).
+# Returns null (with a diagnostic) on unknown types or malformed arrays.
+function.parse_type_prefix() -> type.ptr<type.Ty> {
+    when (expect(toks.K_TYPE) == false) { return null }
+    when (expect(toks.K_DOT) == false) { return null }
+    when (is_at(toks.K_IDENT) == false) {
+        perr(cur_line(), cur_col(), "expected a type name after `type.` (number, decimal, text, bool, ptr<...>, array<...>).")
+        return null
+    }
+    type.text name = toks.spelling(pos)
+    type.number nline = cur_line()
+    type.number ncol = cur_col()
+    advance()
+
+    when (name == "array") {
+        when (expect(toks.K_LT) == false) { return null }
+        type.ptr<type.Ty> elem = parse_type_prefix()
+        when (elem == null) { return null }
+        when (ty_is_auto(elem)) {
+            perr(nline, ncol, "array elements cannot use `type.auto` — write the element type explicitly.")
+            return null
+        }
+        when (expect(toks.K_COMMA) == false) { return null }
+        when (is_at(toks.K_INT) == false) {
+            perr(cur_line(), cur_col(), "the array length must be a whole number of elements.")
+            return null
+        }
+        type.number cnt = spell_int_value(toks.spelling(pos))
+        type.number cline = cur_line()
+        type.number ccol = cur_col()
+        advance()
+        when (expect(toks.K_GT) == false) { return null }
+        when (cnt == 0 or cnt > 65536) {
+            perr(cline, ccol, "the array length must be between 1 and 65536 in this compiler.")
+            return null
+        }
+        when (ty_bytes(elem) * cnt > 1048576) {
+            perr(cline, ccol, "this array type is too large (more than 1 MiB of storage).")
+            return null
+        }
+        type.ptr<type.Ty> arr = new_ty()
+        arr.form = F_ARRAY
+        arr.elem = elem
+        arr.count = cnt
+        return arr
+    }
+
+    when (name == "ptr") {
+        when (expect(toks.K_LT) == false) { return null }
+        type.ptr<type.Ty> elem = parse_type_prefix()
+        when (elem == null) { return null }
+        when (ty_is_auto(elem)) {
+            perr(nline, ncol, "a pointer cannot use `type.auto` — write the pointee type explicitly.")
+            return null
+        }
+        when (expect(toks.K_GT) == false) { return null }
+        when (ty_is_voidish(elem)) {
+            perr(nline, ncol, "a pointer needs a value type to point at (as in `type.ptr<type.number>`).")
+            return null
+        }
+        type.ptr<type.Ty> pt = new_ty()
+        pt.form = F_PTR
+        pt.elem = elem
+        return pt
+    }
+
+    type.number code = scalar_code(name)
+    when (code == -1) {
+        when (named_type_exists(name)) {
+            return named_type(name)
+        }
+        perr(nline, ncol, "unknown type `" + name + "`.")
+        return null
+    }
+    type.ptr<type.Ty> sc = new_ty()
+    sc.form = F_SCALAR
+    sc.scalar = code
+    return sc
+}
+
+# bare type name for function params / return types (`number.a`, `-> number`);
+# also accepts the full `type.`-prefixed form and the bare `ptr<...>` form
+function.parse_bare_type() -> type.ptr<type.Ty> {
+    when (is_at(toks.K_TYPE)) {
+        return parse_type_prefix()
+    }
+    when (is_at(toks.K_IDENT) == false) {
+        perr(cur_line(), cur_col(), "expected a type name (number, decimal, text, bool).")
+        return null
+    }
+    type.text name = toks.spelling(pos)
+    type.number nline = cur_line()
+    type.number ncol = cur_col()
+    advance()
+
+    # bare pointer form: ptr<number>.p
+    when (name == "ptr" and is_at(toks.K_LT)) {
+        advance()
+        type.ptr<type.Ty> elem = parse_bare_type()
+        when (elem == null) { return null }
+        when (expect(toks.K_GT) == false) { return null }
+        when (ty_is_voidish(elem)) {
+            perr(nline, ncol, "a pointer needs a value type to point at (as in `ptr<number>`).")
+            return null
+        }
+        type.ptr<type.Ty> pt = new_ty()
+        pt.form = F_PTR
+        pt.elem = elem
+        return pt
+    }
+
+    type.number code = scalar_code(name)
+    when (code == -1) {
+        when (named_type_exists(name)) {
+            return named_type(name)
+        }
+        perr(nline, ncol, "unknown type `" + name + "`.")
+        return null
+    }
+    type.ptr<type.Ty> sc = new_ty()
+    sc.form = F_SCALAR
+    sc.scalar = code
+    return sc
+}
+
+# ---- expressions (spec §9 precedence) ----
+# (mutual recursion relies on Okular's forward references)
+
+# { e1, e2, ... } array literal (declaration initializers only, spec §8.4)
+function.parse_arraylit() -> type.ptr<type.Node> {
+    type.number tline = cur_line()
+    type.number tcol = cur_col()
+    type.ptr<type.Node> n = new_node(N_ARRAYLIT, tline, tcol)
+    advance()
+    type.ptr<type.ptr<type.Node>> list = alloc<type.ptr<type.Node>>(8)
+    type.number lcap = 8
+    type.number ln = 0
+    loop (true) {
+        skip_nl()
+        when (is_at(toks.K_RBRACE)) {
+            advance()
+            n.args = list
+            n.nargs = ln
+            return n
+        }
+        # nested literals: {{1, 2}, {3, 4}, 65000} (spec §8.3/§8.4)
+        type.ptr<type.Node> el = null
+        when (is_at(toks.K_LBRACE)) {
+            el = parse_arraylit()
+        }
+        else {
+            el = parse_expr()
+        }
+        when (el == null) {
+            n.args = list
+            n.nargs = ln
+            return n
+        }
+        when (ln == lcap) {
+            type.ptr<type.ptr<type.Node>> nb = alloc<type.ptr<type.Node>>(lcap * 2)
+            loop (i from 0 until ln) {
+                nb[i] = list[i]
+            }
+            type.ptr<type.ptr<type.Node>> old = list
+            list = nb
+            lcap = lcap * 2
+            release(old)
+        }
+        list[ln] = el
+        ln = ln + 1
+        skip_nl()
+        when (is_at(toks.K_COMMA)) {
+            advance()
+        }
+        else when (is_at(toks.K_RBRACE)) {
+            advance()
+            n.args = list
+            n.nargs = ln
+            return n
+        }
+        else {
+            perr(cur_line(), cur_col(), "expected `,` or `}` in the array literal.")
+            n.args = list
+            n.nargs = ln
+            return n
+        }
+    }
+    return n
+}
+
+# initializer after `=` in a declaration: array literal or expression
+function.parse_initializer() -> type.ptr<type.Node> {
+    when (is_at(toks.K_LBRACE)) {
+        return parse_arraylit()
+    }
+    return parse_expr()
+}
+
+function.parse_primary() -> type.ptr<type.Node> {
+    type.number k = cur_kind()
+    type.number tline = cur_line()
+    type.number tcol = cur_col()
+
+    when (k == toks.K_INT) {
+        type.ptr<type.Node> n = new_node(N_INT, tline, tcol)
+        n.str = toks.spelling(pos)
+        n.ival = spell_int_value(n.str)
+        advance()
+        return n
+    }
+    when (k == toks.K_DEC) {
+        type.ptr<type.Node> n = new_node(N_DEC, tline, tcol)
+        n.str = toks.spelling(pos)
+        advance()
+        return n
+    }
+    when (k == toks.K_TEXT) {
+        type.ptr<type.Node> n = new_node(N_TEXT, tline, tcol)
+        n.str = toks.spelling(pos)
+        advance()
+        return n
+    }
+    when (k == toks.K_TRUE or k == toks.K_FALSE) {
+        type.ptr<type.Node> n = new_node(N_BOOL, tline, tcol)
+        when (k == toks.K_TRUE) {
+            n.bval = 1
+        }
+        advance()
+        return n
+    }
+    when (k == toks.K_LPAREN) {
+        advance()
+        type.ptr<type.Node> e = parse_expr()
+        when (e == null) { return null }
+        when (expect(toks.K_RPAREN) == false) { return null }
+        return e
+    }
+    when (k == toks.K_NULL) {
+        type.ptr<type.Node> n = new_node(N_NULL, tline, tcol)
+        advance()
+        return n
+    }
+    when (k == toks.K_ALLOC) {
+        # alloc<type.T>(count) — manual heap allocation (spec §12)
+        type.ptr<type.Node> n = new_node(N_ALLOC, tline, tcol)
+        advance()
+        when (expect(toks.K_LT) == false) {
+            sync_stmt()
+            return null
+        }
+        type.ptr<type.Ty> elem = parse_type_prefix()
+        when (elem == null) {
+            sync_stmt()
+            return null
+        }
+        when (expect(toks.K_GT) == false) {
+            sync_stmt()
+            return null
+        }
+        when (ty_is_voidish(elem)) {
+            perr(tline, tcol, "`alloc` needs a value type (as in `alloc<type.number>(1)`).")
+            sync_stmt()
+            return null
+        }
+        type.ptr<type.Ty> pt = new_ty()
+        pt.form = F_PTR
+        pt.elem = elem
+        n.otype = pt
+        when (expect(toks.K_LPAREN) == false) {
+            sync_stmt()
+            return null
+        }
+        n.a = parse_expr()
+        when (n.a == null) {
+            sync_stmt()
+            return null
+        }
+        when (expect(toks.K_RPAREN) == false) {
+            sync_stmt()
+            return null
+        }
+        return n
+    }
+    when (k == toks.K_WRITE) {
+        perr(tline, tcol, "`write(...)` is a statement, not a value — it returns nothing.")
+        advance()
+        return null
+    }
+    when (k == toks.K_PRINT) {
+        perr(tline, tcol, "`print` is a statement, not a value.")
+        advance()
+        return null
+    }
+    when (k == toks.K_RESERVED) {
+        perr(tline, tcol, "`" + toks.spelling(pos) + "` is reserved for a future Okular feature.")
+        advance()
+        return null
+    }
+    when (k == toks.K_IDENT) {
+        type.ptr<type.Node> n = new_node(N_PATH, tline, tcol)
+        type.ptr<type.text> parts = alloc<type.text>(4)
+        type.number pcap = 4
+        type.number pn = 0
+        parts[0] = toks.spelling(pos)
+        pn = 1
+        advance()
+        loop (is_at(toks.K_DOT) and at_kind(1) == toks.K_IDENT) {
+            advance()
+            when (pn == pcap) {
+                type.ptr<type.text> np = alloc<type.text>(pcap * 2)
+                loop (i from 0 until pn) {
+                    np[i] = parts[i]
+                }
+                type.ptr<type.text> old = parts
+                parts = np
+                pcap = pcap * 2
+                release(old)
+            }
+            parts[pn] = toks.spelling(pos)
+            pn = pn + 1
+            advance()
+        }
+        n.parts = parts
+        n.nparts = pn
+        return n
+    }
+
+    perr(tline, tcol, "expected an expression, but found " + kind_name(k) + ".")
+    return null
+}
+
+# at `(` — parse ( args ) into a holder node's args list
+function.parse_call_args() -> type.ptr<type.Node> {
+    type.ptr<type.Node> holder = new_node(N_EXPRSTMT, cur_line(), cur_col())
+    advance()
+    type.ptr<type.ptr<type.Node>> list = alloc<type.ptr<type.Node>>(4)
+    type.number lcap = 4
+    type.number ln = 0
+    skip_nl()
+    when (is_at(toks.K_RPAREN)) {
+        advance()
+        holder.args = list
+        holder.nargs = ln
+        return holder
+    }
+    loop (true) {
+        skip_nl()
+        type.ptr<type.Node> a = parse_expr()
+        when (a == null) {
+            return null
+        }
+        when (ln == lcap) {
+            type.ptr<type.ptr<type.Node>> nb = alloc<type.ptr<type.Node>>(lcap * 2)
+            loop (i from 0 until ln) {
+                nb[i] = list[i]
+            }
+            type.ptr<type.ptr<type.Node>> old = list
+            list = nb
+            lcap = lcap * 2
+            release(old)
+        }
+        list[ln] = a
+        ln = ln + 1
+        skip_nl()
+        when (is_at(toks.K_COMMA)) {
+            advance()
+        }
+        else when (is_at(toks.K_RPAREN)) {
+            advance()
+            holder.args = list
+            holder.nargs = ln
+            return holder
+        }
+        else {
+            perr(cur_line(), cur_col(), "expected `,` or `)` in the argument list.")
+            return null
+        }
+    }
+    return null
+}
+
+function.parse_postfix() -> type.ptr<type.Node> {
+    type.ptr<type.Node> e = parse_primary()
+    when (e == null) { return null }
+    when (e.kind == N_PATH and is_at(toks.K_LPAREN)) {
+        type.ptr<type.Node> args = parse_call_args()
+        when (args == null) { return null }
+        type.ptr<type.Node> call = new_node(N_CALL, e.line, e.col)
+        call.parts = e.parts
+        call.nparts = e.nparts
+        call.args = args.args
+        call.nargs = args.nargs
+        e = call
+    }
+    # postfix chains: indexing and member access mix freely (spec §9/§8.3)
+    loop (true) {
+        when (is_at(toks.K_LBRACKET)) {
+            type.number tline = cur_line()
+            type.number tcol = cur_col()
+            advance()
+            type.ptr<type.Node> idx = parse_expr()
+            when (idx == null) { return e }
+            when (expect(toks.K_RBRACKET) == false) { return e }
+            type.ptr<type.Node> ix = new_node(N_INDEX, tline, tcol)
+            ix.a = e
+            ix.b = idx
+            e = ix
+        }
+        else when (is_at(toks.K_DOT) and at_kind(1) == toks.K_IDENT) {
+            type.number tline = cur_line()
+            type.number tcol = cur_col()
+            advance()
+            type.ptr<type.Node> mem = new_node(N_MEMBER, tline, tcol)
+            mem.a = e
+            mem.name = toks.spelling(pos)
+            advance()
+            e = mem
+        }
+        else when (is_at(toks.K_DOT)) {
+            perr(cur_line(), cur_col(), "`.` starts member access (`value.field`).")
+            sync_stmt()
+            return e
+        }
+        else {
+            return e
+        }
+    }
+    return e
+}
+
+function.parse_unary() -> type.ptr<type.Node> {
+    type.number k = cur_kind()
+    type.number tline = cur_line()
+    type.number tcol = cur_col()
+
+    when (k == toks.K_MINUS) {
+        advance()
+        type.ptr<type.Node> e = parse_unary()
+        when (e == null) { return null }
+        type.ptr<type.Node> n = new_node(N_UN, tline, tcol)
+        n.uop = UN_NEG
+        n.a = e
+        return n
+    }
+    when (k == toks.K_NOT) {
+        advance()
+        type.ptr<type.Node> e = parse_unary()
+        when (e == null) { return null }
+        type.ptr<type.Node> n = new_node(N_UN, tline, tcol)
+        n.uop = UN_NOT
+        n.a = e
+        return n
+    }
+    when (k == toks.K_AMP) {
+        # &x — address-of (spec §12)
+        advance()
+        type.ptr<type.Node> e = parse_unary()
+        when (e == null) { return null }
+        type.ptr<type.Node> n = new_node(N_UN, tline, tcol)
+        n.uop = UN_ADDR
+        n.a = e
+        return n
+    }
+    when (k == toks.K_TILDE) {
+        # ~x — bitwise NOT (0.11, spec §9)
+        advance()
+        type.ptr<type.Node> e = parse_unary()
+        when (e == null) { return null }
+        type.ptr<type.Node> n = new_node(N_UN, tline, tcol)
+        n.uop = UN_BNOT
+        n.a = e
+        return n
+    }
+    when (k == toks.K_STAR) {
+        # *p — dereference (spec §12)
+        advance()
+        type.ptr<type.Node> e = parse_unary()
+        when (e == null) { return null }
+        type.ptr<type.Node> n = new_node(N_UN, tline, tcol)
+        n.uop = UN_DEREF
+        n.a = e
+        return n
+    }
+    return parse_postfix()
+}
+
+function.mkbin(type.ptr<type.Node>.l, number.op, type.ptr<type.Node>.r) -> type.ptr<type.Node> {
+    type.ptr<type.Node> n = new_node(N_BIN, l.line, l.col)
+    n.op = op
+    n.a = l
+    n.b = r
+    return n
+}
+
+function.parse_mul() -> type.ptr<type.Node> {
+    type.ptr<type.Node> e = parse_unary()
+    when (e == null) { return null }
+    loop (true) {
+        type.number op = -1
+        when (is_at(toks.K_STAR)) { op = OP_MUL }
+        else when (is_at(toks.K_SLASH)) { op = OP_DIV }
+        else when (is_at(toks.K_PERCENT)) { op = OP_MOD }
+        else { return e }
+        advance()
+        type.ptr<type.Node> r = parse_unary()
+        when (r == null) { return null }
+        e = mkbin(e, op, r)
+    }
+    return e
+}
+
+function.parse_add() -> type.ptr<type.Node> {
+    type.ptr<type.Node> e = parse_mul()
+    when (e == null) { return null }
+    loop (true) {
+        type.number op = -1
+        when (is_at(toks.K_PLUS)) { op = OP_ADD }
+        else when (is_at(toks.K_MINUS)) { op = OP_SUB }
+        else { return e }
+        advance()
+        type.ptr<type.Node> r = parse_mul()
+        when (r == null) { return null }
+        e = mkbin(e, op, r)
+    }
+    return e
+}
+
+# shifts (0.11, spec §9): looser than `+`/`-`, tighter than `&`
+function.parse_shift() -> type.ptr<type.Node> {
+    type.ptr<type.Node> e = parse_add()
+    when (e == null) { return null }
+    loop (true) {
+        type.number op = -1
+        when (is_at(toks.K_SHL)) { op = OP_SHL }
+        else when (is_at(toks.K_SHR)) { op = OP_SHR }
+        else { return e }
+        advance()
+        type.ptr<type.Node> r = parse_add()
+        when (r == null) { return null }
+        e = mkbin(e, op, r)
+    }
+    return e
+}
+
+function.parse_band() -> type.ptr<type.Node> {
+    type.ptr<type.Node> e = parse_shift()
+    when (e == null) { return null }
+    loop (is_at(toks.K_AMP)) {
+        advance()
+        type.ptr<type.Node> r = parse_shift()
+        when (r == null) { return null }
+        e = mkbin(e, OP_BAND, r)
+    }
+    return e
+}
+
+function.parse_bxor() -> type.ptr<type.Node> {
+    type.ptr<type.Node> e = parse_band()
+    when (e == null) { return null }
+    loop (is_at(toks.K_CARET)) {
+        advance()
+        type.ptr<type.Node> r = parse_band()
+        when (r == null) { return null }
+        e = mkbin(e, OP_XOR, r)
+    }
+    return e
+}
+
+function.parse_bor() -> type.ptr<type.Node> {
+    type.ptr<type.Node> e = parse_bxor()
+    when (e == null) { return null }
+    loop (is_at(toks.K_PIPE)) {
+        advance()
+        type.ptr<type.Node> r = parse_bxor()
+        when (r == null) { return null }
+        e = mkbin(e, OP_BOR, r)
+    }
+    return e
+}
+
+function.parse_cmp() -> type.ptr<type.Node> {
+    type.ptr<type.Node> e = parse_bor()
+    when (e == null) { return null }
+    type.number k = cur_kind()
+    type.number op = -1
+    when (k == toks.K_EQEQ) { op = OP_EQ }
+    else when (k == toks.K_BANGEQ) { op = OP_NEQ }
+    else when (k == toks.K_LT) { op = OP_LT }
+    else when (k == toks.K_LE) { op = OP_LE }
+    else when (k == toks.K_GT) { op = OP_GT }
+    else when (k == toks.K_GE) { op = OP_GE }
+    else { return e }
+    advance()
+    type.ptr<type.Node> r = parse_add()
+    when (r == null) { return null }
+    type.ptr<type.Node> n = mkbin(e, op, r)
+    # comparisons are non-associative (spec §9)
+    type.number k2 = cur_kind()
+    when (k2 == toks.K_EQEQ or k2 == toks.K_BANGEQ or k2 == toks.K_LT or k2 == toks.K_LE or k2 == toks.K_GT or k2 == toks.K_GE) {
+        perr(cur_line(), cur_col(), "comparisons do not chain in Okular (use `and` to combine them).")
+    }
+    return n
+}
+
+function.parse_and_expr() -> type.ptr<type.Node> {
+    type.ptr<type.Node> e = parse_cmp()
+    when (e == null) { return null }
+    loop (is_at(toks.K_AND)) {
+        advance()
+        type.ptr<type.Node> r = parse_cmp()
+        when (r == null) { return null }
+        e = mkbin(e, OP_AND, r)
+    }
+    return e
+}
+
+function.parse_expr() -> type.ptr<type.Node> {
+    type.ptr<type.Node> e = parse_and_expr()
+    when (e == null) { return null }
+    loop (is_at(toks.K_OR)) {
+        advance()
+        type.ptr<type.Node> r = parse_and_expr()
+        when (r == null) { return null }
+        e = mkbin(e, OP_OR, r)
+    }
+    return e
+}
+
+# ---- statements ----
+
+# Parse `{ stmts }` until the close token. Returns false on hard failure;
+# recovers at statement boundaries otherwise. The list lands on out.body.
+function.parse_stmt_list(type.ptr<type.Node>.out) -> bool {
+    when (expect(toks.K_LBRACE) == false) {
+        sync_stmt()
+        return false
+    }
+    type.ptr<type.ptr<type.Node>> list = alloc<type.ptr<type.Node>>(8)
+    type.number lcap = 8
+    type.number ln = 0
+    loop (true) {
+        skip_nl()
+        when (is_at(toks.K_EOF)) {
+            perr(cur_line(), cur_col(), "the block starting earlier is never closed (missing `}`).")
+            out.body = list
+            out.nbody = ln
+            return false
+        }
+        when (is_at(toks.K_RBRACE)) {
+            advance()
+            out.body = list
+            out.nbody = ln
+            return true
+        }
+        when (is_at(toks.K_DOT) and at_kind(1) == toks.K_END) {
+            perr(cur_line(), cur_col(), "`.end` closes columns, not blocks — use `}` here (spec §3.1).")
+            advance()
+            advance()
+        }
+        else {
+            type.number before = pos
+            type.ptr<type.Node> s = parse_stmt()
+            when (s != null) {
+                when (ln == lcap) {
+                    type.ptr<type.ptr<type.Node>> nb = alloc<type.ptr<type.Node>>(lcap * 2)
+                    loop (i from 0 until ln) {
+                        nb[i] = list[i]
+                    }
+                    type.ptr<type.ptr<type.Node>> old = list
+                    list = nb
+                    lcap = lcap * 2
+                    release(old)
+                }
+                list[ln] = s
+                ln = ln + 1
+            }
+            when (pos == before) {
+                advance()
+            }
+        }
+    }
+    return false
+}
+
+# `when (cond) { } else { }` (spec §10)
+function.parse_when() -> type.ptr<type.Node> {
+    type.number tline = cur_line()
+    type.number tcol = cur_col()
+    advance()
+    type.ptr<type.Node> n = new_node(N_WHEN, tline, tcol)
+    when (expect(toks.K_LPAREN) == false) {
+        sync_stmt()
+        return n
+    }
+    n.a = parse_expr()
+    when (n.a == null) {
+        return n
+    }
+    when (expect(toks.K_RPAREN) == false) {
+        sync_stmt()
+        return n
+    }
+    parse_stmt_list(n)
+    # `else` may sit on the next line — peek past newlines, but restore the
+    # position when there is no `else` so the caller still sees its own
+    # statement separator
+    type.number mark = pos
+    skip_nl()
+    when (is_at(toks.K_ELSE)) {
+        advance()
+        when (is_at(toks.K_WHEN)) {
+            # `else when (...) { ... }` chain (spec §10)
+            type.ptr<type.Node> nested = parse_when()
+            type.ptr<type.ptr<type.Node>> els = alloc<type.ptr<type.Node>>(1)
+            els[0] = nested
+            n.body_else = els
+            n.nbody_else = 1
+            return n
+        }
+        type.ptr<type.Node> elsenode = new_node(N_WHEN, cur_line(), cur_col())
+        parse_stmt_list(elsenode)
+        n.body_else = elsenode.body
+        n.nbody_else = elsenode.nbody
+    }
+    else {
+        pos = mark
+    }
+    return n
+}
+
+# `loop (...) { }` — counted or conditional (spec §10)
+function.parse_loop() -> type.ptr<type.Node> {
+    type.number tline = cur_line()
+    type.number tcol = cur_col()
+    advance()
+    when (expect(toks.K_LPAREN) == false) {
+        sync_stmt()
+        return new_node(N_LOOP_COND, tline, tcol)
+    }
+
+    when (is_at(toks.K_IDENT) and at_kind(1) == toks.K_FROM) {
+        type.ptr<type.Node> n = new_node(N_LOOP_COUNT, tline, tcol)
+        n.name = toks.spelling(pos)
+        advance()
+        advance()
+        n.a = parse_expr()
+        when (n.a == null) { return n }
+        type.number inclusive = 0
+        when (is_at(toks.K_TO)) {
+            inclusive = 1
+        }
+        else when (is_at(toks.K_UNTIL)) {
+            inclusive = 0
+        }
+        else {
+            perr(cur_line(), cur_col(), "expected `to` (inclusive) or `until` (exclusive) in the counted loop.")
+            sync_stmt()
+            return n
+        }
+        n.inclusive = inclusive
+        advance()
+        n.b = parse_expr()
+        when (n.b == null) { return n }
+        when (expect(toks.K_RPAREN) == false) {
+            sync_stmt()
+            return n
+        }
+        parse_stmt_list(n)
+        return n
+    }
+
+    type.ptr<type.Node> n = new_node(N_LOOP_COND, tline, tcol)
+    n.a = parse_expr()
+    when (n.a == null) { return n }
+    when (expect(toks.K_RPAREN) == false) {
+        sync_stmt()
+        return n
+    }
+    parse_stmt_list(n)
+    return n
+}
+
+# write(...) statement
+function.parse_write() -> type.ptr<type.Node> {
+    type.number tline = cur_line()
+    type.number tcol = cur_col()
+    advance()
+    type.ptr<type.Node> n = new_node(N_WRITE, tline, tcol)
+    when (is_at(toks.K_LPAREN) == false) {
+        perr(cur_line(), cur_col(), "`write` needs parentheses: `write(value)`.")
+        sync_stmt()
+        return n
+    }
+    type.ptr<type.Node> args = parse_call_args()
+    when (args == null) { return n }
+    n.args = args.args
+    n.nargs = args.nargs
+    return n
+}
+
+# A statement or declaration; NOT function/column (those are top-level).
+function.parse_stmt() -> type.ptr<type.Node> {
+    type.number k = cur_kind()
+    type.number tline = cur_line()
+    type.number tcol = cur_col()
+
+    when (k == toks.K_TYPE) {
+        # `type.<feature>=v` is file-level only (spec §5); here it must be
+        # a variable declaration `type.<T> name = init`.
+        when (at_kind(1) == toks.K_DOT and at_kind(2) == toks.K_IDENT and at_kind(3) == toks.K_EQ) {
+            perr(tline, tcol, "feature directives are file-level; move them to the top of the file.")
+        }
+        type.ptr<type.Ty> ty = parse_type_prefix()
+        when (ty == null) {
+            sync_stmt()
+            return null
+        }
+        when (is_at(toks.K_IDENT) == false) {
+            perr(cur_line(), cur_col(), "expected a variable name after the type.")
+            sync_stmt()
+            return null
+        }
+        type.ptr<type.Node> n = new_node(N_VARDECL, tline, tcol)
+        n.otype = ty
+        n.name = toks.spelling(pos)
+        advance()
+        when (expect(toks.K_EQ) == false) {
+            return null
+        }
+        n.a = parse_initializer()
+        when (n.a == null) { return null }
+        return n
+    }
+    when (k == toks.K_WHEN) {
+        return parse_when()
+    }
+    when (k == toks.K_LOOP) {
+        return parse_loop()
+    }
+    when (k == toks.K_WRITE) {
+        return parse_write()
+    }
+    when (k == toks.K_PRINT) {
+        type.ptr<type.Node> n = new_node(N_PRINT, tline, tcol)
+        advance()
+        return n
+    }
+    when (k == toks.K_RELEASE) {
+        # release(p) — return a heap block (spec §12)
+        type.ptr<type.Node> n = new_node(N_RELEASE, tline, tcol)
+        advance()
+        when (expect(toks.K_LPAREN) == false) {
+            sync_stmt()
+            return n
+        }
+        n.a = parse_expr()
+        when (n.a == null) {
+            sync_stmt()
+            return n
+        }
+        when (expect(toks.K_RPAREN) == false) {
+            sync_stmt()
+            return n
+        }
+        return n
+    }
+    when (k == toks.K_STAR) {
+        # *p = value — dereference assignment (spec §12)
+        type.ptr<type.Node> e = parse_unary()
+        when (e == null) { return null }
+        when (is_at(toks.K_EQ)) {
+            advance()
+            type.ptr<type.Node> val = parse_expr()
+            when (val == null) { return null }
+            when (e.kind == N_UN and e.uop == UN_DEREF) {
+                type.ptr<type.Node> n = new_node(N_DEREFASSIGN, tline, tcol)
+                n.a = e.a
+                n.c = val
+                return n
+            }
+            perr(tline, tcol, "the left side of `=` must be a name, an array element, or a dereference.")
+            return null
+        }
+        perr(tline, tcol, "a statement that starts with `*` must be a pointer store (`*p = value`).")
+        sync_stmt()
+        return null
+    }
+    when (k == toks.K_BREAK) {
+        type.ptr<type.Node> n = new_node(N_BREAK, tline, tcol)
+        advance()
+        return n
+    }
+    when (k == toks.K_CONTINUE) {
+        type.ptr<type.Node> n = new_node(N_CONTINUE, tline, tcol)
+        advance()
+        return n
+    }
+    when (k == toks.K_RETURN) {
+        type.ptr<type.Node> n = new_node(N_RETURN, tline, tcol)
+        advance()
+        # bare `return` when the line ends; otherwise parse the value.
+        # Do NOT consume the newline — the statement-list loop needs it.
+        when (is_at(toks.K_NL) == false and is_at(toks.K_RBRACE) == false and is_at(toks.K_EOF) == false) {
+            n.a = parse_expr()
+        }
+        return n
+    }
+    when (k == toks.K_STRUCT or k == toks.K_UNION) {
+        # record declarations are top level or column members (spec §8.3/§8.5)
+        perr(tline, tcol, "structs and unions are declared at the top of a file or inside a column, not inside function bodies.")
+        advance()
+        skip_column_region()
+        return null
+    }
+    when (k == toks.K_CONST) {
+        perr(tline, tcol, "constants are declared at the top of a file or inside a column, not inside function bodies.")
+        advance()
+        sync_stmt()
+        return null
+    }
+    when (k == toks.K_RESERVED) {
+        perr(tline, tcol, "`" + toks.spelling(pos) + "` is reserved for a future Okular feature.")
+        advance()
+        sync_stmt()
+        return null
+    }
+    when (k == toks.K_IDENT) {
+        # assignment (path = expr, base[i] = expr) or call statement
+        type.ptr<type.Node> e = parse_postfix()
+        when (e == null) { return null }
+        when (is_at(toks.K_EQ)) {
+            advance()
+            type.ptr<type.Node> val = parse_expr()
+            when (val == null) { return null }
+            when (e.kind == N_PATH) {
+                type.ptr<type.Node> n = new_node(N_ASSIGN, tline, tcol)
+                n.parts = e.parts
+                n.nparts = e.nparts
+                n.a = val
+                return n
+            }
+            when (e.kind == N_INDEX) {
+                type.ptr<type.Node> n = new_node(N_INDEXASSIGN, tline, tcol)
+                n.a = e.a
+                n.b = e.b
+                n.c = val
+                return n
+            }
+            when (e.kind == N_MEMBER) {
+                type.ptr<type.Node> n = new_node(N_FIELDASSIGN, tline, tcol)
+                n.a = e.a
+                n.name = e.name
+                n.c = val
+                return n
+            }
+            perr(tline, tcol, "the left side of `=` must be a name, an array element, or a field.")
+            return null
+        }
+        when (e.kind == N_CALL) {
+            type.ptr<type.Node> n = new_node(N_EXPRSTMT, tline, tcol)
+            n.a = e
+            return n
+        }
+        perr(cur_line(), cur_col(), "a statement that starts with a name must be a call or an assignment.")
+        sync_stmt()
+        return null
+    }
+
+    perr(tline, tcol, "expected a statement, but found " + kind_name(k) + ".")
+    advance()
+    sync_stmt()
+    return null
+}
+
+# ---- top level ----
+
+# [path] = { "items" }.end — language column (spec §3.2)
+function.parse_langcol() -> type.ptr<type.Node> {
+    type.number tline = cur_line()
+    type.number tcol = cur_col()
+    advance()
+    type.ptr<type.text> parts = alloc<type.text>(4)
+    type.number pcap = 4
+    type.number pn = 0
+    when (is_at(toks.K_IDENT) == false) {
+        perr(cur_line(), cur_col(), "expected a language column name like `libs.use` after `[`.")
+        loop (is_at(toks.K_EOF) == false and is_at(toks.K_RBRACKET) == false) {
+            advance()
+        }
+        when (is_at(toks.K_RBRACKET)) {
+            advance()
+        }
+        return null
+    }
+    parts[0] = toks.spelling(pos)
+    pn = 1
+    advance()
+    loop (is_at(toks.K_DOT) and at_kind(1) == toks.K_IDENT) {
+        advance()
+        when (pn == pcap) {
+            type.ptr<type.text> np = alloc<type.text>(pcap * 2)
+            loop (i from 0 until pn) {
+                np[i] = parts[i]
+            }
+            type.ptr<type.text> old = parts
+            parts = np
+            pcap = pcap * 2
+            release(old)
+        }
+        parts[pn] = toks.spelling(pos)
+        pn = pn + 1
+        advance()
+    }
+    when (expect(toks.K_RBRACKET) == false) {
+        sync_stmt()
+        return null
+    }
+    when (expect(toks.K_EQ) == false) {
+        sync_stmt()
+        return null
+    }
+
+    type.ptr<type.Node> n = new_node(N_LANGCOL, tline, tcol)
+    n.parts = parts
+    n.nparts = pn
+
+    when (expect(toks.K_LBRACE) == false) {
+        sync_stmt()
+        return n
+    }
+    type.ptr<type.text> items = alloc<type.text>(4)
+    type.number icap = 4
+    type.number in_ = 0
+    skip_nl()
+    when (is_at(toks.K_RBRACE)) {
+        advance()
+        expect_end()
+        n.items = items
+        n.nitems = in_
+        return n
+    }
+    loop (true) {
+        skip_nl()
+        when (is_at(toks.K_TEXT)) {
+            when (in_ == icap) {
+                type.ptr<type.text> ni = alloc<type.text>(icap * 2)
+                loop (i from 0 until in_) {
+                    ni[i] = items[i]
+                }
+                type.ptr<type.text> old = items
+                items = ni
+                icap = icap * 2
+                release(old)
+            }
+            items[in_] = toks.spelling(pos)
+            in_ = in_ + 1
+            advance()
+            skip_nl()
+            when (is_at(toks.K_COMMA)) {
+                advance()
+            }
+            else when (is_at(toks.K_RBRACE)) {
+                advance()
+                break
+            }
+            else {
+                perr(cur_line(), cur_col(), "expected `,` or `}` in the column list.")
+                break
+            }
+        }
+        else {
+            perr(cur_line(), cur_col(), "language columns list text names (\"math\"), but found " + kind_name(cur_kind()) + ".")
+            break
+        }
+    }
+    n.items = items
+    n.nitems = in_
+    expect_end()
+    return n
+}
+
+# `struct.Name = { type.T field ... }.end` / `union.Name = { ... }.end`
+function.parse_recorddecl(number.is_union) -> type.ptr<type.Node> {
+    type.number tline = cur_line()
+    type.number tcol = cur_col()
+    advance()
+    when (expect(toks.K_DOT) == false) {
+        skip_column_region()
+        return null
+    }
+    when (is_at(toks.K_IDENT) == false) {
+        perr(cur_line(), cur_col(), "expected a record name after the keyword dot.")
+        skip_column_region()
+        return null
+    }
+    type.text rname = toks.spelling(pos)
+    advance()
+
+    type.ptr<type.Node> n = new_node(N_STRUCTDECL, tline, tcol)
+    when (is_union == 1) {
+        n.kind = N_UNIONDECL
+    }
+    n.name = rname
+    n.otype = named_type(rname)
+
+    when (expect(toks.K_EQ) == false) {
+        skip_column_region()
+        return n
+    }
+    when (expect(toks.K_LBRACE) == false) {
+        skip_column_region()
+        return n
+    }
+
+    type.ptr<type.ptr<type.Ty>> ftypes = alloc<type.ptr<type.Ty>>(4)
+    type.ptr<type.text> fnames = alloc<type.text>(4)
+    type.number fcap = 4
+    type.number fn = 0
+
+    loop (true) {
+        skip_nl()
+        when (is_at(toks.K_EOF)) {
+            perr(cur_line(), cur_col(), "the record `" + rname + "` is never closed (missing `}.end`).")
+            break
+        }
+        when (is_at(toks.K_RBRACE)) {
+            advance()
+            break
+        }
+        when (is_at(toks.K_DOT) and at_kind(1) == toks.K_END) {
+            perr(cur_line(), cur_col(), "`.end` completes `}` — write `}.end` to close the record.")
+            break
+        }
+
+        type.ptr<type.Ty> fty = parse_type_prefix()
+        when (fty == null) {
+            sync_stmt()
+        }
+        else when (ty_is_auto(fty)) {
+            perr(cur_line(), cur_col(), "record members cannot use `type.auto` — write the member type explicitly.")
+            sync_stmt()
+        }
+        else when (is_at(toks.K_IDENT) == false) {
+            perr(cur_line(), cur_col(), "expected a member name in record `" + rname + "`.")
+            sync_stmt()
+        }
+        else {
+            type.text mname = toks.spelling(pos)
+            advance()
+            when (is_at(toks.K_EQ)) {
+                perr(cur_line(), cur_col(), "record members have no initializers — construct with a literal.")
+                sync_stmt()
+            }
+            else {
+                when (fn == fcap) {
+                    type.ptr<type.ptr<type.Ty>> ntp = alloc<type.ptr<type.Ty>>(fcap * 2)
+                    type.ptr<type.text> nnn = alloc<type.text>(fcap * 2)
+                    loop (i from 0 until fn) {
+                        ntp[i] = ftypes[i]
+                        nnn[i] = fnames[i]
+                    }
+                    type.ptr<type.ptr<type.Ty>> oldp = ftypes
+                    type.ptr<type.text> oldn = fnames
+                    ftypes = ntp
+                    fnames = nnn
+                    fcap = fcap * 2
+                    release(oldp)
+                    release(oldn)
+                }
+                ftypes[fn] = fty
+                fnames[fn] = mname
+                fn = fn + 1
+            }
+        }
+    }
+
+    n.ptypes = ftypes
+    n.pnames = fnames
+    n.nparams = fn
+    expect_end()
+    return n
+}
+
+# `const.name = expr` — a folded, module-scope constant (0.8, spec §8.1)
+function.parse_constdecl() -> type.ptr<type.Node> {
+    type.number tline = cur_line()
+    type.number tcol = cur_col()
+    advance()
+    when (expect(toks.K_DOT) == false) {
+        sync_stmt()
+        return null
+    }
+    when (is_at(toks.K_IDENT) == false) {
+        perr(cur_line(), cur_col(), "expected a constant name after `const.`.")
+        sync_stmt()
+        return null
+    }
+    type.ptr<type.Node> n = new_node(N_CONSTDECL, tline, tcol)
+    n.name = toks.spelling(pos)
+    advance()
+    when (expect(toks.K_EQ) == false) {
+        sync_stmt()
+        return null
+    }
+    when (is_at(toks.K_LBRACE)) {
+        perr(cur_line(), cur_col(), "constants are single scalar or text values — `{ ... }` literals initialize variables, not constants.")
+        sync_stmt()
+        return n
+    }
+    n.a = parse_expr()
+    when (n.a == null) { return null }
+    return n
+}
+
+# `function.<name>(...)` shared by top level and columns
+function.parse_toplevel_function() -> type.ptr<type.Node> {
+    type.number tline = cur_line()
+    type.number tcol = cur_col()
+    advance()
+    when (expect(toks.K_DOT) == false) {
+        sync_stmt()
+        return null
+    }
+    when (is_at(toks.K_IDENT) == false) {
+        perr(cur_line(), cur_col(), "expected a function name after `function.`.")
+        sync_stmt()
+        return null
+    }
+    type.ptr<type.Node> n = new_node(N_FUNC, tline, tcol)
+    n.name = toks.spelling(pos)
+    advance()
+
+    # parameters
+    when (expect(toks.K_LPAREN) == false) {
+        sync_stmt()
+        return null
+    }
+    type.ptr<type.ptr<type.Ty>> ptypes = alloc<type.ptr<type.Ty>>(4)
+    type.ptr<type.text> pnames = alloc<type.text>(4)
+    type.number pcap = 4
+    type.number pn = 0
+    when (is_at(toks.K_RPAREN) == false) {
+        loop (true) {
+            type.ptr<type.Ty> ty = parse_bare_type()
+            when (ty == null) {
+                sync_stmt()
+                break
+            }
+            when (ty_is_auto(ty)) {
+                perr(cur_line(), cur_col(), "parameters cannot use `type.auto` — write the parameter type explicitly.")
+                sync_stmt()
+                break
+            }
+            when (expect(toks.K_DOT) == false) {
+                sync_stmt()
+                break
+            }
+            when (is_at(toks.K_IDENT) == false) {
+                perr(cur_line(), cur_col(), "expected a parameter name.")
+                sync_stmt()
+                break
+            }
+            when (pn == pcap) {
+                type.ptr<type.ptr<type.Ty>> ntp = alloc<type.ptr<type.Ty>>(pcap * 2)
+                type.ptr<type.text> nnn = alloc<type.text>(pcap * 2)
+                loop (i from 0 until pn) {
+                    ntp[i] = ptypes[i]
+                    nnn[i] = pnames[i]
+                }
+                type.ptr<type.ptr<type.Ty>> oldp = ptypes
+                type.ptr<type.text> oldn = pnames
+                ptypes = ntp
+                pnames = nnn
+                pcap = pcap * 2
+                release(oldp)
+                release(oldn)
+            }
+            ptypes[pn] = ty
+            pnames[pn] = toks.spelling(pos)
+            pn = pn + 1
+            advance()
+            when (is_at(toks.K_COMMA)) {
+                advance()
+                # continue to the next parameter
+            }
+            else {
+                when (is_at(toks.K_RPAREN) == false) {
+                    perr(cur_line(), cur_col(), "expected `,` or `)` in the parameter list.")
+                }
+                break
+            }
+        }
+    }
+    n.ptypes = ptypes
+    n.pnames = pnames
+    n.nparams = pn
+    when (is_at(toks.K_RPAREN)) {
+        advance()
+    }
+
+    # return type
+    when (is_at(toks.K_ARROW)) {
+        advance()
+        type.ptr<type.Ty> ty = parse_bare_type()
+        when (ty == null) {
+            sync_stmt()
+            return n
+        }
+        when (ty_is_auto(ty)) {
+            perr(cur_line(), cur_col(), "return types cannot use `type.auto` — write the return type explicitly.")
+            sync_stmt()
+            return n
+        }
+        when (ty.form == F_ARRAY) {
+            perr(cur_line(), cur_col(), "functions cannot return arrays directly in Okular.")
+            n.otype = scalar_ty(S_NUMBER)
+        }
+        else when (ty.form == F_NAMED) {
+            perr(cur_line(), cur_col(), "functions cannot return structs or unions directly in Okular 0.7.")
+            n.otype = scalar_ty(S_NUMBER)
+        }
+        else {
+            n.otype = ty
+        }
+    }
+    else {
+        # no `->`: the function has no result (void)
+        n.otype = scalar_ty(S_VOID)
+    }
+
+    # body
+    parse_stmt_list(n)
+    return n
+}
+
+# helper: a fresh scalar Ty for a code
+function.scalar_ty(number.code) -> type.ptr<type.Ty> {
+    type.ptr<type.Ty> t = new_ty()
+    t.form = F_SCALAR
+    t.scalar = code
+    return t
+}
+
+# `name = { members }.end` (namespace) — column declarations
+function.parse_devcol() -> type.ptr<type.Node> {
+    type.number tline = cur_line()
+    type.number tcol = cur_col()
+    type.ptr<type.Node> n = new_node(N_DEVCOL, tline, tcol)
+    n.name = toks.spelling(pos)
+    advance()
+    advance()
+    when (expect(toks.K_LBRACE) == false) {
+        sync_stmt()
+        return n
+    }
+    type.ptr<type.ptr<type.Node>> list = alloc<type.ptr<type.Node>>(8)
+    type.number lcap = 8
+    type.number ln = 0
+    loop (true) {
+        skip_nl()
+        when (is_at(toks.K_EOF)) {
+            perr(cur_line(), cur_col(), "column `" + n.name + "` is never closed (missing `}.end`).")
+            n.body = list
+            n.nbody = ln
+            return n
+        }
+        when (is_at(toks.K_RBRACE)) {
+            advance()
+            expect_end()
+            n.body = list
+            n.nbody = ln
+            return n
+        }
+        type.number before = pos
+        type.ptr<type.Node> m = null
+
+        when (is_at(toks.K_TYPE) and at_kind(1) == toks.K_DOT and at_kind(2) == toks.K_IDENT and at_kind(3) == toks.K_EQ) {
+            perr(cur_line(), cur_col(), "feature directives are file-level; move them out of the column.")
+            advance()
+            advance()
+            advance()
+            advance()
+            sync_stmt()
+        }
+        else when (is_at(toks.K_TYPE)) {
+            type.ptr<type.Ty> ty = parse_type_prefix()
+            when (ty == null) {
+                sync_stmt()
+            }
+            else when (is_at(toks.K_IDENT) == false) {
+                perr(cur_line(), cur_col(), "expected a member name in column `" + n.name + "`.")
+                sync_stmt()
+            }
+            else {
+                type.ptr<type.Node> v = new_node(N_VARDECL, tline, tcol)
+                v.otype = ty
+                v.name = toks.spelling(pos)
+                advance()
+                when (expect(toks.K_EQ) == false) {
+                }
+                else {
+                    v.a = parse_initializer()
+                    when (v.a != null) {
+                        when (ln == lcap) {
+                            type.ptr<type.ptr<type.Node>> nb = alloc<type.ptr<type.Node>>(lcap * 2)
+                            loop (i from 0 until ln) {
+                                nb[i] = list[i]
+                            }
+                            type.ptr<type.ptr<type.Node>> old = list
+                            list = nb
+                            lcap = lcap * 2
+                            release(old)
+                        }
+                        list[ln] = v
+                        ln = ln + 1
+                    }
+                }
+            }
+        }
+        else when (is_at(toks.K_FUNCTION)) {
+            m = parse_toplevel_function()
+            when (m != null) {
+                when (ln == lcap) {
+                    type.ptr<type.ptr<type.Node>> nb = alloc<type.ptr<type.Node>>(lcap * 2)
+                    loop (i from 0 until ln) {
+                        nb[i] = list[i]
+                    }
+                    type.ptr<type.ptr<type.Node>> old = list
+                    list = nb
+                    lcap = lcap * 2
+                    release(old)
+                }
+                list[ln] = m
+                ln = ln + 1
+            }
+        }
+        else when (is_at(toks.K_STRUCT)) {
+            m = parse_recorddecl(0)
+            when (m != null) {
+                when (ln == lcap) {
+                    type.ptr<type.ptr<type.Node>> nb = alloc<type.ptr<type.Node>>(lcap * 2)
+                    loop (i from 0 until ln) {
+                        nb[i] = list[i]
+                    }
+                    type.ptr<type.ptr<type.Node>> old = list
+                    list = nb
+                    lcap = lcap * 2
+                    release(old)
+                }
+                list[ln] = m
+                ln = ln + 1
+            }
+        }
+        else when (is_at(toks.K_UNION)) {
+            m = parse_recorddecl(1)
+            when (m != null) {
+                when (ln == lcap) {
+                    type.ptr<type.ptr<type.Node>> nb = alloc<type.ptr<type.Node>>(lcap * 2)
+                    loop (i from 0 until ln) {
+                        nb[i] = list[i]
+                    }
+                    type.ptr<type.ptr<type.Node>> old = list
+                    list = nb
+                    lcap = lcap * 2
+                    release(old)
+                }
+                list[ln] = m
+                ln = ln + 1
+            }
+        }
+        else when (is_at(toks.K_CONST)) {
+            m = parse_constdecl()
+            when (m != null) {
+                when (ln == lcap) {
+                    type.ptr<type.ptr<type.Node>> nb = alloc<type.ptr<type.Node>>(lcap * 2)
+                    loop (i from 0 until ln) {
+                        nb[i] = list[i]
+                    }
+                    type.ptr<type.ptr<type.Node>> old = list
+                    list = nb
+                    lcap = lcap * 2
+                    release(old)
+                }
+                list[ln] = m
+                ln = ln + 1
+            }
+        }
+        else when (is_at(toks.K_IDENT) and at_kind(1) == toks.K_EQ and at_kind(2) == toks.K_LBRACE) {
+            m = parse_devcol()
+            when (m != null) {
+                when (ln == lcap) {
+                    type.ptr<type.ptr<type.Node>> nb = alloc<type.ptr<type.Node>>(lcap * 2)
+                    loop (i from 0 until ln) {
+                        nb[i] = list[i]
+                    }
+                    type.ptr<type.ptr<type.Node>> old = list
+                    list = nb
+                    lcap = lcap * 2
+                    release(old)
+                }
+                list[ln] = m
+                ln = ln + 1
+            }
+        }
+        else {
+            perr(cur_line(), cur_col(), "columns contain declarations (variables, functions, nested columns), but found " + kind_name(cur_kind()) + ".")
+            sync_stmt()
+        }
+        when (pos == before) {
+            advance()
+        }
+    }
+    return n
+}
+
+# ---- the file ----
+
+function.parse_toplevel() -> type.ptr<type.Node> {
+    type.number k = cur_kind()
+    type.number tline = cur_line()
+    type.number tcol = cur_col()
+
+    when (k == toks.K_TYPE) {
+        # directive: type.<feature>=value (spec §5)
+        when (at_kind(1) == toks.K_DOT and at_kind(2) == toks.K_IDENT and at_kind(3) == toks.K_EQ) {
+            type.text feat = toks.spelling(pos + 2)
+            type.ptr<type.Node> n = new_node(N_DIRECTIVE, tline, tcol)
+            n.feature = -1
+            when (feat == "text") {
+                n.feature = FEAT_TEXT
+            }
+            else {
+                perr(tline, tcol, "unknown feature directive `type." + feat + "=...`.")
+            }
+            advance()
+            advance()
+            advance()
+            advance()
+            when (is_at(toks.K_INT)) {
+                n.fvalue = spell_int_value(toks.spelling(pos))
+                advance()
+            }
+            else {
+                perr(cur_line(), cur_col(), "a feature directive value is 0 or 1.")
+                n.fvalue = 0
+                sync_stmt()
+            }
+            when (n.fvalue != 0 and n.fvalue != 1) {
+                perr(tline, tcol, "feature directive values are 0 (off) or 1 (on).")
+                when (n.fvalue != 0) {
+                    n.fvalue = 1
+                }
+            }
+            return n
+        }
+        # otherwise: top-level variable declaration (global)
+        type.ptr<type.Ty> ty = parse_type_prefix()
+        when (ty == null) {
+            sync_stmt()
+            return null
+        }
+        when (is_at(toks.K_IDENT) == false) {
+            perr(cur_line(), cur_col(), "expected a variable name after the type.")
+            sync_stmt()
+            return null
+        }
+        type.ptr<type.Node> n = new_node(N_VARDECL, tline, tcol)
+        n.otype = ty
+        n.name = toks.spelling(pos)
+        advance()
+        when (expect(toks.K_EQ) == false) { return null }
+        n.a = parse_initializer()
+        when (n.a == null) { return null }
+        return n
+    }
+    when (k == toks.K_LBRACKET) {
+        return parse_langcol()
+    }
+    when (k == toks.K_FUNCTION) {
+        return parse_toplevel_function()
+    }
+    when (k == toks.K_STRUCT) {
+        return parse_recorddecl(0)
+    }
+    when (k == toks.K_UNION) {
+        return parse_recorddecl(1)
+    }
+    when (k == toks.K_CONST) {
+        return parse_constdecl()
+    }
+    when (k == toks.K_IDENT) {
+        when (at_kind(1) == toks.K_EQ and at_kind(2) == toks.K_LBRACE) {
+            return parse_devcol()
+        }
+        return parse_stmt()
+    }
+    return parse_stmt()
+}
+
+# entry: parse the loaded token buffer; returns the A_FILE root.
+# Mirrors parse_file_tokens (the registry is seeded by the caller).
+function.parse_file() -> type.ptr<type.Node> {
+    pos = 0
+    type.ptr<type.Node> file = new_node(N_FILE, 1, 1)
+    type.ptr<type.ptr<type.Node>> list = alloc<type.ptr<type.Node>>(16)
+    type.number lcap = 16
+    type.number ln = 0
+
+    loop (true) {
+        skip_nl()
+        when (is_at(toks.K_EOF)) {
+            file.body = list
+            file.nbody = ln
+            return file
+        }
+        when (is_at(toks.K_RBRACE)) {
+            perr(cur_line(), cur_col(), "unexpected `}` — there is no open block here.")
+            advance()
+        }
+        else when (is_at(toks.K_DOT) and at_kind(1) == toks.K_END) {
+            perr(cur_line(), cur_col(), "unexpected `.end` — there is no open column here (spec §3.1).")
+            advance()
+            advance()
+        }
+        else when (is_at(toks.K_RBRACKET)) {
+            perr(cur_line(), cur_col(), "unexpected `]` — there is no open `[` column name here.")
+            advance()
+        }
+        else {
+            type.number before = pos
+            type.ptr<type.Node> top = parse_toplevel()
+            when (top != null) {
+                when (ln == lcap) {
+                    type.ptr<type.ptr<type.Node>> nb = alloc<type.ptr<type.Node>>(lcap * 2)
+                    loop (i from 0 until ln) {
+                        nb[i] = list[i]
+                    }
+                    type.ptr<type.ptr<type.Node>> old = list
+                    list = nb
+                    lcap = lcap * 2
+                    release(old)
+                }
+                list[ln] = top
+                ln = ln + 1
+            }
+            when (pos == before) {
+                advance()
+            }
+            when (is_at(toks.K_NL) == false and is_at(toks.K_EOF) == false and is_at(toks.K_RBRACE) == false) {
+                perr(cur_line(), cur_col(), "expected the end of the line after this item.")
+                sync_stmt()
+            }
+        }
+    }
+    return file
+}

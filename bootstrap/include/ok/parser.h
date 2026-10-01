@@ -15,4 +15,13 @@ Node *parse_file_tokens(TokList *toks, SourceFile *f, DiagEngine *de, Arena *ar)
  * the project loader calls this for every module before parsing any */
 void parser_register_struct_names(TokList *toks);
 
+/* the shared placeholder for a named struct/union type (spec §8.3);
+ * the machine-AST deserializer maps `T n:Name` records through this so
+ * reconstructed trees reference the same interned types as C parses */
+OkType parser_named_type_public(const char *name);
+
+/* every registered struct/union name; the --selfhost-parse bridge passes
+ * them to the Okular parser so cross-file references resolve */
+void parser_named_type_names(Vec *out);
+
 #endif /* OK_PARSER_H */

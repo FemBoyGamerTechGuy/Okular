@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/run_tests.sh — the Okular 0.12 test suite (brief §51).
+# tools/run_tests.sh — the Okular 0.13 test suite (brief §51).
 #
 # Layout: tests/cases/{positive,negative,policy,flags}/<name>/
 #   main.ok (+ src/)          the project
@@ -18,6 +18,7 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OKULAR="$REPO/build/okular"
 SELFHOST_LEX="$REPO/selfhost/lexer/build/output/main"
+SELFHOST_PARSE="$REPO/selfhost/parser/build/output/main"
 CASES="$REPO/tests/cases"
 TMP="$REPO/tests/tmp"
 
@@ -27,6 +28,10 @@ if [ ! -x "$OKULAR" ]; then
 fi
 if [ ! -x "$SELFHOST_LEX" ]; then
     echo "run_tests: self-hosted lexer not built at $SELFHOST_LEX — run \`make selfhost-lex\` first." >&2
+    exit 2
+fi
+if [ ! -x "$SELFHOST_PARSE" ]; then
+    echo "run_tests: self-hosted parser not built at $SELFHOST_PARSE — run \`make selfhost-parse\` first." >&2
     exit 2
 fi
 
@@ -62,6 +67,7 @@ run_one() { # run_one <group> <casedir>
     local flags=""
     if [ -f "$work/flags" ]; then flags="$(cat "$work/flags")"; fi
     flags="${flags//@selfhost@/$SELFHOST_LEX}"
+    flags="${flags//@selfhostparser@/$SELFHOST_PARSE}"
 
     # program arguments (0.12: the env builtins) — split on spaces
     local prog_args=()
@@ -134,7 +140,7 @@ run_one() { # run_one <group> <casedir>
     esac
 }
 
-echo "== Okular 0.12 test suite =="
+echo "== Okular 0.13 test suite =="
 
 for group in positive negative policy flags; do
     echo "-- $group"
@@ -143,6 +149,24 @@ for group in positive negative policy flags; do
         run_one "$group" "${dir%/}"
     done
 done
+
+# differential verification (M4): every positive case parses to a
+# BYTE-IDENTICAL machine AST through the Okular-written parser and the C
+# parser (--selfhost-verify compares the serializations)
+echo "-- differential (selfhost parser vs C parser)"
+diff_ok=0
+diff_bad=0
+for dir in "$CASES/positive"/*/; do
+    [ -d "$dir" ] || continue
+    name="$(basename "$dir")"
+    if $OKULAR --selfhost-verify "$SELFHOST_PARSE" "$dir/main.ok" >/dev/null 2>&1; then
+        diff_ok=$((diff_ok + 1))
+    else
+        diff_bad=$((diff_bad + 1))
+        echo "  FAIL: differential/$name"
+    fi
+done
+check "differential: all positive cases identical" [ "$diff_bad" -eq 0 ]
 
 echo
 echo "passed: $pass   failed: $fail"

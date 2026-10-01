@@ -89,6 +89,10 @@ struct Node {
     char *str;           /* text literal (owned) */
     size_t str_len;
     char *name;          /* vardecl / function / devcol / loop-var name (owned) */
+    char *spell;         /* raw source spelling of INT/DEC/TEXT literals (owned):
+                          * the machine AST protocol serializes spellings and
+                          * re-derives values, so unsigned 64-bit literals and
+                          * escape processing stay identical by construction */
 
     /* dotted paths: parts[0].parts[1]... (owned strings) */
     char **parts;
@@ -101,6 +105,9 @@ struct Node {
     Vec body_else;       /* Node* else-body of when */
     Vec args;            /* Node* call arguments */
     Vec items;           /* char* language-column string items */
+    Vec items_spell;     /* char* language-column RAW spellings (parallel to items;
+                          * serialization only — the machine AST protocol carries
+                          * raw spellings and unescapes on the consumer side) */
 
     OkType otype;        /* vardecl type / function return type / A_CONV target type */
     Param *params;       /* function parameters (owned array) */

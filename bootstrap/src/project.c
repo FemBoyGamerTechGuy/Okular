@@ -93,13 +93,20 @@ static void module_lex(OkModule *m, DiagEngine *de) {
 }
 
 /* Parse one module (phase B): the parser's struct-name registry has been
- * seeded from every module's tokens by the caller. */
+ * seeded from every module's tokens by the caller. With --selfhost-parse
+ * the PARSING itself runs in Okular: the compiled selfhost/parser program
+ * lexes and parses the file, and the machine AST stream is rebuilt into
+ * the same Node trees sema consumes (the C lexer's tokens are still used
+ * for the lightweight prescan above). */
 static void module_parse(OkModule *m, DiagEngine *de) {
     if (m->state == MOD_FAILED || !m->toks) return;
     size_t mark = de->errors;
     m->arena = arena_new();
-    m->ast = parse_file_tokens(m->toks, m->src, de, m->arena);
-    if (de->errors > mark) {
+    if (selfhost_parse_enabled())
+        m->ast = selfhost_parse_file(m->src, m->path, de, m->arena);
+    else
+        m->ast = parse_file_tokens(m->toks, m->src, de, m->arena);
+    if (!m->ast || de->errors > mark) {
         m->state = MOD_FAILED;
         m->broken = true;
     }

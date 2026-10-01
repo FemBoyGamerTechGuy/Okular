@@ -1,0 +1,12 @@
+guard-null
+guard-index
+or-short
+0
+and-short
+0
+and-both
+2
+or-both
+2
+value-or
+value-and

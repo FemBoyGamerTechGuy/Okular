@@ -13,7 +13,7 @@
 #include <stdbool.h>
 #include <stdarg.h>
 
-#define OK_VERSION "0.12"
+#define OK_VERSION "0.13"
 #define OK_MAX_ERRORS 50
 #define OK_OUTBUF_BYTES 65536
 #define OK_TEXT_ARENA_BYTES (1 << 20)
@@ -37,6 +37,14 @@ typedef struct OkOptions {
     /* --selfhost-lex <binary>: tokenize through the Okular-written lexer
      * (M4 bridge, docs/roadmap.md) instead of bootstrap/src/lexer.c */
     const char *selfhost_lex;
+    /* --selfhost-parse <binary>: parse through the Okular-written parser
+     * (M4 bridge) instead of bootstrap/src/parser.c — lexing may still
+     * run in C for the module prescan */
+    const char *selfhost_parse;
+    /* --selfhost-verify <binary>: parse every module BOTH ways and compare
+     * the machine AST serializations byte for byte (differential testing
+     * while the C implementation exists) */
+    const char *selfhost_verify;
     /* debug dumps (used by the test suite) */
     bool dump_tokens, dump_ast, dump_ir, dump_symbols, emit_asm_only;
 } OkOptions;

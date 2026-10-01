@@ -1,0 +1,97 @@
+type.text=1
+
+# short_circuit — `and`/`or` evaluate the right operand only when it can
+# change the result (0.13, spec §9). Before this, `p != null and *p == 5`
+# trapped on the null dereference and `i < n and xs[i] == v` trapped on
+# the bounds check: guarding was impossible.
+
+type.number calls = 0
+
+function.t() -> bool {
+    calls = calls + 1
+    return true
+}
+
+function.f() -> bool {
+    calls = calls + 1
+    return false
+}
+
+function.main() -> number {
+    # 1. null-guarded dereference: no trap
+    type.ptr<type.number> p = null
+    when (p != null and *p == 5) {
+        write("bad")
+    }
+    else {
+        write("guard-null")
+    }
+    print
+
+    # 2. bounds-guarded index: no trap
+    type.array<type.number, 3> xs = {1, 2, 3}
+    type.number i = 10
+    when (i < 3 and xs[i] == 2) {
+        write("bad")
+    }
+    else {
+        write("guard-index")
+    }
+    print
+
+    # 3. or: left true short-circuits the right
+    calls = 0
+    type.number before = 0
+    when (true or t()) {
+        write("or-short")
+    }
+    print
+    write(calls)
+    print
+
+    # 4. and: left false short-circuits the right
+    calls = 0
+    when (false and t()) {
+        write("bad")
+    }
+    else {
+        write("and-short")
+    }
+    print
+    write(calls)
+    print
+
+    # 5. both evaluated when needed
+    calls = 0
+    when (t() and t()) {
+        write("and-both")
+    }
+    print
+    write(calls)
+    print
+    calls = 0
+    when (f() or t()) {
+        write("or-both")
+    }
+    print
+    write(calls)
+    print
+
+    # 6. value results, not just conditions
+    type.bool r = f() or t()
+    when (r) {
+        write("value-or")
+    }
+    print
+    type.bool q = t() and f()
+    when (q) {
+        write("bad")
+    }
+    else {
+        write("value-and")
+    }
+    print
+    return 0
+}
+
+main()

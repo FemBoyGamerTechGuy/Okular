@@ -49,6 +49,20 @@ static OkType parser_named_type(Parser *p, const char *name) {
     return e->placeholder;
 }
 
+/* public wrapper: the machine-AST deserializer maps `T n:Name` records to
+ * the same shared placeholder the C parser would have produced */
+OkType parser_named_type_public(const char *name) {
+    return parser_named_type(NULL, name);
+}
+
+/* every registered struct/union name (the --selfhost-parse bridge passes
+ * them to the Okular parser so cross-file references resolve, spec §8.3) */
+void parser_named_type_names(Vec *out) {
+    for (size_t b = 0; b < 64; b++)
+        for (NamedTypeEntry *e = named_types[b]; e; e = e->next)
+            vec_push(out, ok_xstrdup(e->name));
+}
+
 /* pre-scan a token stream for `struct . NAME = {` so every reference to
  * NAME — including ones parsed before the declaration, and in other files
  * — shares one placeholder (spec §8.3: forward references are legal).
@@ -335,18 +349,21 @@ static Node *parse_primary(Parser *p) {
     switch (t->kind) {
     case T_INT: {
         Node *n = node_new(p->ar, A_INT, t->line, t->col);
+        n->spell = ok_xstrndup(p->f->data + t->off, t->len);
         n->ival = t->ival;
         advance(p);
         return n;
     }
     case T_DEC: {
         Node *n = node_new(p->ar, A_DEC, t->line, t->col);
+        n->spell = ok_xstrndup(p->f->data + t->off, t->len);
         n->dval = t->dval;
         advance(p);
         return n;
     }
     case T_TEXT: {
         Node *n = node_new(p->ar, A_TEXT, t->line, t->col);
+        n->spell = ok_xstrndup(p->f->data + t->off, t->len);
         n->str = ok_xstrdup(t->text);
         n->str_len = t->slen;
         advance(p);
@@ -1019,6 +1036,8 @@ static Node *parse_langcol(Parser *p) {
         skip_nl(p);
         if (is(p, T_TEXT)) {
             svec_push((StrVec *)&n->items, ok_xstrdup(cur(p)->text));
+            svec_push((StrVec *)&n->items_spell,
+                      ok_xstrndup(p->f->data + cur(p)->off, cur(p)->len));
             advance(p);
             skip_nl(p);
             if (is(p, T_COMMA)) { advance(p); continue; }

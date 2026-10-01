@@ -244,13 +244,15 @@ function.scan_text_lit() -> number {
     type.number s_line = line
     type.number s_col = col
     advance()
-    loop (pos < len and cur() != 34) {
+    # the literal ends at the closing quote; a newline or EOF leaves it
+    # unterminated (an error the consumer reports — bootstrap/src/lexer.c)
+    loop (pos < len and cur() != 34 and cur() != 10) {
         when (cur() == 92 and pos + 1 < len) {
             advance()
         }
         advance()
     }
-    when (pos < len) {
+    when (pos < len and cur() == 34) {
         advance()
     }
     type.text sp = text.slice(src, s_off, pos)
@@ -270,13 +272,13 @@ function.scan_number() -> number {
         }
     }
     else {
-        loop (pos < len and is_digit(cur())) {
+        loop (pos < len and (is_digit(cur()) or cur() == 95)) {
             advance()
         }
         when (cur() == 46 and is_digit(look())) {
             is_decimal = 1
             advance()
-            loop (pos < len and is_digit(cur())) {
+            loop (pos < len and (is_digit(cur()) or cur() == 95)) {
                 advance()
             }
         }

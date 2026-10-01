@@ -1,0 +1,6 @@
+record-copy
+33
+10
+kw
+deref-copy
+array-elem-copy

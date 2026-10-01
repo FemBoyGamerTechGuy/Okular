@@ -7,6 +7,8 @@
 #include "ok/ir.h"
 #include "ok/codegen.h"
 #include "ok/selfhost.h"
+#include "ok/parser.h"
+#include "ok/ast.h"
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -84,6 +86,75 @@ int driver_compile(OkOptions *opt) {
     /* M4 bridge: route tokenization through the Okular-written lexer when
      * requested (--selfhost-lex); set before anything lexes a file */
     selfhost_set_lexer(opt->selfhost_lex);
+    /* M4 bridge: route parsing through the Okular-written parser when
+     * requested (--selfhost-parse) */
+    selfhost_set_parser(opt->selfhost_parse);
+
+    /* --selfhost-verify BIN: differential testing — every module is
+     * parsed BOTH ways and the machine AST serializations compared byte
+     * for byte. Equal streams mean identical trees: the Okular parser
+     * is a drop-in replacement for the C one on this input. */
+    if (opt->selfhost_verify) {
+        /* the project itself parses in C (the reference); each module is
+         * then re-parsed through the Okular binary and compared */
+        selfhost_set_parser(NULL);
+        OkProject *proj = project_load(opt->main_path, &de, false);
+        selfhost_set_parser(opt->selfhost_verify);
+        if (!proj) {
+            diag_render_all(&de);
+            diag_free(&de);
+            return 2;
+        }
+        size_t mismatches = 0, compared = 0;
+        for (size_t i = 0; i < proj->modules.len; i++) {
+            OkModule *m = proj->modules.items[i];
+            if (!m->src || m->state == MOD_FAILED) continue;
+
+            /* C side: serialize the already-parsed tree */
+            Buf want;
+            buf_init(&want);
+            ast_serialize(m->ast, &want);
+
+            /* Okular side: the bridge parse of the same file */
+            size_t mark = de.errors;
+            Arena *ar = arena_new();
+            Node *theirs = selfhost_parse_file(m->src, m->path, &de, ar);
+            if (de.errors > mark || !theirs) {
+                diag_emit(&de, DIAG_ERROR, m->src, 1, 1,
+                          "selfhost verify: the Okular parser failed on `%s` where the C parser succeeded.",
+                          m->display);
+                mismatches++;
+                arena_free(ar);
+                buf_free(&want);
+                continue;
+            }
+            Buf got;
+            buf_init(&got);
+            ast_serialize(theirs, &got);
+            compared++;
+            if (want.len != got.len ||
+                (want.len > 0 && memcmp(want.data, got.data, want.len) != 0)) {
+                size_t at = 0;
+                size_t limit = want.len < got.len ? want.len : got.len;
+                while (at < limit && want.data[at] == got.data[at]) at++;
+                Diag *d = diag_emit(&de, DIAG_ERROR, m->src, 1, 1,
+                                    "selfhost verify: the Okular parser's AST differs from the C parser's at byte %zu of `%s`.",
+                                    at, m->display);
+                (void)d;
+                mismatches++;
+            }
+            arena_free(ar);
+            buf_free(&want);
+            buf_free(&got);
+        }
+        fprintf(stderr,
+                "selfhost verify: %zu module(s) compared, %zu mismatch(es).\n",
+                compared, mismatches);
+        diag_render_all(&de);
+        project_free(proj);
+        diag_free(&de);
+        return mismatches ? 1 : 0;
+    }
 
     /* debug dumps that only need the front end */
     if (opt->dump_tokens || opt->dump_ast) {

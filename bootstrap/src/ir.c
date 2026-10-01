@@ -474,6 +474,53 @@ static void build_expr(Ctx *c, Node *e) {
             emit(c->f, inst);
             break;
         }
+        /* `and`/`or` short-circuit (0.13, spec §9): the right operand is
+         * evaluated only when it can change the result. Guarding a
+         * dereference or an index behind a condition — `p != null and *p == x`,
+         * `i < n and xs[i] == v` — is a normal Okular idiom; eager
+         * evaluation would trap. Two literal operands still fold. */
+        if (e->op == OP_AND || e->op == OP_OR) {
+            if (e->a->kind == A_BOOL && e->b->kind == A_BOOL) {
+                bool lv = e->a->bval, rv = e->b->bval;
+                IrInst k = { .kind = I_CONST_BOOL, .type = ty_bool,
+                             .b = e->op == OP_AND ? (lv && rv) : (lv || rv),
+                             .line = e->line, .col = e->col };
+                emit(c->f, k);
+                break;
+            }
+            int l_end = new_label(c->f);
+            build_operand_conv(c, e->a, ty_bool);
+            if (e->op == OP_AND) {
+                int l_false = new_label(c->f);
+                IrInst jf = { .kind = I_JMPF, .label = l_false,
+                              .line = e->line, .col = e->col };
+                emit(c->f, jf);
+                build_operand_conv(c, e->b, ty_bool);
+                IrInst j = { .kind = I_JMP, .label = l_end,
+                             .line = e->line, .col = e->col };
+                emit(c->f, j);
+                IrInst lf = { .kind = I_LABEL, .label = l_false };
+                emit(c->f, lf);
+                IrInst z = { .kind = I_CONST_BOOL, .type = ty_bool, .b = false };
+                emit(c->f, z);
+            } else {
+                int l_rhs = new_label(c->f);
+                IrInst jf = { .kind = I_JMPF, .label = l_rhs,
+                              .line = e->line, .col = e->col };
+                emit(c->f, jf);
+                IrInst t = { .kind = I_CONST_BOOL, .type = ty_bool, .b = true };
+                emit(c->f, t);
+                IrInst j = { .kind = I_JMP, .label = l_end,
+                             .line = e->line, .col = e->col };
+                emit(c->f, j);
+                IrInst lr = { .kind = I_LABEL, .label = l_rhs };
+                emit(c->f, lr);
+                build_operand_conv(c, e->b, ty_bool);
+            }
+            IrInst le = { .kind = I_LABEL, .label = l_end };
+            emit(c->f, le);
+            break;
+        }
         /* operand type after literal adaptation + widening: sema stashed
          * the common type on the node (e->otype); recompute as fallback
          * for recovery paths (spec §4.4). Pointer arithmetic lowers here
@@ -673,8 +720,11 @@ static void build_stmt(StmtCtx *sc, Node *s) {
                           .line = s->line, .col = s->col };
             emit(f, ix);
         }
-        if (ty_kind(elem) == OK_ARRAY) {
-            /* element is itself an array: value is its address, copy it */
+        if (ty_kind(elem) == OK_ARRAY || ty_is_record(elem)) {
+            /* element is an array or a record: the value expression
+             * evaluates to its ADDRESS, copy the bytes (0.13 fix: records
+             * fell through to the scalar store and stored the address —
+             * 8 bytes of pointer instead of the struct; struct_ptr_copy) */
             build_expr(c, s->c);
             IrInst cp = { .kind = I_COPY, .type = elem, .i = ty_bytes(elem),
                           .line = s->line, .col = s->col };
@@ -697,8 +747,10 @@ static void build_stmt(StmtCtx *sc, Node *s) {
         IrInst chk = { .kind = I_PTRCHK, .type = elem,
                       .line = s->line, .col = s->col };
         emit(f, chk);
-        if (ty_kind(elem) == OK_ARRAY) {
-            /* *p = arr: dst address already on the stack; copy src into it */
+        if (ty_kind(elem) == OK_ARRAY || ty_is_record(elem)) {
+            /* *p = arr-or-record: dst address already on the stack; copy
+             * src into it (0.13: records fell through to the scalar store
+             * and stored the source's address — struct_ptr_copy) */
             build_expr(c, s->c);
             IrInst cp = { .kind = I_COPY, .type = elem, .i = ty_bytes(elem),
                           .line = s->line, .col = s->col };

@@ -1,0 +1,404 @@
+# main.ok — runs the Okular-written parser (self-hosting, M4).
+#
+# Usage: okparser <file.ok> [--names name ...]
+#
+# With --names, the listed struct/union names are pre-registered before
+# parsing (the compiler bridge passes the project-wide flat type
+# namespace; spec §8.3). Output is the machine AST stream on stdout:
+#
+#   E <line> <col> <len> <message bytes> NL   — parse error record
+#   N <kind> <line> <col> NL                  — node header
+#   I <int> NL                                — integer payload
+#   D <spelling> NL                           — decimal literal spelling
+#   S <len> <bytes> NL                        — raw string payload
+#   P <n> NL, then n S records                — dotted path
+#   T s:<name> NL | T p NL <elem> | T a:<n> NL <elem> | T n:<name> NL
+#   L <n> NL, then n nodes (or S records for language columns)
+#
+# Text and number literals serialize as their RAW SOURCE SPELLINGS; the
+# consuming side re-derives values (exactly what the token bridge does),
+# so unsigned 64-bit literals and escape processing stay identical by
+# construction.
+
+type.text=1
+
+[source.files.use] = {
+    "toks",
+    "parser"
+}.end
+
+# ---- record emitters ----
+
+function.emit_str(text.s) -> number {
+    write("S ")
+    write(text.length(s))
+    write(" ")
+    write(s)
+    print
+    return 0
+}
+
+function.emit_int(number.v) -> number {
+    write("I ")
+    write(v)
+    print
+    return 0
+}
+
+function.emit_dec(text.spelling) -> number {
+    write("D ")
+    write(spelling)
+    print
+    return 0
+}
+
+function.emit_path(type.ptr<type.text>.parts, number.n) -> number {
+    write("P ")
+    write(n)
+    print
+    loop (i from 0 until n) {
+        emit_str(parts[i])
+    }
+    return 0
+}
+
+function.emit_nil() -> number {
+    write("X")
+    print
+    return 0
+}
+
+function.emit_ty(type.ptr<type.Ty>.t) -> number {
+    when (t == null) {
+        write("T s:void")
+        print
+        return 0
+    }
+    when (t.form == parser.F_SCALAR) {
+        when (t.scalar == parser.S_VOID) {
+            write("T s:void")
+            print
+            return 0
+        }
+        write("T s:")
+        write(parser.scalar_name(t.scalar))
+        print
+        return 0
+    }
+    when (t.form == parser.F_ARRAY) {
+        write("T a:")
+        write(t.count)
+        print
+        return emit_ty(t.elem)
+    }
+    when (t.form == parser.F_PTR) {
+        write("T p")
+        print
+        return emit_ty(t.elem)
+    }
+    write("T n:")
+    write(t.sname)
+    print
+    return 0
+}
+
+# ---- node emitters ----
+
+function.emit_node_or_nil(type.ptr<type.Node>.n) -> number {
+    when (n == null) {
+        return emit_nil()
+    }
+    return emit_node(n)
+}
+
+function.emit_node(type.ptr<type.Node>.n) -> number {
+    write("N ")
+    write(n.kind)
+    write(" ")
+    write(n.line)
+    write(" ")
+    write(n.col)
+    print
+
+    when (n.kind == parser.N_INT) {
+        return emit_str(n.str)
+    }
+    when (n.kind == parser.N_DEC) {
+        return emit_dec(n.str)
+    }
+    when (n.kind == parser.N_TEXT) {
+        return emit_str(n.str)
+    }
+    when (n.kind == parser.N_BOOL) {
+        return emit_int(n.bval)
+    }
+    when (n.kind == parser.N_PATH) {
+        return emit_path(n.parts, n.nparts)
+    }
+    when (n.kind == parser.N_CALL) {
+        emit_path(n.parts, n.nparts)
+        write("L ")
+        write(n.nargs)
+        print
+        loop (i from 0 until n.nargs) {
+            emit_node(n.args[i])
+        }
+        return 0
+    }
+    when (n.kind == parser.N_WRITE) {
+        write("L ")
+        write(n.nargs)
+        print
+        loop (i from 0 until n.nargs) {
+            emit_node(n.args[i])
+        }
+        return 0
+    }
+    when (n.kind == parser.N_BIN) {
+        emit_int(n.op)
+        emit_node_or_nil(n.a)
+        emit_node_or_nil(n.b)
+        return 0
+    }
+    when (n.kind == parser.N_UN) {
+        emit_int(n.uop)
+        emit_node_or_nil(n.a)
+        return 0
+    }
+    when (n.kind == parser.N_ARRAYLIT) {
+        write("L ")
+        write(n.nargs)
+        print
+        loop (i from 0 until n.nargs) {
+            emit_node(n.args[i])
+        }
+        return 0
+    }
+    when (n.kind == parser.N_INDEX) {
+        emit_node_or_nil(n.a)
+        emit_node_or_nil(n.b)
+        return 0
+    }
+    when (n.kind == parser.N_NULL) {
+        return 0
+    }
+    when (n.kind == parser.N_ALLOC) {
+        emit_ty(n.otype)
+        emit_node_or_nil(n.a)
+        return 0
+    }
+    when (n.kind == parser.N_MEMBER) {
+        emit_str(n.name)
+        emit_node_or_nil(n.a)
+        return 0
+    }
+    when (n.kind == parser.N_VARDECL) {
+        emit_ty(n.otype)
+        emit_str(n.name)
+        emit_node_or_nil(n.a)
+        return 0
+    }
+    when (n.kind == parser.N_ASSIGN) {
+        emit_path(n.parts, n.nparts)
+        emit_node_or_nil(n.a)
+        return 0
+    }
+    when (n.kind == parser.N_INDEXASSIGN) {
+        emit_node_or_nil(n.a)
+        emit_node_or_nil(n.b)
+        emit_node_or_nil(n.c)
+        return 0
+    }
+    when (n.kind == parser.N_DEREFASSIGN) {
+        emit_node_or_nil(n.a)
+        emit_node_or_nil(n.c)
+        return 0
+    }
+    when (n.kind == parser.N_RELEASE) {
+        emit_node_or_nil(n.a)
+        return 0
+    }
+    when (n.kind == parser.N_FIELDASSIGN) {
+        emit_str(n.name)
+        emit_node_or_nil(n.a)
+        emit_node_or_nil(n.c)
+        return 0
+    }
+    when (n.kind == parser.N_EXPRSTMT) {
+        emit_node_or_nil(n.a)
+        return 0
+    }
+    when (n.kind == parser.N_WHEN) {
+        emit_node_or_nil(n.a)
+        write("L ")
+        write(n.nbody)
+        print
+        loop (i from 0 until n.nbody) {
+            emit_node(n.body[i])
+        }
+        write("L ")
+        write(n.nbody_else)
+        print
+        loop (i from 0 until n.nbody_else) {
+            emit_node(n.body_else[i])
+        }
+        return 0
+    }
+    when (n.kind == parser.N_LOOP_COUNT) {
+        emit_str(n.name)
+        emit_int(n.inclusive)
+        emit_node_or_nil(n.a)
+        emit_node_or_nil(n.b)
+        write("L ")
+        write(n.nbody)
+        print
+        loop (i from 0 until n.nbody) {
+            emit_node(n.body[i])
+        }
+        return 0
+    }
+    when (n.kind == parser.N_LOOP_COND) {
+        emit_node_or_nil(n.a)
+        write("L ")
+        write(n.nbody)
+        print
+        loop (i from 0 until n.nbody) {
+            emit_node(n.body[i])
+        }
+        return 0
+    }
+    when (n.kind == parser.N_BREAK or n.kind == parser.N_CONTINUE or n.kind == parser.N_PRINT) {
+        return 0
+    }
+    when (n.kind == parser.N_RETURN) {
+        when (n.a == null) {
+            emit_int(0)
+        }
+        else {
+            emit_int(1)
+            emit_node(n.a)
+        }
+        return 0
+    }
+    when (n.kind == parser.N_DIRECTIVE) {
+        emit_int(n.feature)
+        emit_int(n.fvalue)
+        return 0
+    }
+    when (n.kind == parser.N_LANGCOL) {
+        emit_path(n.parts, n.nparts)
+        write("L ")
+        write(n.nitems)
+        print
+        loop (i from 0 until n.nitems) {
+            emit_str(n.items[i])
+        }
+        return 0
+    }
+    when (n.kind == parser.N_DEVCOL) {
+        emit_str(n.name)
+        write("L ")
+        write(n.nbody)
+        print
+        loop (i from 0 until n.nbody) {
+            emit_node(n.body[i])
+        }
+        return 0
+    }
+    when (n.kind == parser.N_STRUCTDECL or n.kind == parser.N_UNIONDECL) {
+        emit_str(n.name)
+        write("L ")
+        write(n.nparams)
+        print
+        loop (i from 0 until n.nparams) {
+            emit_ty(n.ptypes[i])
+            emit_str(n.pnames[i])
+        }
+        return 0
+    }
+    when (n.kind == parser.N_CONSTDECL) {
+        emit_str(n.name)
+        emit_node_or_nil(n.a)
+        return 0
+    }
+    when (n.kind == parser.N_FUNC) {
+        emit_str(n.name)
+        write("L ")
+        write(n.nparams)
+        print
+        loop (i from 0 until n.nparams) {
+            emit_ty(n.ptypes[i])
+            emit_str(n.pnames[i])
+        }
+        emit_ty(n.otype)
+        write("L ")
+        write(n.nbody)
+        print
+        loop (i from 0 until n.nbody) {
+            emit_node(n.body[i])
+        }
+        return 0
+    }
+    when (n.kind == parser.N_FILE) {
+        write("L ")
+        write(n.nbody)
+        print
+        loop (i from 0 until n.nbody) {
+            emit_node(n.body[i])
+        }
+        return 0
+    }
+
+    # unknown node kind: a protocol error record, then stop
+    write("E 1 1 26 unknown AST node kind.")
+    print
+    return 0
+}
+
+# ---- the driver ----
+
+function.main() -> number {
+    when (env.arg_count() < 2) {
+        write("usage: okparser <file.ok> [--names n1 n2 ...]")
+        print
+        return 2
+    }
+    type.text path = env.arg(1)
+
+    toks.load(path)
+    when (toks.get_err_kind() != toks.ERR_NONE) {
+        write("E ")
+        write(toks.get_err_line())
+        write(" ")
+        write(toks.get_err_col())
+        write(" 28 unexpected byte in source.")
+        print
+        return 0
+    }
+
+    parser.register_struct_names()
+    when (env.arg_count() > 2 and env.arg(2) == "--names") {
+        parser.seed_names(env.arg_count(), 3)
+    }
+
+    type.ptr<type.Node> file = parser.parse_file()
+
+    # errors first, then the tree; the consumer rejects the tree when any
+    # E record is present (the module is broken either way)
+    loop (i from 0 until parser.error_count()) {
+        write("E ")
+        write(parser.err_line_at(i))
+        write(" ")
+        write(parser.err_col_at(i))
+        write(" ")
+        write(text.length(parser.err_msg_at(i)))
+        write(" ")
+        write(parser.err_msg_at(i))
+        print
+    }
+
+    emit_node(file)
+    return 0
+}
+
+main()

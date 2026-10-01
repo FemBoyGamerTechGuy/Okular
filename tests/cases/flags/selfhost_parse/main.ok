@@ -1,0 +1,54 @@
+type.text=1
+
+# This program is PARSED by the Okular-written parser (selfhost/parser):
+# --selfhost-parse routes the compiler's parsing phase through the
+# compiled Okular program; sema, IR, and codegen then consume the
+# reconstructed AST exactly as if the C parser had built it. Every
+# construct rides along: structs, pointers, arrays, unions, literals.
+
+const.mask = 0xF0F0 | 0x000F
+
+struct.Pt = {
+    type.number x
+    type.number y
+}.end
+
+union.Cell = {
+    type.uint32 bits
+    type.array<type.uint8, 4> bytes
+}.end
+
+type.array<type.number, 3> xs = {1, 2, 3}
+type.ptr<type.ptr<type.number>> pp = null
+
+function.main() -> number {
+    type.uint32 flags = mask & 0x0F00
+    write(flags << 1)
+    print
+    type.Pt p = {4, 5}
+    write(p.x + p.y)
+    print
+    type.Cell c = {0x41424344}
+    write(c.bytes[0])
+    print
+    write(c.bytes[3])
+    print
+    type.ptr<type.number> heap = alloc<type.number>(3)
+    heap[0] = xs[0]
+    heap[1] = xs[1]
+    heap[2] = xs[2]
+    type.number total = 0
+    loop (i from 0 until 3) {
+        total = total + heap[i]
+    }
+    release(heap)
+    write(total)
+    print
+    when (pp == null and 1 << 2 + 3 == 32) {
+        write("selfhost-parse-ok")
+        print
+    }
+    return 0
+}
+
+main()

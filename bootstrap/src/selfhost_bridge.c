@@ -11,6 +11,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "ok/selfhost.h"
 #include "ok/util.h"
+#include "ok/parser.h"
+#include "ok/ast.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,7 +72,9 @@ static bool cur_nl(Cursor *c) {
 /* integer literal value from the raw spelling: 0x… hex or decimal, with
  * `_` grouping. Returns false on malformed digits (the Okular scanner
  * already guaranteed the shape; this is belt-and-braces). */
-static bool spell_int_value(const char *s, size_t n, uint64_t *out) {
+/* exported for the machine-AST deserializer (ast_serial.c): literal
+ * payloads re-derive from raw spellings exactly as the token bridge does */
+bool spell_int_value(const char *s, size_t n, uint64_t *out) {
     uint64_t v = 0;
     size_t i = 0;
     bool hex = false;
@@ -95,7 +99,7 @@ static bool spell_int_value(const char *s, size_t n, uint64_t *out) {
 }
 
 /* decimal literal value: strip `_`, strtod */
-static double spell_dec_value(const char *s, size_t n) {
+double spell_dec_value(const char *s, size_t n) {
     char tmp[128];
     size_t m = 0;
     for (size_t i = 0; i < n && m < sizeof tmp - 1; i++)
@@ -106,7 +110,7 @@ static double spell_dec_value(const char *s, size_t n) {
 
 /* text literal payload: strip the quotes, process the escapes; returns
  * NULL (no allocation) when the record is not a quoted literal */
-static char *spell_text_unescape(const char *s, size_t n, size_t *out_len) {
+char *spell_text_unescape(const char *s, size_t n, size_t *out_len) {
     if (n < 2 || s[0] != '"' || s[n - 1] != '"') return NULL;
     Buf b; buf_init(&b);
     for (size_t i = 1; i + 1 < n; i++) {
@@ -252,4 +256,73 @@ TokList *selfhost_lex_file(SourceFile *f, const char *fs_path, DiagEngine *de) {
     }
     buf_free(&data);
     return out;
+}
+
+/* ---- the parser bridge (--selfhost-parse, M4) ----
+ *
+ * Spawns the compiled selfhost/parser program once per file:
+ *     <binary> <file.ok> --names <struct/union names...>
+ * reads its machine AST stream, and rebuilds the Node tree through
+ * ast_deserialize. The names come from the parser's process-wide
+ * registry (seeded from every module before any is parsed, spec §8.3),
+ * so struct types resolve across files exactly as in a C parse. */
+
+static char g_parse_bin[PATH_MAX];
+
+void selfhost_set_parser(const char *binary_path) {
+    if (!binary_path || !binary_path[0]) { g_parse_bin[0] = 0; return; }
+    snprintf(g_parse_bin, sizeof g_parse_bin, "%s", binary_path);
+}
+
+bool selfhost_parse_enabled(void) {
+    return g_parse_bin[0] != 0;
+}
+
+static char *sh_read_stream(const char *cmd, size_t *out_len) {
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return NULL;
+    Buf data;
+    buf_init(&data);
+    char chunk[4096];
+    size_t got;
+    while ((got = fread(chunk, 1, sizeof chunk, fp)) > 0)
+        buf_put(&data, chunk, got);
+    int rc = pclose(fp);
+    if (rc != 0) {
+        buf_free(&data);
+        return NULL;
+    }
+    *out_len = data.len;
+    return data.data ? data.data : ok_xstrdup("");
+}
+
+Node *selfhost_parse_file(SourceFile *f, const char *fs_path, DiagEngine *de, Arena *ar) {
+    /* collect the pre-registered struct/union names for --names */
+    Vec names;
+    vec_init(&names);
+    parser_named_type_names(&names);
+
+    Buf cmd;
+    buf_init(&cmd);
+    buf_printf(&cmd, "'%s' '%s'", g_parse_bin, fs_path);
+    if (names.len > 0) {
+        buf_puts(&cmd, " --names");
+        for (size_t i = 0; i < names.len; i++)
+            buf_printf(&cmd, " '%s'", (const char *)names.items[i]);
+    }
+    for (size_t i = 0; i < names.len; i++) free(names.items[i]);
+    vec_free(&names);
+
+    size_t len = 0;
+    char *data = sh_read_stream(cmd.data ? cmd.data : "", &len);
+    buf_free(&cmd);
+    if (!data) {
+        diag_emit(de, DIAG_ERROR, f, 1, 1,
+                  "cannot run the self-hosted parser `%s`.", g_parse_bin);
+        return NULL;
+    }
+
+    Node *tree = ast_deserialize(data, len, f, de, ar);
+    free(data);
+    return tree;
 }

@@ -5,6 +5,19 @@ before the test suite proves it.**
 
 ## Where we are
 
+**Okular 0.13 — milestone M4 (the parser runs in Okular).** In addition to
+everything below, 0.13 makes **`and`/`or` short-circuit** (§9 — guards like
+`p != null and *p == x` no longer trap), and **the parser itself is now
+written in Okular**: `selfhost/parser/src/parser.ok` ports the complete
+recursive descent grammar, `--selfhost-parse` makes it the compiler's
+parser, and `--selfhost-verify` differentially proves the trees
+byte-identical to the C parser's on the whole positive suite (identical
+program output end to end). Three deep defects found along the way are
+fixed and regression-tested: the heap allocator's split overlapped
+adjacent blocks; `rt_release` erased its own double-release marker; and
+record assignment through pointer indexing/dereference stored the
+source's address instead of copying the bytes.
+
 **Okular 0.12 — milestone M2→M3 (systems types).** 0.2 added fixed-length
 arrays; 0.3 the fixed-width integer family (`int8`…`uint64`, `byte`,
 aliases) with wrapping arithmetic, the widening lattice, contextual literal
@@ -18,7 +31,7 @@ overlap layout, type-directed literals, documented reinterpretation
 (`specs/spec-v0.11.md` §8.5); 0.8 **constants + type.auto** (§8.1); 0.9 **text operations** — `text.length`, bounds-checked `text.byte_at`, O(1) `text.slice` (§4.5); 0.10 **file builtins** — `fs.read`/`fs.save`/`fs.exists` over raw syscalls (§6.4); 0.11 **bitwise operations** — `& | ^ ~ << >>` with range-checked
 shifts, Rust-ordered precedence, and `>>` splitting for nested type arguments
 (§9); 0.12 **environment builtins** — `env.arg_count()`/`env.arg(i)`, the
-program's command line (§6.5). See `specs/spec-v0.12.md` §22 for the honest
+program's command line (§6.5). See `specs/spec-v0.13.md` §22 for the honest
 status table.
 
 ## Milestones
@@ -27,8 +40,8 @@ status table.
 |----|-----------|--------|
 | M1 | C bootstrap compiler; hello-world and small programs run natively | **done (0.1)** |
 | M2 | Language covers substantial normal programs | in progress — arrays (0.2), fixed-width integers (0.3), pointers + heap (0.4), structs (0.5), text conversions (0.6), unions (0.7), constants + type.auto (0.8), text operations (0.9), file builtins (0.10), bitwise + shifts (0.11), env builtins (0.12) |
-| M3 | Okular can compile portions of the compiler itself | **underway (0.11)** — `selfhost/lexer` tokenizes .ok files (same token set and numbering as the bootstrap lexer); proven by `tests/cases/positive/selfhost_lexer` |
-| M4 | Compiler components rewritten in Okular (lexer first, then runtime shim) | **begun (0.12)** — `--selfhost-lex` uses the Okular-written lexer as the compiler's tokenizer (differentially verified on all positive cases); C lexer remains the default |
+| M3 | Okular can compile portions of the compiler itself | **done (0.13)** — `selfhost/lexer` and now `selfhost/parser` compile real compiler components |
+| M4 | Compiler components rewritten in Okular (lexer, parser, runtime shim) | **underway (0.13)** — `--selfhost-lex` (tokenizer bridge) and `--selfhost-parse` (parser bridge, machine AST protocol) both work and are differentially verified on all positive cases; the C lexer/parser remain the default |
 | M5 | Okular compiler builds itself | not started |
 | M6 | C bootstrap no longer required | not started |
 | M7 | C bootstrap removed from repository | not started |
@@ -93,13 +106,24 @@ status table.
    `tests/cases/flags/selfhost_lex` compiles a full program through it;
    the whole positive suite was differentially verified to produce
    identical results through both lexers.
-3. **Parser in Okular** — recursive descent over the token stream; needs
-   the struct/union/array machinery to represent the AST.
+3. ~~**Parser in Okular**~~ **done in 0.13**: `selfhost/parser` — the
+   full grammar (expressions with the complete precedence ladder,
+   statements, functions, structs, unions, columns, directives, the `>>`
+   split, recovery), an in-memory tokenizer (`src/toks.ok`), and the
+   machine AST protocol consumed by `--selfhost-parse`. Proven three
+   ways: `--selfhost-verify` (byte-identical serializations on every
+   positive case), full compile+run through the bridge (identical
+   program output), and `tests/cases/flags/selfhost_parse`.
 4. **Runtime shim in Okular** — rewrite `runtime/rt.c` (write/print, traps,
    allocator, text arena) as Okular code compiled by the bootstrap
    compiler, replacing the freestanding C shim.
 5. **Own integrated assembler** — the last external tool dependency
    (`as`/`ld`) moves in-house (spec §15).
+6. **Sema in Okular** — the type checker (collect + check) is the largest
+   remaining C component; the M5 self-build needs it. Requires growing
+   the machine protocol from AST records to symbol/type records, or (the
+   planned route) running sema as Okular code against in-memory trees
+   with no bridge at all.
 
 ## Deliberate non-goals
 

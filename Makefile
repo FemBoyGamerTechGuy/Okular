@@ -17,7 +17,7 @@ $(OBJS): $(HDRS)
 # bare `make` built exactly one object and stopped)
 .DEFAULT_GOAL := all
 
-.PHONY: all test clean selfhost-lex
+.PHONY: all test clean selfhost-lex selfhost-parse
 
 all: build/okular runtime/rt.o
 
@@ -27,6 +27,13 @@ selfhost/lexer/build/output/main: build/okular selfhost/lexer/main.ok selfhost/l
 	cd selfhost/lexer && ../../build/okular --compile main.ok
 
 selfhost-lex: selfhost/lexer/build/output/main
+
+# the Okular-written parser (M4, docs/roadmap.md): the bootstrap compiler
+# compiles it; --selfhost-parse then uses it as the compiler's parser
+selfhost/parser/build/output/main: build/okular selfhost/parser/main.ok selfhost/parser/src/toks.ok selfhost/parser/src/parser.ok
+	cd selfhost/parser && ../../build/okular --compile main.ok
+
+selfhost-parse: selfhost/parser/build/output/main
 
 build/okular: $(OBJS)
 	@mkdir -p build/bootstrap
@@ -42,7 +49,7 @@ runtime/rt.o: runtime/rt.c runtime/rt_start.s
 	$(CC) -c -o build/rt_start.o runtime/rt_start.s
 	ld -r -o runtime/rt.o build/rt_code.o build/rt_start.o
 
-test: all selfhost-lex
+test: all selfhost-lex selfhost-parse
 	bash tools/run_tests.sh
 
 clean:

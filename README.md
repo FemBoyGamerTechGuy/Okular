@@ -3,19 +3,28 @@
 A simple, fast programming language designed for building large
 applications with minimal code.
 
-**Status:** Okular 0.12 — milestones M2→M3. The C bootstrap compiler
-builds and runs real Okular programs natively on x86-64 Linux — arrays
-and structs with value semantics, the full fixed-width integer family,
-pointers with manual memory: `&x`, `*p`, `alloc<T>(n)` / `release(p)`
-over a real heap allocator, null checks, scaled pointer arithmetic,
-records with predictable layout, unions with type-directed literals (spec §8.5), the full conversion builtin set (`number.to_text`,
-`text.to_number`, ...), and **bitwise operations** (`& | ^ ~ << >>` with
-range-checked shifts — spec §9). **Self-hosting is underway (M4 begun):** the
-compiler's lexing phase can run on the tokenizer written in Okular —
-`selfhost/lexer`, proven by the test suite and differentially verified
-against the C lexer on the whole positive suite
-(`okular --compile --selfhost-lex <binary>`, `make selfhost-lex`). Programs read their own
-command-line arguments (`env.arg_count()`, `env.arg(i)` — spec §6.5).
+**Status:** Okular 0.13 — milestone M4: **the parser itself is written in
+Okular.** The bootstrap compiler (in C) builds and runs real Okular
+programs natively on x86-64 Linux — arrays and structs with value
+semantics, the full fixed-width integer family, pointers with manual
+memory: `&x`, `*p`, `alloc<T>(n)` / `release(p)` over a real heap
+allocator, null checks, scaled pointer arithmetic, records with
+predictable layout, unions with type-directed literals (spec §8.5), the
+full conversion builtin set (`number.to_text`, `text.to_number`, ...),
+**bitwise operations** (`& | ^ ~ << >>` with range-checked shifts —
+spec §9), and **short-circuit `and`/`or`** (spec §9 — `p != null and
+*p == x` guards do not trap). Programs read their own command-line
+arguments (`env.arg_count()`, `env.arg(i)` — spec §6.5).
+
+**Self-hosting (M4):** both the tokenizer (`selfhost/lexer`) and now the
+**parser** (`selfhost/parser` — the complete grammar, in Okular) are
+compiled by the bootstrap compiler and verified against the C
+implementation: `--selfhost-lex` routes tokenization through the Okular
+lexer, `--selfhost-parse` routes parsing through the Okular parser (the
+machine AST protocol rebuilds the tree sema consumes), and
+`--selfhost-verify` differentially proves the two parsers' outputs
+byte-identical across the whole positive suite — end-to-end program
+output is identical through both paths.
 
 ```ok
 type.text=1

@@ -1,0 +1,74 @@
+type.text=1
+
+# struct_ptr_copy — records assigned through pointer indices and
+# dereferences copy ALL their bytes. Before 0.13, A_INDEXASSIGN and
+# A_DEREFASSIGN only took the copy path for ARRAY elements: a struct
+# element fell through to the scalar store and wrote the source's ADDRESS
+# (8 bytes of pointer) into the destination. Found by the self-hosted
+# parser's token-buffer growth (push_tok copies struct.Tok records).
+
+struct.Tok = {
+    type.number kind
+    type.number line
+    type.number col
+    type.number off
+    type.number len
+    type.text sp
+}.end
+
+struct.Pair = {
+    type.number a
+    type.decimal b
+    type.text c
+}.end
+
+function.main() -> number {
+    # 1. growable buffer pattern: copy records between heap arrays
+    type.ptr<type.Tok> xs = alloc<type.Tok>(2)
+    xs[0].kind = 33
+    xs[0].line = 10
+    xs[0].col = 4
+    xs[0].off = 100
+    xs[0].len = 5
+    xs[0].sp = "kw"
+    type.ptr<type.Tok> ys = alloc<type.Tok>(4)
+    loop (i from 0 until 1) {
+        ys[i] = xs[i]
+    }
+    when (ys[0].kind == 33 and ys[0].line == 10 and ys[0].col == 4 and ys[0].off == 100 and ys[0].len == 5 and ys[0].sp == "kw") {
+        write("record-copy")
+    }
+    print
+
+    # 2. every field, one by one, as separate lines
+    write(ys[0].kind)
+    print
+    write(ys[0].line)
+    print
+    write(ys[0].sp)
+    print
+
+    # 3. dereference assignment of a whole record
+    type.Pair src = {7, 0.5, "pair"}
+    type.ptr<type.Pair> p = alloc<type.Pair>(1)
+    *p = src
+    when (p.a == 7 and p.b == 0.5 and p.c == "pair") {
+        write("deref-copy")
+    }
+    print
+
+    # 4. array-of-records element assignment
+    type.array<type.Pair, 2> ps = {{1, 1.5, "x"}, {2, 2.5, "y"}}
+    ps[0] = ps[1]
+    when (ps[0].a == 2 and ps[0].b == 2.5 and ps[0].c == "y") {
+        write("array-elem-copy")
+    }
+    print
+
+    release(xs)
+    release(ys)
+    release(p)
+    return 0
+}
+
+main()

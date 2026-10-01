@@ -23,6 +23,8 @@ static void usage(FILE *out) {
         "  -l, --legacy       legacy compatibility (spec §14; no legacy syntax exists yet)\n"
         "  -o, --output PATH  executable output path (default build/output/<name>)\n"
         "  --selfhost-lex BIN tokenize through the Okular-written lexer (M4 bridge)\n"
+        "  --selfhost-parse BIN parse through the Okular-written parser (M4 bridge)\n"
+        "  --selfhost-verify BIN parse both ways; compare the ASTs byte for byte\n"
         "  --version          print the version\n"
         "  --help             this help\n\n"
         "debug (test suite):\n"
@@ -60,6 +62,18 @@ int main(int argc, char **argv) {
                 return 2;
             }
             opt.selfhost_lex = argv[++i];
+        } else if (strcmp(a, "--selfhost-parse") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "okular: `%s` needs the path to the compiled selfhost/parser program.\n", a);
+                return 2;
+            }
+            opt.selfhost_parse = argv[++i];
+        } else if (strcmp(a, "--selfhost-verify") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "okular: `%s` needs the path to the compiled selfhost/parser program.\n", a);
+                return 2;
+            }
+            opt.selfhost_verify = argv[++i];
         } else if (strcmp(a, "--version") == 0) {
             printf("Okular %s\n", OK_VERSION);
             return 0;
@@ -87,7 +101,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!want_compile && !opt.dump_tokens && !opt.dump_ast) {
+    if (!want_compile && !opt.dump_tokens && !opt.dump_ast && !opt.selfhost_verify) {
         usage(stderr);
         fprintf(stderr, "okular: nothing to do — pass `--compile` and a `main.ok` path.\n");
         return 2;
