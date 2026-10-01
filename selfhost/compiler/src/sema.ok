@@ -84,6 +84,11 @@ function.mod_downgrade(type.ptr<type.Mod>.m) -> number {
 
 type.number warn_enabled = 0
 
+function.set_warn(number.v) -> number {
+    warn_enabled = v
+    return 0
+}
+
 function.diag_reset() -> number {
     diag_n = 0
     n_errors = 0

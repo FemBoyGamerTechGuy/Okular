@@ -69,6 +69,7 @@ function.strip_quotes(text.sp) -> text {
 
 type.number dump_ir_flag = 0
 type.number strict_mode = 0
+type.number warn_mode = 0
 
 # ---- the used-module collection (prescan over the token buffer) ----
 
@@ -406,7 +407,7 @@ function.mkdir_p(text.path) -> number {
 function.main() -> number {
     type.number argc = env.arg_count()
     when (argc < 2) {
-        sys.write(2, "usage: okc <main.ok> [--out <path>] [--dump-ir] [-s | --strict]\n")
+        sys.write(2, "usage: okc <main.ok> [--out <path>] [--dump-ir] [-s | --strict] [-w | --warnings]\n")
         return 2
     }
     type.text main_path = env.arg(1)
@@ -428,6 +429,9 @@ function.main() -> number {
         else when (a == "-s" or a == "--strict") {
             strict_mode = 1
         }
+        else when (a == "-w" or a == "--warnings") {
+            warn_mode = 1
+        }
         else {
             sys.write(2, "okc: unknown flag `" + a + "`.\n")
             return 2
@@ -436,6 +440,9 @@ function.main() -> number {
     }
     when (strict_mode == 1) {
         sema.set_strict(1)
+    }
+    when (warn_mode == 1) {
+        sema.set_warn(1)
     }
 
     sema.init_types()

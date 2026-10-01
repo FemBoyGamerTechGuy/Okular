@@ -1,0 +1,7 @@
+type.text=1
+function.f() -> number {
+    return 1
+    write("dead")
+}
+write(f())
+print

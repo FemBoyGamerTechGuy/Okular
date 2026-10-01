@@ -80,6 +80,7 @@ $ okular [-s | --strict] [--out PATH] [--dump-ir] path/to/main.ok
 | Flag | Meaning |
 |---|---|
 | `-s`, `--strict` | strict builds — failures in unused `src/` files are fatal (normally warnings, and broken unused files are skipped) |
+| `-w`, `--warnings` | warnings on: unused local variables, unreachable code, implicit number-to-decimal widening |
 | `--out PATH` | executable output path (default `<project>/build/output/main`) |
 | `--dump-ir` | print the generated IR of every function to stderr |
 

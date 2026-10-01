@@ -1522,6 +1522,8 @@ the conversion family (`T.to_U`): the source type names the operation.
 * **Constants as array lengths** (§8.4): `type.array<T, NAME>` resolves
   module-visible constants (bare names and dotted module paths) after
   collection; the resolved type is identical to the literal form.
+* **Warnings** (`-w`/`--warnings`) restored in the Okular compiler:
+  unused local variables and unreachable code (§14).
 * **The optional-source policy (§6.1) in the Okular compiler:** unused
   `src/*.ok` files are parsed and checked with errors downgraded to
   warnings, never linked, and reported as skipped;
