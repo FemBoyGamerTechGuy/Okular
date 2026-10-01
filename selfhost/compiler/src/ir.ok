@@ -2021,7 +2021,7 @@ function.ir_fold(type.ptr<type.IrFunc>.f) -> number {
             when (in.i == 0 or in.i == 7 or in.i == 8) {
                 when (sp >= 2) { sp = sp - 2 }
             }
-            else when (in.i == 1 or in.i == 2) {
+            else when (in.i == 1 or in.i == 2 or in.i == 9) {
                 when (sp >= 3) { sp = sp - 3 }
             }
             else when (in.i == 3 or in.i == 4 or in.i == 5) {

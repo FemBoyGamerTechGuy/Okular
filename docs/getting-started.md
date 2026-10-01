@@ -1,29 +1,32 @@
 # Getting Started with Okular
 
-**Okular 0.2** — a natively compiled systems language. This guide takes you
-from zero to a running executable.
+**Okular 0.14** — a natively compiled systems language. This guide takes
+you from zero to a running executable.
 
 ## Requirements
 
-* Linux on x86-64 (the 0.2 bootstrap target; ARM64 is planned)
-* A C compiler (`cc`), GNU `as` and `ld` (binutils) — used to build the
-  bootstrap compiler and to assemble/link its output
+* Linux on x86-64 (ARM64 is planned)
 * GNU make
+* Nothing else: **no C compiler, no `as`, no `ld`** — the repository
+  carries its own native compiler seed (`bin/okular`), and the build is
+  the Okular compiler compiling its own sources
 
 ## Build the compiler
 
 ```console
 $ make
-$ ./build/okular --version
-Okular 0.2
+$ cd examples/hello && ../../build/okular main.ok
+okular: wrote ./build/output/main
+$ ./build/output/main
+Hello Okular
 ```
 
 The build produces:
 
 | Path | What it is |
 |---|---|
-| `build/okular` | the bootstrap compiler |
-| `runtime/rt.o` | the freestanding runtime shim linked into every program |
+| `build/okular` | the Okular compiler, built from `selfhost/compiler` sources by the committed seed |
+| `bin/okular` | the committed native seed — the same compiler at a verified self-compilation fixed point |
 
 ## Your first program
 
@@ -41,7 +44,7 @@ print
 Compile and run:
 
 ```console
-$ ../build/okular --compile main.ok
+$ ../build/okular main.ok
 okular: wrote ./build/output/main
 $ ./build/output/main
 Hello Okular
@@ -71,17 +74,14 @@ print
 ## Compiler flags
 
 ```console
-$ okular --compile [-w] [-xw] [-s] [-l] [-o PATH] path/to/main.ok
+$ okular [-s | --strict] [--out PATH] [--dump-ir] path/to/main.ok
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--compile` | compile the project (required) |
-| `-w`, `--warnings` | warnings: unused variables, unreachable code, implicit number→decimal widening |
-| `-xw`, `--extra-warnings` | extra diagnostics (implies `-w`) |
-| `-s`, `--strict` | strict builds — see below |
-| `-l`, `--legacy` | legacy compatibility (no legacy syntax exists yet; the mechanism is in place) |
-| `-o`, `--output PATH` | executable output path (default `build/output/<name>`) |
+| `-s`, `--strict` | strict builds — failures in unused `src/` files are fatal (normally warnings, and broken unused files are skipped) |
+| `--out PATH` | executable output path (default `<project>/build/output/main`) |
+| `--dump-ir` | print the generated IR of every function to stderr |
 
 ## Projects with source components
 

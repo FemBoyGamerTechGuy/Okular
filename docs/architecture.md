@@ -1,334 +1,107 @@
-# Okular Bootstrap Compiler — Architecture
+# Okular Compiler — Architecture
 
-**Version:** 0.12
-**Applies to:** `bootstrap/` (the C implementation)
+**Version:** 0.14
+**Applies to:** `selfhost/compiler` (the Okular implementation)
 
-> The C implementation is scaffolding. It exists because Okular does not yet
-> exist. Every component is structured so it can be rewritten in Okular
-> component-by-component (see `docs/roadmap.md`, milestones M3–M7). Nothing in
-> Okular's *semantics* is defined by this implementation.
+> The compiler is written in Okular and compiles itself. The C bootstrap
+> that once grew these components is gone (M7); the repository carries a
+> native seed binary (`bin/okular`) at a verified self-compilation fixed
+> point, and `make` uses it to rebuild the compiler from source — no C
+> compiler, no `as`, no `ld` anywhere.
 
 ---
 
 ## 1. Pipeline
 
 ```
-            okular --compile main.ok
-                      |
-              [driver]  CLI parsing, option registry
-                      |
-              [project] project discovery: main.ok, src/ scan,
-                        [source.files.use] graph, cycle detection,
-                        optional-source policy
-                      |
-              [lexer]  per file: text -> tokens (with precise spans)
-                      |
-              [parser] per file: tokens -> AST (recursive descent,
-                        error recovery at newline/}/.end sync points)
-                      |
-              [sema]   symbol tables (file -> column -> block scopes),
-                        namespace resolution (module.column.name),
-                        type checking, feature gates, warnings
-                      |
-              [ir]     typed stack-machine IR per function
-                        + constant folding pass
-                      |
-              [codegen] x86-64 System V-flavored assembly, freestanding
-                        (own `_start`, raw Linux syscalls, no libc)
-                      |
-              [assemble/link]  as -> .o,  ld -> executable
-                      |
-              build/output/<name>
+            okc main.ok
+                |
+            [driver]  main.ok — CLI parsing, project load, phases
+                |
+            [toks]   per file: text -> tokens (in-memory, precise spans)
+                |
+            [parser] per file: tokens -> AST (recursive descent, recovery
+                      at newline/}/.end sync points)
+                |
+            [sema]   symbol tables (file -> column -> block scopes),
+                      namespace resolution (module.column.name), full
+                      type checking, constant evaluation, control-flow
+                      and return validation, diagnostics
+                |
+            [ir]     per required module: AST -> stack-machine IR
+                      (function list, instruction list, constant folding)
+                |
+            [emit]   per IR function: x86-64 machine code — prologue,
+                      stack-machine pushes/pops, calls with the rbx
+                      alignment discipline, inline syscalls, trap sites
+                |
+            [elf]    one R+X PT_LOAD image: headers + code + rodata +
+                      data (+bss), ABS64/REL32 fixups, entry stub,
+                      fs.save + chmod
+                |
+            native ELF64 executable (freestanding, raw syscalls)
 ```
 
-The driver owns the pipeline but does no language work itself. Each stage has
-a narrow interface so a future Okular-written stage can replace it behind the
-same boundary.
+## 2. Modules
 
----
+`selfhost/compiler/src/` — all Okular, loaded via `[source.files.use]`:
 
-## 2. Component layout
+| File | Role |
+|---|---|
+| `toks.ok` | the tokenizer: byte stream to token records, keyword table, `>>` splitting for nested type arguments |
+| `parser.ok` | the complete grammar: expressions with the precedence ladder, statements, functions, structs/unions, columns, directives, error recovery |
+| `sema.ok` | the type checker: collect (symbols, module scopes, struct layout) + check (every expression/statement rule), constant evaluation, diagnostics with the optional-source downgrade policy |
+| `ir.ok` | IR construction (stack-machine form), constant folding, `--dump-ir` |
+| `emit.ok` | the x86-64 backend: every IR instruction, frame layout, call discipline, inline syscalls, trap sequences, label backpatching |
+| `elf.ok` | native ELF64 emission: segments, symbols, fixups, entry |
+| `rt.ok` | the runtime compiled into every program: output formatters, text arena, conversions, the free-list heap allocator, file operations — on the `sys.*` syscall floor |
+| `main.ok` | the driver: project load (prescan of `[source.files.use]`), the optional `src/` scan (getdents64), phases, output |
 
-```
-bootstrap/
-├── include/ok/
-│   ├── ok.h            common definitions, OkType, config
-│   ├── util.h          buffers, arenas, string utils
-│   ├── source.h        source manager (files, line index)
-│   ├── diag.h          diagnostics engine
-│   ├── lexer.h         token definitions + lexer API
-│   ├── ast.h           AST node definitions
-│   ├── parser.h        parser API
-│   ├── project.h       project/module graph
-│   ├── symtab.h        symbols, scopes, namespaces
-│   ├── sema.h          semantic analysis API
-│   ├── ir.h            IR instructions + builder + folding
-│   ├── codegen.h       backend interface
-│   └── driver.h        pipeline orchestration
-└── src/
-    ├── main.c          CLI entry, flag registry
-    ├── util.c
-    ├── source.c
-    ├── diag.c
-    ├── lexer.c
-    ├── ast.c
-    ├── parser.c
-    ├── project.c
-    ├── symtab.c
-    ├── sema.c
-    ├── ir.c
-    ├── codegen_x64.c  the one backend (x86-64 Linux)
-    └── driver.c
+## 3. ABI notes
 
-runtime/               bootstrap runtime shim (C, freestanding, no libc)
-├── rt.c               output buffer, formatting, concat arena, traps
-└── rt_start.s         _start trampoline (assembler)
-```
+* **Stack machine:** expressions evaluate through push/pop on the machine
+  stack; every value is 8 bytes (text is a (ptr,len) pair = two pushes).
+* **Calls:** `rbx` is callee-saved and doubles as the alignment anchor —
+  every call is wrapped `push rbx; mov rbx,rsp; and rsp,-16; call;
+  mov rsp,rbx; pop rbx`, mirroring the discipline the C bootstrap used.
+* **Frames:** `[rbp-locals]` slots, a 96-byte outgoing-arg area, array-arg
+  copy scratch, and a syscall scratch (256-byte path buffer + stat
+  struct) at the bottom.
+* **Syscalls:** `sys.*` builtins are emitted inline (write, read, open,
+  close, size/fstat, mmap, exit, chmod, mkdir, getdents/getdents64);
+  everything else the runtime needs rides on this floor.
+* **Traps:** runtime failures are loud, named, and exit-coded (div-by-zero
+  71, shift-range 72, null deref 73, fs errors 77, ...). Emitter-side trap
+  sequences use labels in a `TRAP_BASE` region above the IR label space —
+  the collision of the two label families was a real 0.14 bug (see
+  `tests/cases/positive/sys_chmod_label_trap`).
 
-Backend isolation: `codegen.h` declares a small interface (`codegen_module`,
-`codegen_entry`). `codegen_x64.c` implements it for one target. Adding ARM64
-later means adding `codegen_arm64.c` and a `--target` flag — nothing else in
-the compiler changes. The IR is the contract between front end and back end.
+## 4. Bootstrap and determinism
 
----
+* `bin/okular` is the committed seed: a self-built compiler (stage 2 of
+  the historical chain). `make` has the seed compile
+  `selfhost/compiler` sources into `build/okular`.
+* Determinism: the emitted ELF contains no timestamps or layout noise, so
+  the seed compiling the sources it was built from reproduces itself
+  **byte-for-byte**. `make test` proves it every run.
+* Compiler changes: `make update-seed` (tools/update_seed.sh) rebuilds to
+  the new fixed point (A: old seed -> new sources; B: A -> sources; C:
+  B -> sources; require B == C), runs the suite, installs B as the new
+  seed. If the new sources use a feature the old seed lacks, bridge by
+  stubbing the use once, building, restoring, and re-running.
 
-## 3. Key data structures
+## 5. Targets
 
-### 3.1 Tokens
+* Implemented: x86-64 Linux (System V kernel syscall ABI).
+* Planned: ARM64 as the second backend — proving the emitter abstraction.
 
-```c
-typedef enum { T_IDENT, T_NUMBER_LIT, T_DEC_LIT, T_TEXT_LIT, T_KEYWORD, ... } TokKind;
-typedef struct { TokKind kind; SrcLoc loc; /* line, col, byte offset */
-                 char *text; /* identifier name / keyword / literal payload */
-                 uint64_t ival; double dval; } Token;
-```
+## 6. Testing
 
-Every token carries `SrcLoc` (file index, line, column, span) — diagnostics
-are only as good as their locations.
-
-### 3.2 AST
-
-Plain C structs with a `kind` tag and per-node payload. Nodes own nothing;
-the parser's arena owns all allocations, so freeing is trivial and leaks are
-impossible by construction. Expressions and statements are separate node
-families. Names are kept as dotted paths (`greeting.math.fall`) resolved in
-sema — the parser does not guess what a dot means.
-
-### 3.3 Symbols
-
-```c
-typedef struct Symbol { const char *name; OkType type;
-                         SymKind kind; /* FUNC, VAR, NS */
-                         struct Scope *scope; ... } Symbol;
-```
-
-Scopes nest: file/module scope → column scopes → function block scopes.
-Module namespaces are scopes whose name is the file name; developer columns
-are scopes nested inside them. Name lookup walks outward, then reports the
-full candidate path in the error message.
-
-### 3.4 IR
-
-Typed stack machine: each instruction pops/pushes values whose Okular types
-are tracked by the builder, so codegen never guesses.
-
-```
-LOAD_CONST_INT 42        ; pushes number
-LOAD_LOCAL 3             ; slot 3
-BINOP ADD                ; pops 2 numbers, pushes number
-CALL ok_greeting_greet 0 ; pops args, pushes result (or nothing)
-JMP_FALSE L7
-WRITE                     ; builtin: pops 1, appends to output buffer
-PRINT_FLUSH               ; statement
-RETURN
-```
-
-`ir.c` contains the only optimization pass in 0.2: constant folding
-(replaces `BINOP` over two foldable constants; used both for global
-initializer checking and for `-xw` diagnostics like always-true comparisons).
-The pass framework is a simple function-pointer list over functions — the
-shape a real optimizer framework will grow into.
-
-### 3.5 Code generation
-
-x86-64, Linux, freestanding:
-
-* Expression evaluation uses an operand stack on the machine stack
-  (`push`/`pop` with `rax`/`rcx`/`xmm0`). Correctness before speed — the
-  optimization milestone will lower through registers properly.
-* Locals live at `rbp`-relative slots; every slot is rounded up to a
-  multiple of 8 bytes for scalars (sub-word values are padded — the padding
-  is unobservable), 16 for `text` (ptr+len pair), and the array's total
-  bytes for arrays. Slots are typed and number-checked.
-* **Fixed-width integers (0.3)**: values travel **extended** in 64-bit
-  registers and operand-stack words — sign-extended for signed types,
-  zero-extended for unsigned — and arithmetic runs at 64 bits then
-  re-encodes (`shl`/`sar` or `shl`/`shr`) to the operand type's width.
-  Memory uses natural widths: `movsx/movzx`/`movsxd`/`mov eax` loads and
-  byte/word/dword stores for globals and array elements; `.data` emits
-  `.byte`/`.value`/`.long`/`.quad` per type. Comparisons pick `setl`-family
-  (signed) or `setb`-family (unsigned) from the operand type. Division is
-  guarded: zero divisors call `rt_div_trap` (exit 71); `INT64_MIN / -1`
-  wraps instead of raising `#DE`. `uint64` printing uses `rt_write_uint`.
-* Globals live in `.data`/`.bss` under mangled names (`ok_<module>_<name>`).
-* Calling convention: **Okular internal ABI v1** — up to 6 arguments in
-  `rdi, rsi, rdx, rcx, r8, r9` (integer registers only), return in `rax`,
-  caller cleans stack for excess args, `rbx`/`r12`–`r15` callee-saved.
-  `decimal` values travel as raw bit patterns in integer registers/stack
-  slots and live in `xmm` registers only while being computed. This is
-  deliberately *not* full System V — SysV interop (XMM arg regs, varargs) is
-  a designed milestone gated on FFI. It is our own ABI, documented here.
-* **Structs (0.5)**: struct types are laid out at natural alignment in
-  declaration order (a shared placeholder per name is filled in place
-  after collection, so forward and cross-file references resolve). Struct
-  expressions evaluate to their storage address exactly like arrays;
-  field access lowers to `I_ADDOFF` + width-typed loads/stores; literals
-  store field-by-field; parameters pass as caller-owned copies.
-* **Arrays (v1)**: array-typed expressions evaluate to an *address* on the
-  operand stack (`ADDR_LOCAL/GLOBAL`, `INDEX`, `LOAD_AT`, `STORE_AT`,
-  `COPY`). Indexing scales by the element size after an unsigned bounds
-  comparison; violations call `rt_bounds_trap` (exit 70). Whole-array
-  assignment and parameter passing lower to `COPY` (`rep movsb`, byte-
-  exact for sub-word element types). Array
-  arguments: the caller copies the array into a per-frame scratch block
-  (sized to the largest single call site's array bytes) and passes the
-  copy's address in a register; the callee's prologue copies it into its
-  own slot — value semantics with one register per argument, same shape as
-  `text` pairs. Array globals are `.data` with `.globl` (cross-module
-  access works); text elements point into `.rodata`.
-* Text literals go to `.rodata` with a length table; `text` values are
-  (ptr, len) pairs passed by value.
-* The program entry `__ok_entry` is synthesized from `main.ok`'s top-level
-  statements; `_start` (in `runtime/rt_start.s`) initializes the runtime,
-  calls `__ok_entry`, and performs the `exit` syscall with the returned code.
-* Every external symbol the compiler emits starts with `ok_` or `__ok_`;
-  runtime helpers use the `rt_` prefix. No libc symbols are referenced
-  anywhere. `ld` links `build/objects/*.o` + `runtime/rt.o` directly.
-
-### 3.6 Bootstrap runtime shim
-
-`runtime/rt.c` (~250 lines of freestanding C, built `gcc -ffreestanding
--nostdlib -fno-stack-protector -fno-builtin`) provides:
-
-* output buffer management (`rt_write_*`, `rt_print`)
-* text conversions (`rt_{number,uint,decimal,bool}_to_text`,
-  `rt_text_to_number`, `rt_text_to_decimal`) — decimals travel as raw
-  bits in integer registers per the internal ABI
-* integer/decimal/unsigned formatting, `text` concatenation via a static
-  bump arena
-* runtime traps (`rt_trap`; `rt_div_trap`: exit 71; `rt_null_trap`: exit 73)
-* a real heap allocator (`rt_alloc`/`rt_release`): mmap-backed pools,
-  16-byte headers, first-fit with splitting, coalescing free list
-
-It is scaffolding in the same sense the C compiler is: milestone M4 rewrites
-it in Okular against the syscall module. The *language* depends on none of
-its internals — only on the documented `write`/`print` semantics.
-
----
-
-## 4. Diagnostics engine
-
-One engine, all stages. A diagnostic is: severity (error / warning / note),
-location, message, optional "found" token, optional note lines. Rendering
-follows the brief's required format:
-
-```
-src/player.ok:42:17
-
-Error: expected a number after the `=` operator.
-
-42 | number.health =
-                 ^
-
-Found: `}`
-
-note: the declaration is missing an initializer.
-```
-
-The source manager keeps files and line offsets so excerpt rendering is
-O(1)-ish per diagnostic. Error recovery: the parser synchronizes at newline,
-`}`, `.end`, and column starts; compilation stops after 50 errors or when a
-stage's output would be garbage. **An executable is never produced from
-required code that failed to check** (brief §43/§71).
-
----
-
-## 5. Project & module loading
-
-1. Locate `main.ok` (from the CLI path).
-2. Parse `[source.files.use]` columns (a fast pre-parse pass over tokens).
-3. Build the module graph: `main.ok` → used files → their used files.
-   Cycles → error with the cycle path.
-4. Determine *required* files (reachable from main) vs *optional* (other
-   `src/*.ok` files).
-5. Compile required files; compile optional files too, but their failures
-   downgrade to warnings in normal mode (never in `--strict`).
-6. `[libs.use]` entries are checked against `libs/`, `deps/`, std dir;
-   unresolved → warning (error in strict). Binding is future work.
-
----
-
-## 6. Testing strategy
-
-`tools/run_tests.sh` drives `tests/cases/`:
-
-* **positive**: each `.ok` file must compile and its stdout/exit code must
-  match the expected files.
-* **negative**: each `.ok` file must fail to compile and produce the expected
-  error class (message regex).
-* **policy**: optional-broken-src / required-broken-src / strict-mode
-  matrix (brief §36).
-* **flags**: warnings and extra-warnings behavior.
-
-The compiler also has hidden debug flags (`--dump-tokens`, `--dump-ast`,
-`--dump-ir`, `--dump-symbols`, `--emit-asm`) used by tests to inspect stages.
-Regression policy (brief §51): every fixed bug gets a case.
-
----
-
-## 7. Self-hosting milestones
-
-```
-M1  bootstrap C compiler compiles real Okular programs      [done in 0.1]
-M2  language covers substantial normal programs             [0.2+]
-M3  Okular can compile portions of the compiler             [underway: selfhost/lexer]
-M4  compiler components rewritten in Okular (lexer first)   [lexer component exists]
-M5  Okular compiler builds itself
-M6  C bootstrap no longer required
-M7  C bootstrap removed from the repository
-```
-
-The first compiler component written in Okular exists and is USABLE as
-the compiler's lexer: `selfhost/lexer` (`src/lexer.ok`) tokenizes .ok
-files with the same token set, token numbering, and newline/grouping
-rules as `bootstrap/src/lexer.c` — reading through `fs.read`, walking
-bytes with `text.byte_at`, cutting spellings with `text.slice`,
-classifying characters with integer comparisons, and building its
-keyword table from global text arrays. It takes its input path as a
-command-line argument (the `env` builtins) and emits either a human
-stream or the machine protocol of `bootstrap/src/selfhost_bridge.c`.
-
-`okular --compile --selfhost-lex <binary>` routes every project file's
-tokenization through the compiled Okular program: the bridge spawns it,
-parses the machine token stream, and reconstructs the token payloads
-(literal values, unescaped text) the parser expects. `make selfhost-lex`
-builds the component; `tests/cases/flags/selfhost_lex` compiles a real
-program through it; and the entire positive suite was differentially
-verified — identical executables, identical output — through both
-lexers before the flag landed. The C lexer remains the default while
-the bridge accumulates mileage; flipping the default (and deleting
-`bootstrap/src/lexer.c`) is the M4 exit for the lexer, alongside the
-parser and the runtime shim.
-
-Progress is tracked in `docs/roadmap.md` — never claimed before it is true.
-
----
-
-## 8. Portability
-
-* Implemented: x86-64 Linux (the bootstrap target).
-* The architecture is portable: target-specific code is confined to
-  `codegen_x64.c` and `runtime/`; everything upstream of IR is target-
-  independent; `as`/`ld` are invoked through a thin command abstraction.
-* Planned, in order: ARM64 Linux, x86-64 other ELF platforms, Windows,
-  macOS. Not claimed until they run the test suite.
+* `tools/run_selfhost_tests.sh` — 191 cases: positive (compile + run +
+  exact stdout/exit), negative (exact diagnostic patterns), policy
+  (optional-source semantics incl. `--strict`).
+* `tools/run_selfbuild_check.sh` — the acceptance gate: seed
+  self-reproduction + the full suite.
+* CI (`.github/workflows/ci.yml`) runs the gate, then packages and
+  end-to-end tests the downloadable compiler (build -> unpack -> compile
+  hello -> run it) on every push, and publishes releases on `v*` tags.

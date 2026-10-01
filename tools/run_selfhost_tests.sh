@@ -104,6 +104,50 @@ for dir in "$CASES/negative"/*/; do
     fi
 done
 
+# policy cases: optional-source semantics (spec §36) — compile must match
+# exit.txt, stdout must match, stderr patterns must (not) appear
+for dir in "$CASES/policy"/*/; do
+    [ -d "$dir" ] || continue
+    name="$(basename "$dir")"
+    work="$TMP/pol_$name"
+    rm -rf "$work"
+    mkdir -p "$work"
+    cp -r "$dir/." "$work/"
+    pflags=""
+    if [ -f "$work/flags" ]; then pflags="$(cat "$work/flags")"; fi
+    perr="$TMP/pol_$name.cerr"
+    $OKC "$work/main.ok" $pflags >"$perr" 2>&1
+    cexit=$?
+    ok=1
+    if [ -f "$dir/exit.txt" ]; then
+        [ "$cexit" -eq "$(cat "$dir/exit.txt")" ] || ok=0
+    fi
+    if [ "$cexit" -eq 0 ] && [ -f "$dir/stdout.txt" ]; then
+        (cd "$work" && "$work/build/output/main") >"$TMP/pol_$name.out" 2>/dev/null
+        diff -q "$dir/stdout.txt" "$TMP/pol_$name.out" >/dev/null || ok=0
+    fi
+    if [ -f "$dir/stderr.txt" ]; then
+        while IFS= read -r pattern; do
+            [ -z "$pattern" ] && continue
+            grep -qF "$pattern" "$perr" || ok=0
+        done < "$dir/stderr.txt"
+    fi
+    if [ -f "$dir/stderr_not.txt" ]; then
+        while IFS= read -r pattern; do
+            [ -z "$pattern" ] && continue
+            grep -qF "$pattern" "$perr" && ok=0
+        done < "$dir/stderr_not.txt"
+    fi
+    if [ "$ok" -eq 1 ]; then
+        pass=$((pass + 1))
+    else
+        fail=$((fail + 1))
+        failed_cases+=("policy/$name (exit $cexit)")
+        echo "  FAIL policy: $name (exit $cexit)"
+        head -4 "$perr" | sed 's/^/    /'
+    fi
+done
+
 echo
 echo "selfhost differential: passed $pass   failed $fail"
 if [ "$fail" -gt 0 ]; then

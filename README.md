@@ -3,34 +3,27 @@
 A simple, fast programming language designed for building large
 applications with minimal code.
 
-**Status:** Okular 0.13 — milestone M4: **the parser itself is written in
-Okular.** The bootstrap compiler (in C) builds and runs real Okular
-programs natively on x86-64 Linux — arrays and structs with value
-semantics, the full fixed-width integer family, pointers with manual
-memory: `&x`, `*p`, `alloc<T>(n)` / `release(p)` over a real heap
-allocator, null checks, scaled pointer arithmetic, records with
-predictable layout, unions with type-directed literals (spec §8.5), the
-full conversion builtin set (`number.to_text`, `text.to_number`, ...),
-**bitwise operations** (`& | ^ ~ << >>` with range-checked shifts —
-spec §9), and **short-circuit `and`/`or`** (spec §9 — `p != null and
-*p == x` guards do not trap). Programs read their own command-line
-arguments (`env.arg_count()`, `env.arg(i)` — spec §6.5).
+**Status:** Okular 0.14 — milestones M5, M6, and M7 are **done**:
+**the compiler is written in Okular and compiles itself.** One native
+executable (`selfhost/compiler`, ~14k lines of Okular) contains the
+complete pipeline — tokenizer, parser, semantic analysis, IR with
+constant folding, x86-64 code generation, and native ELF64 emission.
+`make` builds it with the committed native seed (`bin/okular`):
+**no C compiler, no `as`, no `ld`** anywhere in the repository, and the
+build is proven deterministic (the seed reproduces itself byte-for-bit
+from source). The C bootstrap compiler has been **removed from the
+repository** (M7) after the full differential suite proved the
+Okular-written compiler equivalent on every test case.
 
-**Self-hosting (M4):** the tokenizer (`selfhost/lexer`), the **parser**
-(`selfhost/parser` — the complete grammar, in Okular), and the **runtime**
-(`selfhost/runtime` — formatters, text arena, conversions, the heap
-allocator, file operations, on the `sys.*` syscall floor) are all
-written in Okular. `--selfhost-lex` routes tokenization through the
-Okular lexer, `--selfhost-parse` routes parsing through the Okular
-parser (the machine AST protocol rebuilds the tree sema consumes), and
-`--selfhost-verify` differentially proves the two parsers' outputs
-byte-identical across the whole positive suite — end-to-end program
-output is identical through both paths. The **runtime** is written in
-Okular too (`selfhost/runtime`, on the `sys.*` syscall floor — spec
-§23), and the **integrated assembler has begun** (`selfhost/assembler`
-emits a running native ELF64 executable from Okular with no `as` and no
-`ld`). 0.13 also adds `text.from_bytes` and the
-`ptr.to_number`/`number.to_ptr` address conversions.
+The language covers real systems programming on x86-64 Linux: arrays
+and structs with value semantics, the full fixed-width integer family,
+pointers with manual memory (`&x`, `*p`, `alloc<T>(n)` /
+`release(p)` over a real heap allocator, null checks, scaled pointer
+arithmetic), records with predictable layout, unions with
+type-directed literals, the full conversion builtin set, **bitwise
+operations** with range-checked shifts, **short-circuit `and`/`or`**,
+and the raw syscall floor (`sys.*` — write/read/open/close/size/mmap/
+exit/chmod/mkdir/getdents) that the runtime itself rides on.
 
 ```ok
 type.text=1
@@ -73,9 +66,9 @@ nothing but the kernel.
 ## Quick start
 
 ```console
-$ make
+$ make                        # the seed compiles the compiler — zero C
 $ cd examples/HelloProject
-$ ../../build/okular --compile main.ok
+$ ../../build/okular main.ok
 okular: wrote ./build/output/main
 $ ./build/output/main
 Hello 1 Hello 2 Hello 3
@@ -85,15 +78,16 @@ okular!
 ## Repository layout
 
 ```
-bootstrap/    the C bootstrap compiler (temporary scaffolding, M1–M6)
-selfhost/     compiler components written in Okular (lexer first, M3/M4)
-runtime/      the freestanding runtime shim (raw syscalls, no libc)
+bin/          okular — the committed native seed compiler (self-built,
+              byte-reproducible from selfhost/compiler sources)
+selfhost/     the compiler written in Okular (toks, parser, sema, ir,
+              emit, elf, rt, and the M3/M4 component lineage)
 specs/        the language specification (versioned, honest status table)
 docs/         getting started, language basics, architecture, roadmap
 examples/     runnable Okular programs (HelloProject = full project)
-tests/        the test suite (positive / negative / policy / flags)
-tools/        run_tests.sh and future tooling
-std/          standard library (planned — fs builtins bridge the gap)
+tests/        the test suite (positive / negative / policy)
+tools/        run_selfbuild_check.sh, run_selfhost_tests.sh,
+              update_seed.sh, package_release.sh
 build/        build artifacts
 ```
 
@@ -111,14 +105,18 @@ build/        build artifacts
 
 ```console
 $ make test
-passed: 530   failed: 0
-ALL TESTS PASSED
+selfbuild: seed self-reproduction byte-identical ...
+selfhost differential: passed 191   failed 0
+ALL SELFHOST TESTS PASSED
 ```
 
-## The bootstrap plan
+## The self-hosting arc
 
-C is scaffolding. The evolution is tracked explicitly
-(`docs/roadmap.md`): the bootstrap compiler (M1) → substantial programs
-(M2) → compiling portions of the compiler itself (M3) → components
-rewritten in Okular (M4) → self-hosting (M5) → C no longer required (M6)
-→ C removed (M7). Nothing is claimed before the test suite proves it.
+The evolution is complete and tracked in `docs/roadmap.md`: bootstrap
+compiler (M1) → substantial programs (M2) → compiling portions of the
+compiler itself (M3) → components rewritten in Okular (M4) →
+self-hosting (M5) → C no longer required (M6) → **C removed (M7 —
+done)**. The compiler's own changes flow through
+`make update-seed`: build to a new verified self-compilation fixed
+point, run the suite, install the new seed. Nothing is claimed before
+the test suite proves it.

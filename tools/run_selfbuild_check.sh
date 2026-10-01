@@ -5,9 +5,10 @@
 #   1. the seed compiles the compiler -> must reproduce the seed BYTE-IDENTICALLY
 #      (deterministic self-reproduction: `make` on a clean checkout rebuilds
 #      the committed binary bit-for-bit; no C compiler, no as, no ld anywhere)
-#   2. the built compiler passes the full differential suite (187 cases:
+#   2. the built compiler passes the full differential suite (191 cases:
 #      positive programs compile and run with exactly the expected output;
-#      negative programs are rejected with exactly the expected diagnostics)
+#      negative programs are rejected with exactly the expected diagnostics;
+#      policy cases verify the optional-source semantics)
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SEED="$REPO/bin/okular"

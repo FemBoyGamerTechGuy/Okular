@@ -1085,7 +1085,15 @@ function.emit_call(type.ptr<type.IrInst>.in) -> number {
     }
 
     # aligned call to the function's symbol
-    call_aligned_sym(sym_by_name(fi.mangled))
+    type.number csym = sym_by_name(fi.mangled)
+    when (csym < 0) {
+        # a call into a module that was skipped (not in any
+        # [source.files.use] list): its code was never emitted
+        sys.write(2, "okular: call to `" + fi.mangled + "` cannot be linked — its module was skipped (add it to [source.files.use]).\n")
+        emit_failed = 1
+        csym = 0
+    }
+    call_aligned_sym(csym)
 
     # result: integers/pointers extended in rax; decimal bits; text pair
     type.ptr<type.Ty> ret = fi.ret
@@ -2079,6 +2087,13 @@ function.sys_scratch_off() -> number {
 
 type.number cur_scratch = 0
 
+# set when emission hit an unresolvable symbol; the driver fails the build
+type.number emit_failed = 0
+
+function.emit_failed_flag() -> number {
+    return emit_failed
+}
+
 # mov rdi, rax style helpers already exist; a few extras:
 function.mov_eax_imm(number.v) -> number {
     put(0xB8)
@@ -2174,6 +2189,21 @@ function.emit_sysop(type.ptr<type.IrInst>.in) -> number {
         mov_eax_imm(2)
         emit_syscall_insn()
         label_here(ldone)
+        push_rax()
+        return 0
+    }
+    when (in.i == 9) {
+        # sys.getdents(number.fd, ptr<byte>.buf, number.len): getdents64(2)
+        pop_rax()
+        mov_rr(R_R9, R_RAX)          # len
+        pop_rax()
+        mov_rr(R_R10, R_RAX)         # buf
+        pop_rax()
+        mov_rr(R_RDI, R_RAX)         # fd
+        mov_rr(R_RSI, R_R10)
+        mov_rr(R_RDX, R_R9)
+        mov_eax_imm(217)
+        emit_syscall_insn()
         push_rax()
         return 0
     }

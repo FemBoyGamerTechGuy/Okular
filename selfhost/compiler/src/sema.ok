@@ -57,6 +57,31 @@ type.ptr<type.text> diag_file = null
 type.ptr<type.text> diag_msg = null
 type.number n_errors = 0
 
+# optional-source policy (spec §36): while set, errors are recorded as
+# warnings and do not fail the build — used for src/ files that are not in
+# any [source.files.use] list (checked, then skipped)
+type.number downgrade = 0
+type.number downgraded_hit = 0
+type.number strict = 0
+
+function.set_downgrade(number.v) -> number {
+    downgrade = v
+    return 0
+}
+
+function.set_strict(number.v) -> number {
+    strict = v
+    return 0
+}
+
+# effective downgrade for a module: optional AND not strict
+function.mod_downgrade(type.ptr<type.Mod>.m) -> number {
+    when (strict == 1) {
+        return 0
+    }
+    return 1 - m.required
+}
+
 type.number warn_enabled = 0
 
 function.diag_reset() -> number {
@@ -103,12 +128,15 @@ function.diag_grow() -> number {
     return 0
 }
 
-# error at a node: sev 1
+# error at a node: sev 1 (downgraded to a warning under the optional policy)
 function.serr_node(type.ptr<type.Node>.n, text.msg) -> number {
     when (diag_n == diag_cap) {
         diag_grow()
     }
     diag_sev[diag_n] = 1
+    when (downgrade == 1) {
+        diag_sev[diag_n] = 0
+    }
     when (n == null) {
         diag_line[diag_n] = 0
         diag_col[diag_n] = 0
@@ -121,7 +149,12 @@ function.serr_node(type.ptr<type.Node>.n, text.msg) -> number {
     }
     diag_msg[diag_n] = msg
     diag_n = diag_n + 1
-    n_errors = n_errors + 1
+    when (downgrade == 0) {
+        n_errors = n_errors + 1
+    }
+    else {
+        downgraded_hit = 1
+    }
     return 0
 }
 
@@ -152,12 +185,20 @@ function.serr_line(number.l, number.c, text.msg) -> number {
         diag_grow()
     }
     diag_sev[diag_n] = 1
+    when (downgrade == 1) {
+        diag_sev[diag_n] = 0
+    }
     diag_line[diag_n] = l
     diag_col[diag_n] = c
     diag_file[diag_n] = cur_mod_display()
     diag_msg[diag_n] = msg
     diag_n = diag_n + 1
-    n_errors = n_errors + 1
+    when (downgrade == 0) {
+        n_errors = n_errors + 1
+    }
+    else {
+        downgraded_hit = 1
+    }
     return 0
 }
 
@@ -3020,6 +3061,12 @@ function.check_call(type.ptr<type.Node>.n) -> type.ptr<type.Ty> {
             sig = "sys.mkdir(text.path, number.mode) -> number"
             rty = T_NUMBER
         }
+        else when (n.parts[1] == "getdents") {
+            op = 9
+            want_args = 3
+            sig = "sys.getdents(number.fd, ptr<byte>.buf, number.len) -> number"
+            rty = T_NUMBER
+        }
         when (op >= 0) {
             builtin_clash(n)
             type.text full = path_join(n.parts, n.nparts)
@@ -3101,6 +3148,20 @@ function.check_call(type.ptr<type.Node>.n) -> type.ptr<type.Ty> {
                     }
                     else when (i == 1 and is_integer(at) == false) {
                         serr_node(arg, "the mode of `sys." + nm + "` must be an integer, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                }
+                else when (op == 9) {
+                    when (i == 0 and is_integer(at) == false) {
+                        serr_node(arg, "the file descriptor of `sys.getdents` must be an integer, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                    else when (i == 1 and (is_ptr(at) == false or at.elem != T_UINT8)) {
+                        serr_node(arg, "the buffer of `sys.getdents` must be `ptr<byte>`, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                    else when (i == 2 and is_integer(at) == false) {
+                        serr_node(arg, "the length of `sys.getdents` must be an integer, but a `" + ty_name(at) + "` value was given.")
                         note(arg, "signature: " + sig)
                     }
                 }
@@ -4554,12 +4615,13 @@ function.sema_run() -> number {
 
     type.number errmark = n_errors
 
-    # phase 1: collect symbols, module scopes
+    # phase 1: collect symbols, module scopes (optional modules: downgraded)
     loop (i from 0 until n_mods) {
         type.ptr<type.Mod> m = all_mods[i]
         when (m.state != 1) {
             continue
         }
+        set_downgrade(mod_downgrade(m))
         when (m.name == "main") {
             collect_toplevel(m, m.ast, root_scope)
         }
@@ -4574,6 +4636,7 @@ function.sema_run() -> number {
             bind.ns = mscope
         }
     }
+    set_downgrade(0)
 
     # phase 1.5: register + lay out struct types (fill placeholders in place)
     loop (i from 0 until n_mods) {
@@ -4581,6 +4644,7 @@ function.sema_run() -> number {
         when (m.state != 1) {
             continue
         }
+        set_downgrade(mod_downgrade(m))
         type.ptr<type.Scope> mscope = root_scope
         when (m.name != "main") {
             type.ptr<type.Symbol> bs = scope_find_local(root_scope, m.name)
@@ -4590,6 +4654,7 @@ function.sema_run() -> number {
         }
         collect_structs_in(m, m.ast, mscope)
     }
+    set_downgrade(0)
     layout_all_structs()
 
     # phase 2: check bodies
@@ -4598,6 +4663,7 @@ function.sema_run() -> number {
         when (m.state != 1) {
             continue
         }
+        set_downgrade(mod_downgrade(m))
         type.ptr<type.Scope> mscope = root_scope
         when (m.name != "main") {
             type.ptr<type.Symbol> bs = scope_find_local(root_scope, m.name)
@@ -4606,11 +4672,13 @@ function.sema_run() -> number {
             }
         }
         type.number mark = n_errors
+        downgraded_hit = 0
         check_module(m, mscope)
-        when (n_errors > mark) {
+        when (n_errors > mark or downgraded_hit == 1) {
             m.broken = 1
         }
     }
+    set_downgrade(0)
 
     when (n_errors == errmark) {
         return 1

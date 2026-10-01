@@ -8,7 +8,7 @@ on:
 
 jobs:
   selfhost:
-    name: C-free build + self-reproduction + differential suite
+    name: Build (zero C) + self-reproduction + full suite
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,20 +19,8 @@ jobs:
       - name: Build the Okular compiler with the native seed (zero C)
         run: make
 
-      - name: Self-reproduction + 187-case differential suite
+      - name: Self-reproduction + 191-case differential suite
         run: bash tools/run_selfbuild_check.sh
-
-  c-differential:
-    name: Legacy C bootstrap differential (transitional until M7)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Full legacy suite through the C bootstrap (560 checks)
-        run: make test-c
-
-      - name: M5 bootstrap chain (stage 0 -> 1 -> 2 -> 3 fixed point)
-        run: bash tools/run_bootstrap_chain.sh
 
   release-package:
     name: Package and test the real product

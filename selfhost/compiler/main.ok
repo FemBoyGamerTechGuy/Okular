@@ -68,6 +68,7 @@ function.strip_quotes(text.sp) -> text {
 # ---- flags ----
 
 type.number dump_ir_flag = 0
+type.number strict_mode = 0
 
 # ---- the used-module collection (prescan over the token buffer) ----
 
@@ -164,10 +165,16 @@ type.text proj_root = "."
 
 type.number load_errors = 0
 
-function.report_load_error(text.display, text.msg) -> number {
-    # load-time errors carry no position; they fail the build
-    sys.write(2, display + ": error: " + msg + "\n")
-    load_errors = 1
+function.report_load_error(text.display, text.msg, number.required) -> number {
+    # load-time errors carry no position; for optional modules (spec §36)
+    # they are warnings and do not fail the build
+    when (required == 1) {
+        sys.write(2, display + ": error: " + msg + "\n")
+        load_errors = 1
+    }
+    else {
+        sys.write(2, display + ": warning: " + msg + "\n")
+    }
     return 0
 }
 
@@ -178,7 +185,7 @@ function.load_module(text.name, text.path, text.display, number.required) -> num
 
     toks.load(path)
     when (toks.get_err_kind() != toks.ERR_NONE) {
-        report_load_error(display, "unexpected byte in source.")
+        report_load_error(display, "unexpected byte in source.", required + strict_mode)
         m.state = 0
         m.broken = 1
         return 0
@@ -193,13 +200,13 @@ function.load_module(text.name, text.path, text.display, number.required) -> num
         type.ptr<type.Mod> ex = sema.find_mod(dep)
         when (ex != null) {
             when (ex.state == 2) {
-                report_load_error(display, "cyclic source dependency: `" + dep + "` is being loaded (directly or indirectly).")
+                report_load_error(display, "cyclic source dependency: `" + dep + "` is being loaded (directly or indirectly).", required + strict_mode)
             }
             continue
         }
         type.text dep_path = path_join(proj_root, "src/" + dep + ".ok")
         when (fs.exists(dep_path) == false) {
-            report_load_error(display, "source file `" + dep + "` was not found in `src/`.")
+            report_load_error(display, "source file `" + dep + "` was not found in `src/`.", required + strict_mode)
             continue
         }
         load_module(dep, dep_path, "src/" + dep + ".ok", required)
@@ -248,6 +255,61 @@ function.inject_runtime(text.exe_path) -> number {
     return 0
 }
 
+# ---- the optional-source scan (spec §36) ----
+
+# every src/*.ok file that is not in any [source.files.use] list is
+# loaded as an OPTIONAL module: parsed and checked (errors downgraded to
+# warnings), never linked. Broken ones are reported as skipped. Uses
+# sys.getdents over the raw getdents64(2) buffer format:
+#   u64 ino | u64 off | u16 reclen | u8 type | char name[] | NUL
+function.scan_optional_sources() -> number {
+    type.text srcdir = path_join(proj_root, "src")
+    when (fs.exists(srcdir) == false) {
+        return 0
+    }
+    type.number fd = sys.open(srcdir, 0, 0)
+    when (fd < 0) {
+        return 0
+    }
+    type.ptr<type.byte> buf = sys.mmap(4096)
+    when (buf == null) {
+        sys.close(fd)
+        return 0
+    }
+    loop (true) {
+        type.number n = sys.getdents(fd, buf, 4000)
+        when (n <= 0) {
+            break
+        }
+        type.text blob = text.from_bytes(buf, n)
+        type.number off = 0
+        loop (off + 19 <= n) {
+            type.number reclen = text.byte_at(blob, off + 16) + 256 * text.byte_at(blob, off + 17)
+            when (reclen < 20 or off + reclen > n) {
+                break
+            }
+            type.number e = off + 19
+            loop (e < n and text.byte_at(blob, e) != 0) {
+                e = e + 1
+            }
+            type.text name = text.slice(blob, off + 19, e)
+            type.number nl = text.length(name)
+            when (nl > 3 and name != "main.ok") {
+                # ends with ".ok"?
+                when (text.byte_at(name, nl - 1) == 107 and text.byte_at(name, nl - 2) == 111 and text.byte_at(name, nl - 3) == 46) {
+                    type.text mod = text.slice(name, 0, nl - 3)
+                    when (sema.find_mod(mod) == null) {
+                        load_module(mod, path_join(srcdir, name), "src/" + name, 0)
+                    }
+                }
+            }
+            off = off + reclen
+        }
+    }
+    sys.close(fd)
+    return 0
+}
+
 # ---- phase B: parse every module ----
 
 function.parse_all() -> number {
@@ -259,6 +321,7 @@ function.parse_all() -> number {
         toks.load(m.path)
         parser.begin()
         sema.set_cur_mod(m)
+        sema.set_downgrade(sema.mod_downgrade(m))
         type.ptr<type.Node> file = parser.parse_file()
         m.ast = file
         type.number nerr = parser.error_count()
@@ -271,7 +334,9 @@ function.parse_all() -> number {
             continue
         }
         sema.canon_node(file)
+        sema.set_downgrade(0)
     }
+    sema.set_downgrade(0)
     return 0
 }
 
@@ -304,9 +369,11 @@ function.push_irmod(type.ptr<type.IrModule>.im) -> number {
 }
 
 function.build_ir() -> number {
+    # IR for required modules only (spec §36: optional modules are checked,
+    # then skipped — never linked)
     loop (i from 0 until sema.mod_count()) {
         type.ptr<type.Mod> m = sema.mod_at(i)
-        when (m.state != 1) {
+        when (m.state != 1 or m.required != 1) {
             continue
         }
         type.ptr<type.IrModule> im = ir.ir_build_module(m)
@@ -339,16 +406,36 @@ function.mkdir_p(text.path) -> number {
 function.main() -> number {
     type.number argc = env.arg_count()
     when (argc < 2) {
-        sys.write(2, "usage: okc <main.ok> [--out <path>]\n")
+        sys.write(2, "usage: okc <main.ok> [--out <path>] [--dump-ir] [-s | --strict]\n")
         return 2
     }
     type.text main_path = env.arg(1)
     type.text out_path = ""
-    when (argc >= 3 and env.arg(2) == "--dump-ir") {
-        dump_ir_flag = 1
+
+    # flags: --out <path>, --dump-ir, -s/--strict (any order)
+    type.number ai = 2
+    loop (ai < argc) {
+        type.text a = env.arg(ai)
+        when (a == "--out") {
+            ai = ai + 1
+            when (ai < argc) {
+                out_path = env.arg(ai)
+            }
+        }
+        else when (a == "--dump-ir") {
+            dump_ir_flag = 1
+        }
+        else when (a == "-s" or a == "--strict") {
+            strict_mode = 1
+        }
+        else {
+            sys.write(2, "okc: unknown flag `" + a + "`.\n")
+            return 2
+        }
+        ai = ai + 1
     }
-    when (argc >= 4 and env.arg(2) == "--out") {
-        out_path = env.arg(3)
+    when (strict_mode == 1) {
+        sema.set_strict(1)
     }
 
     sema.init_types()
@@ -361,6 +448,7 @@ function.main() -> number {
     when (inject_runtime(env.arg(0)) != 0) {
         return 1
     }
+    scan_optional_sources()
 
     parse_all()
 
@@ -408,6 +496,20 @@ function.main() -> number {
         return 1
     }
     sys.chmod(out_path, 493)
+
+    when (emit.emit_failed_flag() == 1) {
+        sema.render_all()
+        sys.write(2, "okular: compilation failed; no executable was produced.\n")
+        return 1
+    }
+
+    # report skipped optional modules (the normal-mode summary)
+    loop (i from 0 until sema.mod_count()) {
+        type.ptr<type.Mod> m = sema.mod_at(i)
+        when (m.broken == 1 and m.required != 1) {
+            sys.write(2, "okular: note: src/" + m.name + ".ok was skipped (broken and unused).\n")
+        }
+    }
 
     sema.render_all()
     sys.write(2, "okular: wrote " + out_path + "\n")
