@@ -1,0 +1,6 @@
+type.text=1
+
+function.main() -> number {
+    write(text.byte_at("hi", "x"))
+    return 0
+}

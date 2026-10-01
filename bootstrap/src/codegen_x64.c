@@ -163,25 +163,42 @@ static void gen_function(Buf *out, IrModule *im, IrFunc *f, size_t seq) {
     buf_puts(out, "    push rbp\n    mov rbp, rsp\n");
     buf_printf(out, "    sub rsp, %zu\n", frame);
 
-    /* store parameters into their slots (params are slots 0..n-1) */
+    /* store parameters into their slots (params are slots 0..n-1).
+     *
+     * ARGUMENT REGISTERS ARE SAVED FIRST: adopting one parameter can
+     * clobber scratch registers (text uses rax/rdx, arrays use rsi/rdi/rcx)
+     * that a LATER parameter still needs in its original argument register
+     * — the third text parameter travels in rdx and used to crash exactly
+     * here (found by the 0.9 text-op work; regression: text_local_layout) */
+    if (f->fi->nparams > 0) {
+        buf_puts(out, "    push rdi\n    push rsi\n    push rdx\n"
+                      "    push rcx\n    push r8\n    push r9\n");
+    }
     for (size_t k = 0; k < f->fi->nparams && k < 6; k++) {
         size_t o = fc.offsets[k];
+        size_t so = (5 - k) * 8;  /* saved argument register k at [rsp+so] */
         if (ty_kind(f->fi->param_types[k]) == OK_ARRAY || ty_is_record(f->fi->param_types[k])) {
-            /* the register holds the caller's copy: adopt it by value */
-            buf_printf(out, "    mov rsi, %s\n", arg_regs[k]);
+            /* the saved register holds the caller's copy: adopt it by value */
+            buf_printf(out, "    mov r11, [rsp+%zu]\n", so);
+            buf_puts(out, "    mov rsi, r11\n");
             buf_printf(out, "    lea rdi, [rbp-%zu]\n", o);
             buf_printf(out, "    mov rcx, %zu\n    rep movsb\n",
                        ty_bytes(f->fi->param_types[k]));
         } else if (f->fi->param_types[k] == ty_text) {
-            /* reg holds the address of a (ptr,len) pair */
-            buf_printf(out, "    mov rax, [%s]\n", arg_regs[k]);
-            buf_printf(out, "    mov rdx, [%s+8]\n", arg_regs[k]);
+            /* the saved register holds the address of a (ptr,len) pair; the
+             * slot's second word sits toward rbp (LOAD/STORE_LOCAL match) */
+            buf_printf(out, "    mov r11, [rsp+%zu]\n", so);
+            buf_puts(out, "    mov rax, [r11]\n    mov rdx, [r11+8]\n");
             buf_printf(out, "    mov [rbp-%zu], rax\n", o);
-            buf_printf(out, "    mov [rbp-%zu], rdx\n", o + 8);
+            buf_printf(out, "    mov [rbp-%zu], rdx\n", o - 8);
         } else {
             /* scalars (any width) travel extended: one full word */
-            buf_printf(out, "    mov [rbp-%zu], %s\n", o, arg_regs[k]);
+            buf_printf(out, "    mov r11, [rsp+%zu]\n", so);
+            buf_printf(out, "    mov [rbp-%zu], r11\n", o);
         }
+    }
+    if (f->fi->nparams > 0) {
+        buf_puts(out, "    add rsp, 48\n");
     }
 
     for (size_t i = 0; i < f->n; i++)
@@ -456,8 +473,12 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
     case I_LOAD_LOCAL: {
         size_t off = fc->offsets[in->slot];
         if (in->type == ty_text) {
+            /* the pair is [rbp-off] = ptr, [rbp-off+8] = len — the SECOND
+             * word sits TOWARD rbp (off-8 in rbp-relative form). Writing it
+             * at off+8 would land in the NEIGHBOR slot (a 0.6 defect that
+             * surfaced when a text local was followed by any other local) */
             buf_printf(o, "    mov rax, [rbp-%zu]\n", off);
-            buf_printf(o, "    mov rdx, [rbp-%zu]\n", off + 8);
+            buf_printf(o, "    mov rdx, [rbp-%zu]\n", off - 8);
             push_pair_rax_rdx(o);
         } else {
             buf_printf(o, "    mov rax, [rbp-%zu]\n", off);
@@ -470,7 +491,7 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         if (in->type == ty_text) {
             pop_pair_rax_rdx(o);
             buf_printf(o, "    mov [rbp-%zu], rax\n", off);
-            buf_printf(o, "    mov [rbp-%zu], rdx\n", off + 8);
+            buf_printf(o, "    mov [rbp-%zu], rdx\n", off - 8);
         } else {
             pop_rax(o);
             buf_printf(o, "    mov [rbp-%zu], rax\n", off);
@@ -706,6 +727,53 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
             buf_puts(o, "    add rax, rcx\n");
         }
         push_rax(o);
+        break;
+    }
+    case I_TEXT_LEN: {
+        /* pop the (ptr,len) pair; the length half IS the value */
+        pop_pair_rax_rdx(o);
+        buf_puts(o, "    mov rax, rdx\n");
+        push_rax(o);
+        break;
+    }
+    case I_TEXT_BYTE: {
+        /* pop index (r11), pop text (rax=ptr, rdx=len); unsigned bounds
+         * check traps exactly like array indexing (D24); movzx the byte */
+        buf_puts(o, "    pop r11\n");           /* index */
+        pop_pair_rax_rdx(o);                     /* rax = ptr, rdx = len */
+        buf_puts(o, "    cmp r11, rdx\n");
+        buf_printf(o, "    jb .Lbok_%zu_%zu\n", fc->func_seq, fc->trap_seq);
+        buf_puts(o, "    mov rdi, r11\n    mov rsi, rdx\n");
+        call_aligned(o, "rt_text_bounds_trap");
+        buf_printf(o, ".Lbok_%zu_%zu:\n", fc->func_seq, fc->trap_seq);
+        fc->trap_seq++;
+        buf_puts(o, "    movzx rax, BYTE PTR [rax + r11]\n");
+        push_rax(o);
+        break;
+    }
+    case I_TEXT_SLICE: {
+        /* pop to (r10), pop from (r11), pop text (rax=ptr, rdx=len);
+         * bounds: 0 <= from <= to <= len, end-exclusive; traps otherwise.
+         * The result shares the original's immutable bytes — O(1) */
+        buf_puts(o, "    pop r10\n");           /* to (exclusive) */
+        buf_puts(o, "    pop r11\n");           /* from */
+        pop_pair_rax_rdx(o);                     /* rax = ptr, rdx = len */
+        buf_puts(o, "    cmp r11, r10\n");
+        buf_printf(o, "    jbe .Lsok_%zu_%zu\n", fc->func_seq, fc->trap_seq);
+        buf_puts(o, "    mov rdi, r11\n    mov rsi, r10\n");
+        call_aligned(o, "rt_text_bounds_trap");
+        buf_printf(o, ".Lsok_%zu_%zu:\n", fc->func_seq, fc->trap_seq);
+        fc->trap_seq++;
+        buf_puts(o, "    cmp r10, rdx\n");
+        buf_printf(o, "    jbe .Lsok_%zu_%zu\n", fc->func_seq, fc->trap_seq);
+        buf_puts(o, "    mov rdi, r10\n    mov rsi, rdx\n");
+        call_aligned(o, "rt_text_bounds_trap");
+        buf_printf(o, ".Lsok_%zu_%zu:\n", fc->func_seq, fc->trap_seq);
+        fc->trap_seq++;
+        buf_puts(o, "    add rax, r11\n");       /* new ptr */
+        buf_puts(o, "    sub r10, r11\n");      /* new len */
+        buf_puts(o, "    mov rdx, r10\n");
+        push_pair_rax_rdx(o);
         break;
     }
     case I_LOAD_AT: {

@@ -1,0 +1,22 @@
+type.text=1
+
+function.main() -> number {
+    type.text s = "the quick brown fox"
+    type.text quick = text.slice(s, 4, 9)
+    write(quick)
+    print
+    type.text mid = text.slice(quick, 1, 4)
+    write(mid)
+    print
+    type.text none = text.slice(s, 4, 4)
+    write(text.length(none))
+    print
+    type.text all = text.slice(s, 0, text.length(s))
+    write(all)
+    print
+    write(text.byte_at(quick, 0))
+    print
+    return 0
+}
+
+main()

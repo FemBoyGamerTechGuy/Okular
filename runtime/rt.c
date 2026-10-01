@@ -463,11 +463,11 @@ void rt_null_trap(void) {
     sys_exit(73);
 }
 
-void rt_bounds_trap(i64 index, u64 length) {
+/* shared bounds-trap reporter: prefix + index + length, exit 70 (D24) */
+static void rt_bounds_trap_named(const char *pre, i64 index, u64 length) {
     char msg[96];
     u64 n = 0;
 
-    const char *pre = "array index ";
     for (const char *c = pre; *c; c++) msg[n++] = *c;
 
     /* print the offending index (negative indices are reported signed) */
@@ -497,4 +497,14 @@ void rt_bounds_trap(i64 index, u64 length) {
     sys_write(2, "okular runtime error: ", 22);
     sys_write(2, msg, n);
     sys_exit(70);
+}
+
+void rt_bounds_trap(i64 index, u64 length) {
+    rt_bounds_trap_named("array index ", index, length);
+}
+
+/* 0.9: text.byte_at / text.slice bounds violations report themselves
+ * with a text-specific message (same trap family, same exit code 70) */
+void rt_text_bounds_trap(i64 index, u64 length) {
+    rt_bounds_trap_named("text position ", index, length);
 }

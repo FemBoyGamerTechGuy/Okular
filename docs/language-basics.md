@@ -1,7 +1,7 @@
 # Okular Language Basics (0.1)
 
 A tour of what Okular 0.1 does today. The specification
-(`specs/spec-v0.8.md`) is the source of truth; this page is the friendly
+(`specs/spec-v0.9.md`) is the source of truth; this page is the friendly
 version. Everything shown here compiles and runs with the bootstrap
 compiler.
 
@@ -250,7 +250,7 @@ type.array<type.number, 5> copy = {0, 0, 0, 0, 0}
 copy = scores           # whole-array copy
 ```
 
-See `specs/spec-v0.8.md` §8.4 for the complete rules.
+See `specs/spec-v0.9.md` §8.4 for the complete rules.
 
 ## Structs
 
@@ -273,12 +273,12 @@ Structs copy by value (assignment, parameters); `value.field` reads
 fields — on variables, through namespaces, on array elements, and on
 pointers (auto-dereferenced and null-checked). Nesting, arrays of
 structs, structs on the heap (`alloc<type.Rect>(2)`), and
-self-referential `ptr` fields all work. See `specs/spec-v0.8.md` §8.3.
+self-referential `ptr` fields all work. See `specs/spec-v0.9.md` §8.3.
 
 ## Unions
 
 One storage, several member views — the reinterpretation type
-(0.7, `specs/spec-v0.8.md` §8.5):
+(0.7, `specs/spec-v0.9.md` §8.5):
 
 ```ok
 union.Word = {
@@ -301,6 +301,20 @@ copy by value, and work as globals with deterministic `.data`. They are not
 comparable and functions cannot return them directly yet — the same
 restrictions as structs.
 
+## Text operations (0.9)
+
+```ok
+type.text s = "hello, okular"
+write(text.length(s))            # 13 — bytes
+write(text.byte_at(s, 0))        # 104 — 'h'
+type.text word = text.slice(s, 0, 5)   # "hello" — end-exclusive, O(1)
+```
+
+`text.length` counts bytes; `text.byte_at` reads one bounds-checked byte;
+`text.slice(s, from, to)` is the substring `[from, to)` sharing the
+original's immutable bytes — pointer arithmetic, not a copy. All three
+fold at compile time when their operands do. See `specs/spec-v0.9.md` §4.5.
+
 ## Constants and type.auto (0.8)
 
 ```ok
@@ -317,13 +331,13 @@ load. They work at file and column scope, fold into other constants and
 global initializers, and reject assignment. `type.auto` infers a
 declaration's type from its initializer (locals, globals, column
 members); literals and `null` cannot drive inference, and params/returns/
-members stay explicit. See `specs/spec-v0.8.md` §8.1.
+members stay explicit. See `specs/spec-v0.9.md` §8.1.
 
-## What 0.8 does not have (yet)
+## What 0.9 does not have (yet)
 
 Dynamic-length arrays, FFI, threads, match expressions, aliases, and
 visibility modifiers are all
-**designed** (see `specs/spec-v0.8.md` §20 and
+**designed** (see `specs/spec-v0.9.md` §20 and
 `docs/roadmap.md`) and **not implemented**. The same goes for `f32` (a true
 32-bit float). The compiler says so plainly
 when you use a reserved construct — it never pretends.

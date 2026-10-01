@@ -1,0 +1,54 @@
+# text_ops.ok — Okular 0.9 text operations (spec §4.5).
+# Byte-level access without pointers: length, bounds-checked byte_at,
+# O(1) slices. The seed of every lexer.
+
+type.text=1
+
+const.alphabet = "abcdefghijklmnopqrstuvwxyz"
+
+function.count_word(text.line, text.word) -> number {
+    # a tiny substring scanner: slide a window the size of `word`
+    type.number hits = 0
+    type.number n = text.length(line)
+    type.number w = text.length(word)
+    when (w > n) {
+        return 0
+    }
+    loop (i from 0 to n - w) {
+        type.text window = text.slice(line, i, i + w)
+        when (window == word) {
+            hits = hits + 1
+        }
+    }
+    return hits
+}
+
+function.main() -> number {
+    write(text.length(alphabet))
+    print
+
+    # bytes: 'a' is 97, 'z' is 122
+    write(text.byte_at(alphabet, 0))
+    print
+    write(text.byte_at(alphabet, 25))
+    print
+
+    # slices are windows into immutable bytes — O(1), bounds-checked
+    type.text mid = text.slice(alphabet, 13, 20)
+    write(mid)
+    print
+    write(text.length(mid))
+    print
+
+    # the substring scanner
+    type.text line = "the cat sat on the mat, the end"
+    write(count_word(line, "the"))
+    print
+    write(count_word(line, "cat"))
+    print
+    write(count_word(line, "zebra"))
+    print
+    return 0
+}
+
+main()

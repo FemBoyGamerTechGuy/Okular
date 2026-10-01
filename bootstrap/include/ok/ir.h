@@ -17,6 +17,11 @@ typedef enum {
     I_CONST_DEC,     /* d: double value       -> decimal     */
     I_CONST_BOOL,    /* b                     -> bool        */
     I_CONST_TEXT,    /* text_idx              -> text        */
+    /* text operations (0.9, spec §4.5): operands and results are ordinary
+     * stack values; BYTE and SLICE bounds-trap like array indexing */
+    I_TEXT_LEN,      /* (text)                -> number      */
+    I_TEXT_BYTE,     /* (text, index)         -> uint8       */
+    I_TEXT_SLICE,    /* (text, from, to)      -> text [from, to) */
     I_LOAD_LOCAL,    /* slot                  -> type        */
     I_STORE_LOCAL,   /* slot  (pops)                            */
     I_LOAD_GLOBAL,   /* sym: Symbol*          -> type        */

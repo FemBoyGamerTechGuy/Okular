@@ -1,0 +1,6 @@
+type.text=1
+
+function.main() -> number {
+    write(text.length(5))
+    return 0
+}

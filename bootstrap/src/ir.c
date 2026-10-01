@@ -382,6 +382,21 @@ static void build_expr(Ctx *c, Node *e) {
         }
         break;
     }
+    case A_TEXTOP: {
+        /* text.length / text.byte_at / text.slice (0.9, spec §4.5):
+         * operands build left-to-right; integer positions convert to
+         * number; the instruction consumes them from the operand stack */
+        for (size_t i = 0; i < e->args.len; i++) {
+            Node *arg = e->args.items[i];
+            build_operand_conv(c, arg, (i == 0) ? ty_text : ty_number);
+        }
+        int k = (e->fvalue == TOP_LEN) ? I_TEXT_LEN
+               : (e->fvalue == TOP_BYTE) ? I_TEXT_BYTE : I_TEXT_SLICE;
+        IrInst inst = { .kind = k, .type = e->rtype,
+                        .line = e->line, .col = e->col };
+        emit(c->f, inst);
+        break;
+    }
     case A_CONV: {
         /* explicit conversion builtin `T.to_U(x)` (spec §4.4) */
         build_expr(c, e->a);
@@ -1163,6 +1178,18 @@ void ir_fold(IrFunc *f) {
             stack[sp++] = (FoldVal){ .known = false,
                 .type = in.uop == UN_NOT ? ty_bool : in.type };
             break;
+        case I_TEXT_LEN:
+            if (sp >= 1) sp--;    /* the text pair is one logical operand */
+            stack[sp++] = (FoldVal){ .known = false, .type = ty_number };
+            break;
+        case I_TEXT_BYTE:
+            if (sp >= 2) sp -= 2; /* text + index */
+            stack[sp++] = (FoldVal){ .known = false, .type = ty_uint8 };
+            break;
+        case I_TEXT_SLICE:
+            if (sp >= 3) sp -= 3; /* text + from + to */
+            stack[sp++] = (FoldVal){ .known = false, .type = ty_text };
+            break;
         case I_STORE_LOCAL: case I_STORE_GLOBAL: case I_POP:
         case I_JMPF: case I_WRITE:
             if (sp > 0) sp--;
@@ -1239,6 +1266,9 @@ static const char *ir_kind_name(IrKind k) {
     case I_STORE_LOCAL: return "STORE_LOCAL";
     case I_LOAD_GLOBAL: return "LOAD_GLOBAL";
     case I_STORE_GLOBAL: return "STORE_GLOBAL";
+    case I_TEXT_LEN: return "TEXT_LEN";
+    case I_TEXT_BYTE: return "TEXT_BYTE";
+    case I_TEXT_SLICE: return "TEXT_SLICE";
     case I_CONV: return "CONV";
     case I_BINOP: return "BINOP";
     case I_UNOP: return "UNOP";

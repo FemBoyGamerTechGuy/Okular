@@ -1,9 +1,28 @@
 type.text=1
-type.text a = "Ok" + "ul" + "ar"
-type.text b = "Okular"
-write(a == b)
-write(" ")
-write(a != "other")
-write(" ")
-write("tab\tnl\nend")
-print
+
+function.main() -> number {
+    type.text s = "hello, okular"
+    write(text.length(s))
+    print
+    write(text.length("hi" + "!"))
+    print
+    write(text.byte_at(s, 0))
+    print
+    write(text.byte_at(s, 7))
+    print
+    type.text word = text.slice(s, 0, 5)
+    write(word)
+    print
+    write(text.length(text.slice(s, 7, 13)))
+    print
+    write(text.slice(s, 7, 13))
+    print
+    type.number i = 1
+    write(text.byte_at(s, i + 1))
+    print
+    write(text.slice(s, i, i + 3))
+    print
+    return 0
+}
+
+main()

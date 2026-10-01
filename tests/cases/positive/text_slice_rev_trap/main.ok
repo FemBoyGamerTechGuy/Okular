@@ -1,0 +1,10 @@
+type.text=1
+
+function.main() -> number {
+    type.text s = "hi"
+    type.text t = text.slice(s, 2, 1)
+    write(t)
+    return 0
+}
+
+main()

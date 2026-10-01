@@ -1,13 +1,15 @@
 # Okular Language Specification
 
-**Version:** 0.8 (constants and type inference)
+**Version:** 0.9 (text operations)
 **Status:** Evolving draft
 **Implementation:** bootstrap compiler in C (`bootstrap/`)
 
-> 0.8 adds **constants** (`const.name = value`, folded and inlined —
-> spec §8.1) and **type inference** (`type.auto x = init`, initializer-
-> driven — spec §8.1), and fixes a 0.5 defect: `&record.field` now yields
-> a pointer to the FIELD (was: the whole record). See the changelog in §23.
+> 0.9 adds **text operations** (spec §4.5): `text.length`, bounds-checked
+> `text.byte_at`, and O(1) end-exclusive `text.slice` — the byte-level
+> access a lexer needs, with constant folding throughout. It also fixes
+> two ABI defects from earlier releases: text locals' length word now
+> lives inside its slot, and argument registers are saved before parameter
+> adoption (three text parameters used to crash). See §23.
 
 > This specification is the source of truth for the Okular language.
 > When the implementation changes the language, this document changes with it.
@@ -394,6 +396,39 @@ type.number b = bool.to_number(true)    # 1
   fatal runtime trap (exit 76) for dynamic text. `T.to_bool` does not
   exist: compare explicitly (`x != 0`).
 * Array types never convert.
+
+### 4.5 Text operations (implemented in 0.9)
+
+Three builtins give byte-level access to text without pointers — the
+foundation for lexers, parsers, and every text-processing algorithm:
+
+```ok
+type.number n = text.length(s)          # byte count
+type.uint8  b = text.byte_at(s, i)      # byte at i (bounds-checked)
+type.text   t = text.slice(s, 1, 5)     # bytes [1, 5) — end-exclusive, O(1)
+```
+
+* `text.length(s)` is the byte length (UTF-8 text is measured in bytes;
+  code points are a higher-level facility that arrives with the standard
+  library's text module).
+* `text.byte_at(s, i)` reads byte `i` as `uint8`. The index may be any
+  integer type. Out-of-range positions are fatal traps (exit 70, the
+  bounds-trap family — same philosophy as arrays, D24) with a text-specific
+  message.
+* `text.slice(s, from, to)` is the substring `[from, to)` — **end-
+  exclusive**, matching `until` semantics. Bounds are `0 <= from <= to <=
+  text.length(s)`; violations trap at runtime and are compile errors when
+  the operands fold. The result shares the original's immutable bytes —
+  slicing is pointer arithmetic, not a copy: O(1), and the slice lives as
+  long as the original (text is immutable; nothing dangles).
+* All three fold at compile time when their operands do: `const.n =
+  text.length("hello")` is 5, `text.slice("okular", 0, 6)` in a global
+  initializer is the constant `"okular"`.
+* The names are builtins, not a namespace: a developer column named `text`
+  with members `length`/`byte_at`/`slice` must be renamed (the compiler
+  says so).
+* These join `+` (concatenation) and `==`/`!=` (content equality) as the
+  complete 0.9 text surface.
 
 ---
 
@@ -1192,6 +1227,7 @@ Major decisions and their rationale (required by the engineering brief §4.10):
 | D25 | `type.array<T, N>` mirrors the committed `type.ptr<T>` shape (§12) | one type-reference grammar; the count lives in the type, not the value |
 | D26 | Union literals are type-directed: the FIRST member whose type accepts the value is activated (§8.5) | every member sits at offset 0, so selection affects only checking and the store's type; declaration order breaks ties predictably |
 | D27 | Constants inline their folded value (no storage, no load); `type.auto` infers from the initializer only | consts stay compile-time facts; inference stays local to declarations — params/returns/members stay explicit |
+| D28 | `text.slice` is end-exclusive and O(1) (shares immutable bytes); text bounds trap like array bounds (exit 70) | `until`-consistent ranges; slicing is pointer arithmetic, not copying; safety stays opt-out, not opt-in |
 
 ---
 
@@ -1247,6 +1283,7 @@ An implementation claiming "Okular 0.1" must:
 | Unions (overlap layout, type-directed literals, reinterpretation) | §8.5 | implemented (0.7) |
 | Constants `const.name = value` (fold, inline, no storage) | §8.1 | implemented (0.8) |
 | Type inference `type.auto x = init` | §8.1 | implemented (0.8) |
+| Text ops: `text.length` / `text.byte_at` / `text.slice` | §4.5 | implemented (0.9) |
 | Constants as array lengths | §8.1 | NOT IMPLEMENTED (needs module-aware parsing) |
 | Expressions, precedence, constant folding | §9 | implemented |
 | `when`/`else` | §10 | implemented |
@@ -1270,6 +1307,27 @@ An implementation claiming "Okular 0.1" must:
 ---
 
 ## 23. Changelog
+
+### 0.9
+
+* **Text operations** (§4.5): `text.length(s)` (bytes), `text.byte_at(s,
+  i)` (uint8, bounds-checked, any integer index), `text.slice(s, from,
+  to)` (end-exclusive `[from, to)`, O(1) — shares the immutable bytes).
+  All three fold at compile time when operands do (consts and global
+  initializers included). Bounds violations trap with exit 70 and a
+  text-specific message; constant slice bounds are validated at compile
+  time.
+* **Fix (0.6 ABI defect)**: text locals' length word was stored one slot
+  *below* its storage — any later local clobbered it (`type.text s` +
+  `type.number x` corrupted `s`'s length). Slots now keep both words
+  inside their own storage; parameter adoption matches.
+* **Fix (0.2 ABI defect)**: adopting one parameter clobbered scratch
+  registers that later parameters still needed — the third text parameter
+  (arg register rdx) crashed the program at entry. Argument registers are
+  now saved before the adoption loop. Regression: `text_local_layout`.
+* Tests: 430 → 457 (text ops basics/const/chains, three trap programs,
+  four negative cases, the layout regression); `examples/text_ops` (a
+  substring scanner built from slices and equality); spec 0.8 → 0.9.
 
 ### 0.8
 

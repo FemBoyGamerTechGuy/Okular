@@ -80,6 +80,8 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out); /* fwd */
 static bool check_struct_lit_runtime(SemaCtx *c, Node *lit, OkType st, const char *what); /* fwd */
 static bool check_struct_lit_const(SemaCtx *c, Node *lit, OkType st, const char *what,
                                    ConstVal *out); /* fwd */
+static OkType check_expr(SemaCtx *c, Node *e); /* fwd — const folding may need the
+                                                * builtin rewrites check_expr performs */
 
 static bool assignable(OkType from, OkType to) {
     return ty_assignable(from, to);
@@ -352,6 +354,16 @@ static void register_const_decl(SemaCtx *c, Scope *scope, Node *n) {
     size_t mark = c->de->errors;
     ConstVal cv;
     bool ok = const_eval(c, n->a, &cv);
+    if (!ok) {
+        /* first attempt failed: check (rewrites conversion/text builtins
+         * into foldable nodes — same dance as global initializers), then
+         * retry the fold */
+        check_expr(c, n->a);
+        if (c->de->errors == mark) {
+            mark = c->de->errors;
+            ok = const_eval(c, n->a, &cv);
+        }
+    }
     c->cur_scope = saved;
     if (!ok || c->de->errors != mark || !cv.valid) {
         if (c->de->errors == mark)
@@ -575,6 +587,34 @@ static bool const_eval(SemaCtx *c, Node *e, ConstVal *out) {
         }
         if (v.type == ty_bool) { out->valid = true; out->type = ty_bool; out->b = !v.b; return true; }
         return false;
+    }
+    case A_TEXTOP: {
+        /* text builtins fold when their operands do (0.9, spec §4.5) —
+         * constants stay constants: text.length("hi" + "!") is 3 */
+        TextOp op = (TextOp)e->fvalue;
+        size_t nargs = (op == TOP_LEN) ? 1 : (op == TOP_BYTE) ? 2 : 3;
+        if (e->args.len != nargs) return false;
+        ConstVal s;
+        if (!const_eval(c, e->args.items[0], &s) || !s.valid || s.type != ty_text) return false;
+        if (op == TOP_LEN) {
+            out->valid = true; out->type = ty_number; out->i = s.t_len;
+            return true;
+        }
+        ConstVal iv;
+        if (!const_eval(c, e->args.items[1], &iv) || !iv.valid || !ty_is_integer(iv.type)) return false;
+        if (op == TOP_BYTE) {
+            if (iv.i >= s.t_len) return false;   /* sema traps this as an error */
+            out->valid = true; out->type = ty_uint8; out->i = (uint8_t)s.t[iv.i];
+            return true;
+        }
+        ConstVal tv;
+        if (!const_eval(c, e->args.items[2], &tv) || !tv.valid || !ty_is_integer(tv.type)) return false;
+        if (iv.i > tv.i || tv.i > s.t_len) return false;  /* sema reported */
+        out->valid = true; out->type = ty_text;
+        out->t = ok_xmalloc((size_t)(tv.i - iv.i) ? (size_t)(tv.i - iv.i) : 1);
+        out->t_len = (size_t)(tv.i - iv.i);
+        if (out->t_len) memcpy(out->t, s.t + iv.i, out->t_len);
+        return true;
     }
     case A_CONV: {
         /* conversion of a constant folds at compile time (spec §4.4),
@@ -1361,6 +1401,83 @@ static OkType check_call(SemaCtx *c, Node *n) {
             return check_conv_builtin(c, n, cfrom, cto);
         }
     }
+    /* text operation builtins (0.9, spec §4.5): text.length(s),
+     * text.byte_at(s, i), text.slice(s, from, to) — recognized before
+     * scope resolution exactly like conversions */
+    if (n->nparts == 2 && strcmp(n->parts[0], "text") == 0) {
+        TextOp op;
+        size_t want_args;
+        const char *sig;
+        if (strcmp(n->parts[1], "length") == 0) {
+            op = TOP_LEN; want_args = 1; sig = "text.length(text.s) -> number";
+        } else if (strcmp(n->parts[1], "byte_at") == 0) {
+            op = TOP_BYTE; want_args = 2; sig = "text.byte_at(text.s, number.i) -> uint8";
+        } else if (strcmp(n->parts[1], "slice") == 0) {
+            op = TOP_SLICE; want_args = 3; sig = "text.slice(text.s, number.from, number.to) -> text (end-exclusive)";
+        } else {
+            op = -1; want_args = 0; sig = NULL;
+        }
+        if (sig) {
+            Symbol *clash = scope_lookup(c->cur_scope, n->parts[0]);
+            if (clash && clash->kind == SYM_NS && scope_find_local(clash->ns, n->parts[1])) {
+                Diag *d = serr(c, n, "`%s` is a built-in text operation; `%s.%s` must be renamed.",
+                               path_join_str(n->parts, n->nparts), n->parts[0], n->parts[1]);
+                (void)d;
+            }
+            if (n->args.len != want_args) {
+                Diag *d = serr(c, n, "`%s` expects %zu argument%s, but %zu were given.",
+                               path_join_str(n->parts, n->nparts), want_args,
+                               want_args == 1 ? "" : "s", n->args.len);
+                diag_note(d, "signature: %s", sig);
+            }
+            /* first argument must be text; integer positions take any
+             * integer (contextual literal typing applies) */
+            size_t check_n = n->args.len < want_args ? n->args.len : want_args;
+            bool ok_args = true;
+            for (size_t i = 0; i < n->args.len; i++) {
+                Node *arg = n->args.items[i];
+                OkType at = check_expr(c, arg);
+                if (i >= check_n) continue;
+                if (i == 0) {
+                    if (at != ty_text) {
+                        Diag *d = serr(c, arg, "argument 1 of `%s` must be `text`, but a `%s` value was given.",
+                                       path_join_str(n->parts, n->nparts), ok_type_name(at));
+                        diag_note(d, "signature: %s", sig);
+                        ok_args = false;
+                    }
+                    continue;
+                }
+                if (!ty_is_integer(at) && at != ty_null) {
+                    Diag *d = serr(c, arg, "argument %zu of `%s` must be an integer (byte position), but a `%s` value was given.",
+                                   i + 1, path_join_str(n->parts, n->nparts), ok_type_name(at));
+                    diag_note(d, "signature: %s", sig);
+                    ok_args = false;
+                }
+            }
+            /* compile-time slice-bounds validation when foldable */
+            if (ok_args && op == TOP_SLICE && n->args.len == 3) {
+                size_t mark = c->de->errors;
+                ConstVal sv, fv, tv;
+                if (const_eval(c, n->args.items[0], &sv) && sv.valid && sv.type == ty_text
+                    && const_eval(c, n->args.items[1], &fv) && fv.valid && ty_is_integer(fv.type)
+                    && const_eval(c, n->args.items[2], &tv) && tv.valid && ty_is_integer(tv.type)
+                    && c->de->errors == mark) {
+                    uint64_t from = fv.i, to = tv.i;
+                    if (from > to || to > sv.t_len) {
+                        Diag *d = serr(c, n, "text.slice bounds are invalid: [%llu, %llu) into %llu bytes.",
+                                       (unsigned long long)from, (unsigned long long)to,
+                                       (unsigned long long)sv.t_len);
+                        diag_note(d, "bounds are 0 <= from <= to <= text.length(s); the end is exclusive.");
+                    }
+                }
+            }
+            /* rewrite into the builtin node the IR lowers directly */
+            n->kind = A_TEXTOP;
+            n->fvalue = (int)op;
+            n->rtype = (op == TOP_LEN) ? ty_number : (op == TOP_BYTE) ? ty_uint8 : ty_text;
+            return n->rtype;
+        }
+    }
     /* path_join_str returns a shared static buffer: copy the call name
      * before checking arguments, whose own path resolution would
      * silently overwrite it (found while testing array diagnostics) */
@@ -1646,6 +1763,12 @@ static OkType check_expr(SemaCtx *c, Node *e) {
     case A_BOOL: e->rtype = ty_bool; return ty_bool;
     case A_TEXT: e->rtype = ty_text; return ty_text;
     case A_NULL: e->rtype = ty_null; return ty_null;
+    case A_TEXTOP: {
+        /* sema rewrote a text builtin call into this node; rechecking
+         * re-validates the operands only */
+        for (size_t i = 0; i < e->args.len; i++) check_expr(c, e->args.items[i]);
+        return e->rtype;
+    }
     case A_ALLOC: {
         OkType ct = check_expr(c, e->a);
         if (!ty_is_integer(ct)) {

@@ -1,0 +1,29 @@
+type.text=1
+
+function.join3(text.a, text.b, text.c) -> text {
+    return a + b + c
+}
+
+function.main() -> number {
+    # regression (0.6 defect): a text local followed by number locals must
+    # not have its length word clobbered by the neighbor slot
+    type.text line = "the cat sat on the mat, the end"
+    type.number hits = 0
+    type.number n = text.length(line)
+    loop (i from 0 to n - 3) {
+        when (text.slice(line, i, i + 3) == "the") {
+            hits = hits + 1
+        }
+    }
+    write(hits)
+    print
+    write(text.length(line))
+    print
+    write(join3("a", "b", "c"))
+    print
+    write(text.length(join3("one", "two", "three")))
+    print
+    return 0
+}
+
+main()

@@ -1,0 +1,22 @@
+type.text=1
+
+const.n = text.length("hello")
+const.c = text.byte_at("AB", 1)
+type.number m = text.length("hi" + "!")
+type.text head = text.slice("okular compiler", 0, 6)
+
+function.main() -> number {
+    write(n)
+    print
+    write(c)
+    print
+    write(m)
+    print
+    write(head)
+    print
+    write(text.length(head))
+    print
+    return 0
+}
+
+main()

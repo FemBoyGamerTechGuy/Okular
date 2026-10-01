@@ -24,6 +24,7 @@ typedef enum {
     A_NULL,          /* the `null` literal (rtype ty_null) */
     A_ALLOC,         /* alloc<T>(count) (a = count, otype = ptr<T>) */
     A_MEMBER,        /* base.field — struct field access on a non-path base (spec §8.3) */
+    A_TEXTOP,        /* text.length / text.byte_at / text.slice builtin (0.9, spec §4.5); fvalue = TextOp */
     /* statements */
     A_VARDECL,       /* type.<T> name = init (init may be A_ARRAYLIT) */
     A_ASSIGN,        /* path = value */
@@ -55,6 +56,9 @@ typedef enum {
 } BinOp;
 
 typedef enum { UN_NEG, UN_NOT, UN_ADDR, UN_DEREF } UnOp;
+
+/* text builtin sub-operations (A_TEXTOP, 0.9 spec §4.5) */
+typedef enum { TOP_LEN, TOP_BYTE, TOP_SLICE } TextOp;
 
 typedef struct Node Node;
 
