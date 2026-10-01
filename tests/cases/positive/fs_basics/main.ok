@@ -1,0 +1,22 @@
+type.text=1
+
+function.main() -> number {
+    type.text src = fs.read("main.ok")
+    write(text.length(src) > 100)
+    print
+    write(text.byte_at(src, 0))
+    print
+    type.number n = fs.save("out.txt", "hello file")
+    write(n)
+    print
+    type.text back = fs.read("out.txt")
+    write(back)
+    print
+    write(fs.exists("out.txt"))
+    print
+    write(fs.exists("missing.txt"))
+    print
+    return 0
+}
+
+main()

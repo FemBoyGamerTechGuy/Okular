@@ -22,6 +22,12 @@
  *   rt_alloc(bytes) -> ptr         heap allocation, first-fit + split (§12)
  *   rt_release(ptr)                heap release with coalescing (§12)
  *   rt_trap(msg, len, code)      fatal runtime error (spec §13)
+ *
+ * File I/O (0.10, spec §6.4 — the fs builtins):
+ *   rt_fs_read(pathptr, pathlen) -> (ptr, len)   whole file as text (rax:rdx)
+ *   rt_fs_write(pathptr, pathlen, dataptr, datalen) -> bytes written
+ *   rt_fs_exists(pathptr, pathlen) -> bool
+ *   Failures are loud: exit 77, message on stderr (spec §13 family).
  */
 
 typedef long           i64;
@@ -51,6 +57,52 @@ static i64 sys_write(int fd, const void *buf, u64 len) {
 static void sys_exit(int code) {
     __asm__ volatile ("syscall" :: "a"(60L), "D"((u64)(i64)code));
     for (;;) {} /* unreachable */
+}
+
+/* ---- file I/O syscalls (0.10) ---- */
+
+static i64 sys_open(const char *path, int flags, int mode) {
+    i64 ret;
+    __asm__ volatile ("syscall"
+                      : "=a"(ret)
+                      : "a"(2L), "D"(path), "S"((u64)(i64)flags), "d"((u64)(i64)mode)
+                      : "rcx", "r11", "memory");
+    return ret;
+}
+
+static i64 sys_close(int fd) {
+    i64 ret;
+    __asm__ volatile ("syscall"
+                      : "=a"(ret)
+                      : "a"(3L), "D"((u64)(i64)fd)
+                      : "rcx", "r11", "memory");
+    return ret;
+}
+
+static i64 sys_read(int fd, void *buf, u64 len) {
+    i64 ret;
+    __asm__ volatile ("syscall"
+                      : "=a"(ret)
+                      : "a"(0L), "D"((u64)(i64)fd), "S"(buf), "d"(len)
+                      : "rcx", "r11", "memory");
+    return ret;
+}
+
+/* fstat(fd, buf) — the struct is 144 bytes on x86-64 Linux; only the
+ * size field (offset 48, unsigned long) is read */
+struct linux_stat {
+    char _pad[48];
+    u64 st_size;
+    char _pad2[144 - 56];
+};
+
+static i64 sys_fstat(int fd, struct linux_stat *buf) {
+    i64 ret;
+    __asm__ volatile ("syscall"
+                      : "=a"(ret)
+                      : "a"(5L), "D"((u64)(i64)fd), "S"(buf)
+                      : "rcx", "r11", "memory");
+    return ret;
 }
 
 void rt_init(void) {
@@ -507,4 +559,110 @@ void rt_bounds_trap(i64 index, u64 length) {
  * with a text-specific message (same trap family, same exit code 70) */
 void rt_text_bounds_trap(i64 index, u64 length) {
     rt_bounds_trap_named("text position ", index, length);
+}
+
+/* ---------------- file I/O (0.10, spec §6.4 — the fs builtins) ----------------
+ * Read/write/exists over whole files, in the loud-failure philosophy:
+ * any OS error is a fatal trap (exit 77) naming the path. File bytes land
+ * in the text arena — immutable, process-lifetime, exactly like every
+ * other runtime-produced text (rt_concat). */
+
+static void rt_fs_trap(const char *what, u64 whatlen,
+                       const u8 *path, u64 plen, i64 err) {
+    char msg[192];
+    u64 n = 0;
+    sys_write(2, "okular runtime error: ", 22);
+    for (u64 i = 0; i < whatlen; i++) msg[n++] = what[i];
+    sys_write(2, msg, n);
+    n = 0;
+    for (u64 i = 0; i < plen && i < 120; i++) msg[n++] = (char)path[i];
+    msg[n++] = ' ';
+    msg[n++] = '(';
+    /* small signed decimal for the errno-shaped value */
+    char tmp[24];
+    int i = 24;
+    u64 u;
+    if (err < 0) { msg[n++] = '-'; u = (u64)(-(err + 1)) + 1; }
+    else u = (u64)err;
+    do { tmp[--i] = (char)('0' + (u % 10)); u /= 10; } while (u != 0);
+    for (; i < 24; i++) msg[n++] = tmp[i];
+    msg[n++] = ')';
+    msg[n++] = '\n';
+    sys_write(2, msg, n);
+    sys_exit(77);
+}
+
+/* path must be NUL-terminated for the kernel; copy into a stack buffer */
+static i64 open_path(const u8 *path, u64 plen, int flags, int mode) {
+    char buf[256];
+    if (plen >= sizeof buf) rt_fs_trap("path too long: ", 15, path, plen, 0);
+    for (u64 i = 0; i < plen; i++) buf[i] = (char)path[i];
+    buf[plen] = 0;
+    return sys_open(buf, flags, mode);
+}
+
+typedef struct { u8 *ptr; u64 len; } RtText;
+
+/* rt_fs_read(pathptr, pathlen) -> (ptr, len) in rax:rdx (the text ABI) */
+RtText rt_fs_read(const u8 *path, u64 plen) {
+    i64 fd = open_path(path, plen, 0 /* O_RDONLY */, 0);
+    if (fd < 0) rt_fs_trap("cannot open file: ", 18, path, plen, fd);
+
+    struct linux_stat st;
+    if (sys_fstat((int)fd, &st) < 0) {
+        sys_close((int)fd);
+        rt_fs_trap("cannot stat file: ", 18, path, plen, -1);
+    }
+
+    u64 size = st.st_size;
+    if (arena_used + size > TEXT_ARENA_BYTES) {
+        sys_close((int)fd);
+        rt_fs_trap("file too large for the text arena (1 MiB): ", 43, path, plen, (i64)size);
+    }
+    u8 *dst = text_arena + arena_used;
+
+    u64 got = 0;
+    while (got < size) {
+        i64 n = sys_read((int)fd, dst + got, size - got);
+        if (n < 0) {
+            sys_close((int)fd);
+            rt_fs_trap("cannot read file: ", 18, path, plen, n);
+        }
+        if (n == 0) break; /* file shrank underneath us: take what's there */
+        got += (u64)n;
+    }
+    sys_close((int)fd);
+
+    arena_used += got;
+    RtText r = { dst, got };
+    return r;
+}
+
+/* rt_fs_write(pathptr, pathlen, dataptr, datalen) -> bytes written */
+u64 rt_fs_write(const u8 *path, u64 plen, const u8 *data, u64 dlen) {
+    /* 577 = O_WRONLY|O_CREAT|O_TRUNC, 0644 */
+    i64 fd = open_path(path, plen, 577, 420);
+    if (fd < 0) rt_fs_trap("cannot create file: ", 20, path, plen, fd);
+
+    u64 wrote = 0;
+    while (wrote < dlen) {
+        i64 n = sys_write((int)fd, data + wrote, dlen - wrote);
+        if (n < 0) {
+            sys_close((int)fd);
+            rt_fs_trap("cannot write file: ", 19, path, plen, n);
+        }
+        wrote += (u64)n;
+    }
+    sys_close((int)fd);
+    return wrote;
+}
+
+/* rt_fs_exists(pathptr, pathlen) -> bool */
+b32 rt_fs_exists(const u8 *path, u64 plen) {
+    i64 fd = open_path(path, plen, 0 /* O_RDONLY */, 0);
+    if (fd >= 0) {
+        sys_close((int)fd);
+        return 1;
+    }
+    return 0;
 }

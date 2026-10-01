@@ -397,6 +397,20 @@ static void build_expr(Ctx *c, Node *e) {
         emit(c->f, inst);
         break;
     }
+    case A_FSOP: {
+        /* fs.read / fs.write / fs.exists (0.10, spec §6.4): operands are
+         * all text; the instruction consumes them from the operand stack */
+        for (size_t i = 0; i < e->args.len; i++) {
+            Node *arg = e->args.items[i];
+            build_operand_conv(c, arg, ty_text);
+        }
+        int k = (e->fvalue == FSOP_READ) ? I_FS_READ
+               : (e->fvalue == FSOP_WRITE) ? I_FS_WRITE : I_FS_EXISTS;
+        IrInst inst = { .kind = k, .type = e->rtype,
+                        .line = e->line, .col = e->col };
+        emit(c->f, inst);
+        break;
+    }
     case A_CONV: {
         /* explicit conversion builtin `T.to_U(x)` (spec §4.4) */
         build_expr(c, e->a);
@@ -1190,6 +1204,18 @@ void ir_fold(IrFunc *f) {
             if (sp >= 3) sp -= 3; /* text + from + to */
             stack[sp++] = (FoldVal){ .known = false, .type = ty_text };
             break;
+        case I_FS_READ:
+            if (sp >= 1) sp--;    /* the path text */
+            stack[sp++] = (FoldVal){ .known = false, .type = ty_text };
+            break;
+        case I_FS_WRITE:
+            if (sp >= 2) sp -= 2; /* path + data */
+            stack[sp++] = (FoldVal){ .known = false, .type = ty_number };
+            break;
+        case I_FS_EXISTS:
+            if (sp >= 1) sp--;
+            stack[sp++] = (FoldVal){ .known = false, .type = ty_bool };
+            break;
         case I_STORE_LOCAL: case I_STORE_GLOBAL: case I_POP:
         case I_JMPF: case I_WRITE:
             if (sp > 0) sp--;
@@ -1269,6 +1295,9 @@ static const char *ir_kind_name(IrKind k) {
     case I_TEXT_LEN: return "TEXT_LEN";
     case I_TEXT_BYTE: return "TEXT_BYTE";
     case I_TEXT_SLICE: return "TEXT_SLICE";
+    case I_FS_READ: return "FS_READ";
+    case I_FS_WRITE: return "FS_WRITE";
+    case I_FS_EXISTS: return "FS_EXISTS";
     case I_CONV: return "CONV";
     case I_BINOP: return "BINOP";
     case I_UNOP: return "UNOP";

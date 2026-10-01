@@ -1,15 +1,13 @@
 # Okular Language Specification
 
-**Version:** 0.9 (text operations)
+**Version:** 0.10 (file builtins)
 **Status:** Evolving draft
 **Implementation:** bootstrap compiler in C (`bootstrap/`)
 
-> 0.9 adds **text operations** (spec §4.5): `text.length`, bounds-checked
-> `text.byte_at`, and O(1) end-exclusive `text.slice` — the byte-level
-> access a lexer needs, with constant folding throughout. It also fixes
-> two ABI defects from earlier releases: text locals' length word now
-> lives inside its slot, and argument registers are saved before parameter
-> adoption (three text parameters used to crash). See §23.
+> 0.10 adds **file builtins** (spec §6.4): `fs.read`, `fs.save`, and
+> `fs.exists` over raw syscalls — loud failures (exit 77), whole files as
+> text. Programs can now process real inputs, which is exactly what the
+> self-hosting milestone needs next. See §23.
 
 > This specification is the source of truth for the Okular language.
 > When the implementation changes the language, this document changes with it.
@@ -525,6 +523,33 @@ In 0.1 the compiler **verifies resolution** of each `[libs.use]` entry
 but **library binding is not yet implemented** — no standard library exists
 yet. Referencing a library symbol therefore surfaces as a normal unresolved
 symbol diagnostic. This is stated plainly in the status table.
+
+### 6.4 File builtins (implemented in 0.10)
+
+Three builtins bridge programs to the filesystem until the standard
+library's `fs` module arrives (written in Okular itself, M4+):
+
+```ok
+type.text src = fs.read("main.ok")        # whole file as text
+type.number n = fs.save("out.txt", data)  # write text; bytes written
+type.bool yes = fs.exists("out.txt")      # probe
+```
+
+* `fs.read(path)` reads the whole file into the text arena and returns it
+  as `text` — immutable bytes, process lifetime, exactly like every other
+  runtime-produced text. Reading a directory or a huge file is a fatal
+  trap.
+* `fs.save(path, data)` writes `data` to `path` (created or truncated,
+  mode 0644) and returns the byte count. The name is `save`, not `write`,
+  because `write` is a statement keyword and cannot follow `.` — the
+  future Okular-written fs module will name freely.
+* `fs.exists(path)` is `true` when the path opens for reading.
+* **Failures are loud** (the §13 philosophy): any OS error is a fatal trap
+  with exit code 77, the path, and the errno-shaped value on stderr —
+  never a silent empty text or false.
+* Paths are relative to the process's working directory; they are bytes,
+  not decoded characters. These are builtins, not a namespace: a developer
+  column named `fs` with these members must be renamed.
 
 ---
 
@@ -1228,6 +1253,7 @@ Major decisions and their rationale (required by the engineering brief §4.10):
 | D26 | Union literals are type-directed: the FIRST member whose type accepts the value is activated (§8.5) | every member sits at offset 0, so selection affects only checking and the store's type; declaration order breaks ties predictably |
 | D27 | Constants inline their folded value (no storage, no load); `type.auto` infers from the initializer only | consts stay compile-time facts; inference stays local to declarations — params/returns/members stay explicit |
 | D28 | `text.slice` is end-exclusive and O(1) (shares immutable bytes); text bounds trap like array bounds (exit 70) | `until`-consistent ranges; slicing is pointer arithmetic, not copying; safety stays opt-out, not opt-in |
+| D29 | File failures are fatal traps (exit 77) naming path and errno; file bytes land in the text arena | the loud-failure philosophy extends to I/O; no silent empty reads; the fs builtins are a bridge to the Okular-written stdlib module |
 
 ---
 
@@ -1284,6 +1310,7 @@ An implementation claiming "Okular 0.1" must:
 | Constants `const.name = value` (fold, inline, no storage) | §8.1 | implemented (0.8) |
 | Type inference `type.auto x = init` | §8.1 | implemented (0.8) |
 | Text ops: `text.length` / `text.byte_at` / `text.slice` | §4.5 | implemented (0.9) |
+| File builtins: `fs.read` / `fs.save` / `fs.exists` | §6.4 | implemented (0.10) |
 | Constants as array lengths | §8.1 | NOT IMPLEMENTED (needs module-aware parsing) |
 | Expressions, precedence, constant folding | §9 | implemented |
 | `when`/`else` | §10 | implemented |
@@ -1307,6 +1334,19 @@ An implementation claiming "Okular 0.1" must:
 ---
 
 ## 23. Changelog
+
+### 0.10
+
+* **File builtins** (§6.4): `fs.read(path) -> text` (whole file, text
+  arena, immutable), `fs.save(path, data) -> number` (bytes written;
+  create/truncate, 0644), `fs.exists(path) -> bool`. Raw syscalls
+  (open/read/write/close/fstat) in the freestanding runtime; OS errors
+  are fatal traps with exit 77, the path, and the errno on stderr. The
+  write-side name is `save` because `write` is a statement keyword.
+* The test runner now executes programs with the case directory as the
+  working directory, making relative-path tests deterministic.
+* Tests: 457 → 468 (fs basics, the read trap, two negative cases);
+  `examples/file_io`; spec 0.9 → 0.10.
 
 ### 0.9
 

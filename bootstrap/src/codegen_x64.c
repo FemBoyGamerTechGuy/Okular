@@ -776,6 +776,34 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         push_pair_rax_rdx(o);
         break;
     }
+    case I_FS_READ: {
+        /* pop the path pair; rt_fs_read returns the file's (ptr,len) in
+         * rax:rdx — the text ABI */
+        pop_pair_rax_rdx(o);
+        buf_puts(o, "    mov rdi, rax\n    mov rsi, rdx\n");
+        call_aligned(o, "rt_fs_read");
+        push_pair_rax_rdx(o);
+        break;
+    }
+    case I_FS_WRITE: {
+        /* pop data pair (save), pop path pair, call; rax = bytes written */
+        pop_pair_rax_rdx(o);                    /* data: rax=ptr, rdx=len */
+        buf_puts(o, "    mov r9, rax\n    mov r10, rdx\n");
+        pop_pair_rax_rdx(o);                    /* path: rax=ptr, rdx=len */
+        buf_puts(o, "    mov rdi, rax\n    mov rsi, rdx\n");
+        buf_puts(o, "    mov rdx, r9\n    mov rcx, r10\n");
+        call_aligned(o, "rt_fs_write");
+        push_rax(o);
+        break;
+    }
+    case I_FS_EXISTS: {
+        pop_pair_rax_rdx(o);
+        buf_puts(o, "    mov rdi, rax\n    mov rsi, rdx\n");
+        call_aligned(o, "rt_fs_exists");
+        buf_puts(o, "    movzx rax, al\n");
+        push_rax(o);
+        break;
+    }
     case I_LOAD_AT: {
         buf_puts(o, "    pop rax\n"); /* address */
         if (in->type == ty_text) {

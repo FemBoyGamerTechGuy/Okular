@@ -1478,6 +1478,54 @@ static OkType check_call(SemaCtx *c, Node *n) {
             return n->rtype;
         }
     }
+    /* file operation builtins (0.10, spec §6.4): fs.read(path),
+     * fs.save(path, data), fs.exists(path) — recognized before scope
+     * resolution exactly like the text operations. (The write-side name
+     * is `save` because `write` is a statement keyword and cannot appear
+     * after `.`; the future Okular-written fs module will name freely.) */
+    if (n->nparts == 2 && strcmp(n->parts[0], "fs") == 0) {
+        FsOp op;
+        size_t want_args;
+        const char *sig;
+        if (strcmp(n->parts[1], "read") == 0) {
+            op = FSOP_READ; want_args = 1; sig = "fs.read(text.path) -> text";
+        } else if (strcmp(n->parts[1], "save") == 0) {
+            op = FSOP_WRITE; want_args = 2; sig = "fs.save(text.path, text.data) -> number (bytes written)";
+        } else if (strcmp(n->parts[1], "exists") == 0) {
+            op = FSOP_EXISTS; want_args = 1; sig = "fs.exists(text.path) -> bool";
+        } else {
+            op = -1; want_args = 0; sig = NULL;
+        }
+        if (sig) {
+            Symbol *clash = scope_lookup(c->cur_scope, n->parts[0]);
+            if (clash && clash->kind == SYM_NS && scope_find_local(clash->ns, n->parts[1])) {
+                Diag *d = serr(c, n, "`%s` is a built-in file operation; `%s.%s` must be renamed.",
+                               path_join_str(n->parts, n->nparts), n->parts[0], n->parts[1]);
+                (void)d;
+            }
+            if (n->args.len != want_args) {
+                Diag *d = serr(c, n, "`%s` expects %zu argument%s, but %zu were given.",
+                               path_join_str(n->parts, n->nparts), want_args,
+                               want_args == 1 ? "" : "s", n->args.len);
+                diag_note(d, "signature: %s", sig);
+            }
+            size_t check_n = n->args.len < want_args ? n->args.len : want_args;
+            for (size_t i = 0; i < n->args.len; i++) {
+                Node *arg = n->args.items[i];
+                OkType at = check_expr(c, arg);
+                if (i >= check_n) continue;
+                if (at != ty_text) {
+                    Diag *d = serr(c, arg, "argument %zu of `%s` must be `text`, but a `%s` value was given.",
+                                   i + 1, path_join_str(n->parts, n->nparts), ok_type_name(at));
+                    diag_note(d, "signature: %s", sig);
+                }
+            }
+            n->kind = A_FSOP;
+            n->fvalue = (int)op;
+            n->rtype = (op == FSOP_READ) ? ty_text : (op == FSOP_WRITE) ? ty_number : ty_bool;
+            return n->rtype;
+        }
+    }
     /* path_join_str returns a shared static buffer: copy the call name
      * before checking arguments, whose own path resolution would
      * silently overwrite it (found while testing array diagnostics) */
@@ -1766,6 +1814,11 @@ static OkType check_expr(SemaCtx *c, Node *e) {
     case A_TEXTOP: {
         /* sema rewrote a text builtin call into this node; rechecking
          * re-validates the operands only */
+        for (size_t i = 0; i < e->args.len; i++) check_expr(c, e->args.items[i]);
+        return e->rtype;
+    }
+    case A_FSOP: {
+        /* sema rewrote an fs builtin call into this node; same story */
         for (size_t i = 0; i < e->args.len; i++) check_expr(c, e->args.items[i]);
         return e->rtype;
     }

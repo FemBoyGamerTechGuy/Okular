@@ -22,6 +22,10 @@ typedef enum {
     I_TEXT_LEN,      /* (text)                -> number      */
     I_TEXT_BYTE,     /* (text, index)         -> uint8       */
     I_TEXT_SLICE,    /* (text, from, to)      -> text [from, to) */
+    /* file operations (0.10, spec §6.4): raw-syscall runtime calls */
+    I_FS_READ,       /* (path)                -> text        */
+    I_FS_WRITE,      /* (path, data)          -> number      */
+    I_FS_EXISTS,     /* (path)                -> bool        */
     I_LOAD_LOCAL,    /* slot                  -> type        */
     I_STORE_LOCAL,   /* slot  (pops)                            */
     I_LOAD_GLOBAL,   /* sym: Symbol*          -> type        */

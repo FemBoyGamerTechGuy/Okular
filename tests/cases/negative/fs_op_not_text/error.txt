@@ -1,0 +1,1 @@
+argument 1 of `fs.read` must be `text`, but a `number` value was given

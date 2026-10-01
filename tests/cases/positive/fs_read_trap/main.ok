@@ -1,0 +1,9 @@
+type.text=1
+
+function.main() -> number {
+    type.text s = fs.read("no_such_file.ok")
+    write(s)
+    return 0
+}
+
+main()

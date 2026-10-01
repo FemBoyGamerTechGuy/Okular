@@ -1,0 +1,43 @@
+# file_io.ok — Okular 0.10 file builtins (spec §6.4).
+# Read whole files as text, save text back, probe existence —
+# raw syscalls under the hood, loud failures by design.
+
+type.text=1
+
+function.main() -> number {
+    # read this very program and measure it
+    type.text src = fs.read("main.ok")
+    write("source bytes: ")
+    write(text.length(src))
+    print
+
+    # first line
+    type.number i = 0
+    type.number n = text.length(src)
+    loop (j from 0 until n) {
+        when (text.byte_at(src, j) == 10) {
+            i = j
+            break
+        }
+    }
+    write("first line: ")
+    write(text.slice(src, 0, i))
+    print
+
+    # write and read back
+    type.number wrote = fs.save("greeting.txt", "stored by Okular")
+    write("saved bytes: ")
+    write(wrote)
+    print
+    type.text back = fs.read("greeting.txt")
+    write("read back: ")
+    write(back)
+    print
+
+    write("exists: ")
+    write(fs.exists("greeting.txt"))
+    print
+    return 0
+}
+
+main()

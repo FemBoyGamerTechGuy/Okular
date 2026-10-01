@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/run_tests.sh — the Okular 0.9 test suite (brief §51).
+# tools/run_tests.sh — the Okular 0.10 test suite (brief §51).
 #
 # Layout: tests/cases/{positive,negative,policy,flags}/<name>/
 #   main.ok (+ src/)          the project
@@ -70,7 +70,7 @@ run_one() { # run_one <group> <casedir>
         fi
         local out pexit
         out="$TMP/$group.$name.run.out"
-        "$work/build/output/main" >"$out" 2>/dev/null
+        (cd "$work" && "$work/build/output/main") >"$out" 2>/dev/null
         pexit=$?
         if [ -f "$dir/stdout.txt" ]; then
             check "$group/$name stdout" diff -q "$dir/stdout.txt" "$out" >/dev/null
@@ -99,7 +99,7 @@ run_one() { # run_one <group> <casedir>
         if [ "$cexit" -eq 0 ] && [ -f "$dir/stdout.txt" ]; then
             local out pexit
             out="$TMP/$group.$name.run.out"
-            "$work/build/output/main" >"$out" 2>/dev/null
+            (cd "$work" && "$work/build/output/main") >"$out" 2>/dev/null
             pexit=$?
             check "$group/$name program stdout" diff -q "$dir/stdout.txt" "$out" >/dev/null
             [ "$pexit" -eq 0 ] || echo "  note: $group/$name program exited $pexit"
@@ -121,7 +121,7 @@ run_one() { # run_one <group> <casedir>
     esac
 }
 
-echo "== Okular 0.9 test suite =="
+echo "== Okular 0.10 test suite =="
 
 for group in positive negative policy flags; do
     echo "-- $group"
