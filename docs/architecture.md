@@ -1,6 +1,6 @@
 # Okular Bootstrap Compiler — Architecture
 
-**Version:** 0.6
+**Version:** 0.7
 **Applies to:** `bootstrap/` (the C implementation)
 
 > The C implementation is scaffolding. It exists because Okular does not yet

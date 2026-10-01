@@ -1,1 +1,1 @@
-functions cannot return structs directly in Okular 0.5
+functions cannot return structs directly in Okular 0.7

@@ -1,0 +1,70 @@
+# unions.ok — Okular 0.7 overlap types (spec §8.5).
+# One storage, several member views; the type-directed literal
+# activates the first member that accepts the value.
+
+type.text=1
+
+union.Word = {
+    type.uint32 u
+    type.uint8 low
+}.end
+
+union.Value = {
+    type.number n
+    type.decimal d
+    type.bool flag
+}.end
+
+struct.Field = {
+    type.uint8 tag
+    type.Value data
+}.end
+
+type.Field stored = { 1, { 5 } }
+
+function.show_low(Word.w) -> number {
+    write(w.low)
+    print
+    return 0
+}
+
+function.run() -> number {
+    type.Word w = { 258 }
+    write(w.u)
+    print
+    show_low(w)
+
+    w.low = 1
+    write(w.u)
+    print
+
+    type.Value v = { 7 }
+    write(v.n)
+    print
+
+    v.d = 1.5
+    write(v.d)
+    print
+
+    v.flag = false
+    write(v.flag)
+    print
+
+    write(stored.tag)
+    print
+    write(stored.data.n)
+    print
+
+    type.array<type.Word, 2> pair = { { 16 }, { 32 } }
+    write(pair[0].u + pair[1].u)
+    print
+
+    type.ptr<type.Value> pv = alloc<type.Value>(1)
+    pv[0].n = 9
+    write(pv[0].n)
+    print
+    release(pv)
+    return 0
+}
+
+run()

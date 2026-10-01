@@ -1,0 +1,1 @@
+functions cannot return unions directly in Okular 0.7

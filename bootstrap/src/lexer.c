@@ -65,8 +65,10 @@ static const KwEntry keywords[] = {
     /* memory keywords (0.4, spec §12) */
     {"alloc", T_KW_ALLOC},     {"release", T_KW_RELEASE},
     {"null", T_KW_NULL},
+    /* overlap keyword (0.7, spec §8.5) */
+    {"union", T_KW_UNION},
     /* reserved: designed features, not implemented (spec §1.5 / §20) */
-    {"union", T_KW_RESERVED},  {"pointer", T_KW_RESERVED},
+    {"pointer", T_KW_RESERVED},
     {"guard", T_KW_RESERVED},
     {"fail", T_KW_RESERVED},   {"with", T_KW_RESERVED},
     {"priv", T_KW_RESERVED},   {"pub", T_KW_RESERVED},
@@ -117,6 +119,7 @@ const char *tok_kind_name(TokKind k) {
     case T_KW_NOT: return "`not`"; case T_KW_END: return "`end`";
     case T_KW_ALLOC: return "`alloc`"; case T_KW_RELEASE: return "`release`";
     case T_KW_NULL: return "`null`";
+    case T_KW_UNION: return "`union`";
     case T_KW_RESERVED: return "reserved keyword";
     }
     return "?";

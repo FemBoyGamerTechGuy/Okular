@@ -1,7 +1,7 @@
 # Okular Language Basics (0.1)
 
 A tour of what Okular 0.1 does today. The specification
-(`specs/spec-v0.6.md`) is the source of truth; this page is the friendly
+(`specs/spec-v0.7.md`) is the source of truth; this page is the friendly
 version. Everything shown here compiles and runs with the bootstrap
 compiler.
 
@@ -250,7 +250,7 @@ type.array<type.number, 5> copy = {0, 0, 0, 0, 0}
 copy = scores           # whole-array copy
 ```
 
-See `specs/spec-v0.5.md` §8.4 for the complete rules.
+See `specs/spec-v0.7.md` §8.4 for the complete rules.
 
 ## Structs
 
@@ -273,13 +273,39 @@ Structs copy by value (assignment, parameters); `value.field` reads
 fields — on variables, through namespaces, on array elements, and on
 pointers (auto-dereferenced and null-checked). Nesting, arrays of
 structs, structs on the heap (`alloc<type.Rect>(2)`), and
-self-referential `ptr` fields all work. See `specs/spec-v0.6.md` §8.3.
+self-referential `ptr` fields all work. See `specs/spec-v0.7.md` §8.3.
 
-## What 0.6 does not have (yet)
+## Unions
 
-Unions, dynamic-length arrays, FFI, threads, match expressions, type
+One storage, several member views — the reinterpretation type
+(0.7, `specs/spec-v0.7.md` §8.5):
+
+```ok
+union.Word = {
+    type.uint32 u
+    type.uint8 low
+}.end
+
+type.Word w = { 258 }   # activates `u` (first member that accepts the value)
+write(w.low)            # 2 — byte 0 of the same storage
+w.low = 1               # the write lands in the shared bytes
+write(w.u)              # 257
+```
+
+The literal is **type-directed**: `{ value }` activates the first member
+whose type accepts it. Reading a member other than the last one written
+is the documented, explicitly-unsafe reinterpretation unions exist for
+(two's-complement little-endian on x86-64). Unions nest in structs, hold
+arrays, sit in arrays, live on the heap (`ptr<Word>`, `alloc<type.Word>(n)`),
+copy by value, and work as globals with deterministic `.data`. They are not
+comparable and functions cannot return them directly yet — the same
+restrictions as structs.
+
+## What 0.7 does not have (yet)
+
+Dynamic-length arrays, FFI, threads, match expressions, type
 inference, constants, aliases, and visibility modifiers are all
-**designed** (see `specs/spec-v0.6.md` §20 and
+**designed** (see `specs/spec-v0.7.md` §20 and
 `docs/roadmap.md`) and **not implemented**. The same goes for `f32` (a true
 32-bit float). The compiler says so plainly
 when you use a reserved construct — it never pretends.

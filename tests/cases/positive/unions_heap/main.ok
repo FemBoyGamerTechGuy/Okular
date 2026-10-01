@@ -1,0 +1,23 @@
+type.text=1
+
+union.Value = {
+    type.number n
+    type.uint8 b
+}.end
+
+function.run() -> number {
+    type.ptr<type.Value> vs = alloc<type.Value>(2)
+    vs[0].n = 100
+    vs[1].b = 5
+    write(vs[0].n)
+    print
+    write(vs[1].b)
+    print
+    vs[0].b = 8
+    write(vs[0].n)
+    print
+    release(vs)
+    return 0
+}
+
+run()

@@ -1,0 +1,8 @@
+union.Point = {
+    type.number x
+}.end
+
+struct.Point = {
+    type.number x
+    type.number y
+}.end

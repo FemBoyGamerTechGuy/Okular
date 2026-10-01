@@ -67,13 +67,14 @@ size_t ty_bytes(OkType t) {
     if (!t) return 0;
     if (t->kind == OK_ARRAY) return ty_bytes(t->elem) * t->count;
     if (t->kind == OK_STRUCT) return t->count; /* total size, precomputed */
+    if (t->kind == OK_UNION)  return t->count; /* total size, precomputed */
     return scalar_bytes(t->kind);
 }
 
-/* ---- structs (spec §8.3, 0.5) ---- */
+/* ---- structs and unions (spec §8.3/§8.5, 0.5/0.7) ---- */
 
 StructField *ty_field(OkType t, const char *name) {
-    if (!ty_is_struct(t)) return NULL;
+    if (!ty_is_record(t)) return NULL;
     for (size_t i = 0; i < t->nsfields; i++)
         if (strcmp(t->sfields[i].name, name) == 0) return &t->sfields[i];
     return NULL;
@@ -86,7 +87,9 @@ size_t ty_align(OkType t) {
     case OK_INT16: case OK_UINT16: return 2;
     case OK_INT32: case OK_UINT32: return 4;
     case OK_ARRAY: return ty_align(t->elem);
-    case OK_STRUCT: {
+    case OK_STRUCT: case OK_UNION: {
+        /* both records align to their widest field (unions overlap all
+         * of them at offset 0, so the max applies directly — spec §8.5) */
         size_t a = 1;
         for (size_t i = 0; i < t->nsfields; i++) {
             size_t fa = ty_align(t->sfields[i].type);
@@ -263,8 +266,8 @@ bool ty_assignable(OkType from, OkType to) {
 OkType ty_common(OkType a, OkType b) {
     if (!a || !b) return NULL;
     if (a == b) return a;
-    /* structs and pointers never mix implicitly */
-    if (a->kind == OK_STRUCT || b->kind == OK_STRUCT) return NULL;
+    /* structs and unions never mix implicitly */
+    if (ty_is_record(a) || ty_is_record(b)) return NULL;
     /* decimal dominates when both sides are numeric */
     if (a == ty_decimal && ty_is_integer(b)) return ty_decimal;
     if (b == ty_decimal && ty_is_integer(a)) return ty_decimal;
@@ -288,7 +291,7 @@ bool ty_convertible(OkType from, OkType to) {
     if (to == ty_text)
         return ty_is_integer(from) || from == ty_decimal || from == ty_bool;
     if (ty_kind(from) == OK_ARRAY || ty_kind(to) == OK_ARRAY) return false;
-    if (ty_kind(from) == OK_STRUCT || ty_kind(to) == OK_STRUCT) return false;
+    if (ty_is_record(from) || ty_is_record(to)) return false;
     if (ty_kind(from) == OK_NAMED || ty_kind(to) == OK_NAMED) return false;
     if (from == ty_void || to == ty_void) return false;
     /* null -> ptr is a pure representation no-op for IR operand conversion */

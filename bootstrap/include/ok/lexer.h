@@ -28,6 +28,8 @@ typedef enum {
     T_KW_AND, T_KW_OR, T_KW_NOT, T_KW_END,
     /* memory keywords (0.4, spec §12) */
     T_KW_ALLOC, T_KW_RELEASE, T_KW_NULL,
+    /* overlap keyword (0.7, spec §8.5) */
+    T_KW_UNION,
     /* reserved for designed-but-unimplemented features (spec §1.5) */
     T_KW_RESERVED,
 } TokKind;

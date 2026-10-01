@@ -1,0 +1,25 @@
+type.text=1
+
+union.Value = {
+    type.number n
+    type.uint8 b
+}.end
+
+function.show(Value.v) -> number {
+    write(v.n)
+    print
+    v.b = 3
+    write(v.n)
+    print
+    return 0
+}
+
+function.run() -> number {
+    type.Value v = { 65 }
+    show(v)
+    write(v.n)
+    print
+    return 0
+}
+
+run()

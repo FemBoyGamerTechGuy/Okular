@@ -56,7 +56,9 @@ static OkType parser_named_type(Parser *p, const char *name) {
 void parser_register_struct_names(TokList *toks) {
     for (size_t i = 0; i + 4 < toks->len; i++) {
         Tok *t = &toks->items[i];
-        if (t->kind != T_KW_STRUCT) continue;
+        /* `struct . NAME = {` or `union . NAME = {`: record names share one
+         * flat pre-scanned registry (spec §8.3/§8.5) */
+        if (t->kind != T_KW_STRUCT && t->kind != T_KW_UNION) continue;
         if (toks->items[i + 1].kind != T_DOT) continue;
         if (toks->items[i + 2].kind != T_IDENT) continue;
         if (toks->items[i + 3].kind != T_EQ) continue;
@@ -219,7 +221,7 @@ static bool parse_type_prefix(Parser *p, OkType *out) {
             return true;
         }
         Diag *d = perr(p, name, "unknown type `%s`.", name->text);
-        diag_note(d, "the 0.5 types are: number, decimal, text, bool, int8, int16, int32, int64, uint8, uint16, uint32, uint64, byte, ptr<type>, array<type, count>, and struct names declared with `struct.Name = { ... }.end`.");
+        diag_note(d, "the 0.7 types are: number, decimal, text, bool, int8, int16, int32, int64, uint8, uint16, uint32, uint64, byte, ptr<type>, array<type, count>, and names declared with `struct.Name = { ... }.end` or `union.Name = { ... }.end`.");
         diag_note(d, "`byte` is an alias of uint8; `int64` of number; `f64` of decimal.");
         return false;
     }
@@ -271,7 +273,7 @@ static bool parse_bare_type(Parser *p, OkType *out) {
             return true;
         }
         Diag *d = perr(p, name, "unknown type `%s`.", name->text);
-        diag_note(d, "the 0.5 types are: number, decimal, text, bool, int8, int16, int32, int64, uint8, uint16, uint32, uint64, byte, ptr<type>, array<type, count>, and struct names declared with `struct.Name = { ... }.end`.");
+        diag_note(d, "the 0.7 types are: number, decimal, text, bool, int8, int16, int32, int64, uint8, uint16, uint32, uint64, byte, ptr<type>, array<type, count>, and names declared with `struct.Name = { ... }.end` or `union.Name = { ... }.end`.");
         diag_note(d, "array parameters use the full form: `type.array<type.number, 3>.xs`.");
         return false;
     }
@@ -790,16 +792,16 @@ static Node *parse_stmt(Parser *p) {
         }
         return n;
     }
-    case T_KW_STRUCT: {
-        /* struct declarations are top level or column members (spec §8.3) */
-        Diag *d = perr(p, t, "structs are declared at the top of a file or inside a column (`struct.Name = { ... }.end`), not inside function bodies.");
+    case T_KW_STRUCT: case T_KW_UNION: {
+        /* record declarations are top level or column members (spec §8.3/§8.5) */
+        Diag *d = perr(p, t, "structs and unions are declared at the top of a file or inside a column (`struct.Name = { ... }.end` / `union.Name = { ... }.end`), not inside function bodies.");
         (void)d;
         advance(p);
         skip_column_region(p);
         return NULL;
     }
     case T_KW_RESERVED:
-        perr(p, t, "`%s` is reserved for a future Okular feature and is not available in 0.5 (specs/spec-v0.4.md §20).", t->text);
+        perr(p, t, "`%s` is reserved for a future Okular feature and is not available in 0.7 (specs/spec-v0.7.md §20).", t->text);
         advance(p);
         sync_stmt(p);
         return NULL;
@@ -944,47 +946,54 @@ static Node *parse_langcol(Parser *p) {
     return n;
 }
 
-/* `struct.Name = { type.T field ... }.end` — field declarations without
- * initializers (spec §8.3). Fields ride in the node's Param array. */
-static Node *parse_structdecl(Parser *p) {
+/* `struct.Name = { type.T field ... }.end` / `union.Name = { ... }.end` —
+ * member declarations without initializers (spec §8.3/§8.5). Fields ride
+ * in the node's Param array. The two share one grammar; only the keyword,
+ * node kind, and wording differ. */
+static Node *parse_recorddecl(Parser *p, bool is_union) {
     Tok *t = cur(p);
-    advance(p); /* struct */
-    if (!expect(p, T_DOT, "`.` after `struct` (as in `struct.Packet`)")) {
+    const char *kw = is_union ? "union" : "struct";
+    char what_dot[64], what_eq[64], what_brace[64];
+    snprintf(what_dot, sizeof what_dot, "`.` after `%s` (as in `%s.Packet`)", kw, kw);
+    snprintf(what_eq, sizeof what_eq, "`=` before the %s body `{`", kw);
+    snprintf(what_brace, sizeof what_brace, "`{` to open the %s body", kw);
+    advance(p); /* struct / union */
+    if (!expect(p, T_DOT, what_dot)) {
         skip_column_region(p);
         return NULL;
     }
     Tok *name = cur(p);
     if (!is(p, T_IDENT)) {
-        perr(p, name, "expected a struct name after `struct.` (as in `struct.Packet`), but found %s.",
-             tok_kind_name(name->kind));
+        perr(p, name, "expected a %s name after `%s.` (as in `%s.Packet`), but found %s.",
+             kw, kw, kw, tok_kind_name(name->kind));
         skip_column_region(p);
         return NULL;
     }
     advance(p);
-    Node *n = node_new(p->ar, A_STRUCTDECL, t->line, t->col);
+    Node *n = node_new(p->ar, is_union ? A_UNIONDECL : A_STRUCTDECL, t->line, t->col);
     n->name = ok_xstrdup(name->text);
     n->otype = parser_named_type(p, name->text); /* the shared placeholder */
 
-    if (!expect(p, T_EQ, "`=` before the struct body `{`")) { skip_column_region(p); return n; }
-    if (!expect(p, T_LBRACE, "`{` to open the struct body")) { skip_column_region(p); return n; }
+    if (!expect(p, T_EQ, what_eq)) { skip_column_region(p); return n; }
+    if (!expect(p, T_LBRACE, what_brace)) { skip_column_region(p); return n; }
 
     Vec fv; vec_init(&fv);
     for (;;) {
         skip_nl(p);
         if (is(p, T_EOF)) {
-            perr(p, cur(p), "struct `%s` is never closed (missing `}.end`).", n->name);
+            perr(p, cur(p), "%s `%s` is never closed (missing `}.end`).", kw, n->name);
             return n;
         }
         if (is(p, T_RBRACE)) { advance(p); break; }
         if (is(p, T_DOT) && isk(p, 1, T_KW_END)) {
-            perr(p, cur(p), "`.end` completes `}` — write `}.end` to close the struct.");
+            perr(p, cur(p), "`.end` completes `}` — write `}.end` to close the %s.", kw);
             break;
         }
         OkType fty;
         if (!parse_type_prefix(p, &fty)) { sync_stmt(p); continue; }
         if (!is(p, T_IDENT)) {
-            perr(p, cur(p), "expected a field name in struct `%s`, but found %s.",
-                 n->name, tok_kind_name(cur(p)->kind));
+            perr(p, cur(p), "expected a member name in %s `%s`, but found %s.",
+                 kw, n->name, tok_kind_name(cur(p)->kind));
             sync_stmt(p);
             continue;
         }
@@ -993,7 +1002,7 @@ static Node *parse_structdecl(Parser *p) {
         pa->type = fty;
         advance(p);  /* consume the field name */
         if (is(p, T_EQ)) {
-            Diag *d = perr(p, cur(p), "struct fields have no initializers — construct with a literal (`type.%s v = { ... }`) and set fields by assignment.", n->name);
+            Diag *d = perr(p, cur(p), "%s members have no initializers — construct with a literal (`type.%s v = { ... }`) and set fields by assignment.", kw, n->name);
             (void)d;
             free(pa->name);
             free(pa);
@@ -1072,7 +1081,12 @@ static Node *parse_devcol(Parser *p) {
             continue;
         }
         if (is(p, T_KW_STRUCT)) {
-            m = parse_structdecl(p);
+            m = parse_recorddecl(p, false);
+            if (m) vec_push(&n->body, m);
+            continue;
+        }
+        if (is(p, T_KW_UNION)) {
+            m = parse_recorddecl(p, true);
             if (m) vec_push(&n->body, m);
             continue;
         }
@@ -1158,8 +1172,8 @@ static Node *parse_toplevel_function(Parser *p) {
             Diag *d = perr(p, cur(p), "functions cannot return arrays directly in Okular.");
             diag_note(d, "return `ptr<array<T, N>>` instead (spec §12), or an element.");
             n->otype = ty_number; /* recover as number */
-        } else if (ty && ty_kind(ty) == OK_STRUCT) {
-            Diag *d = perr(p, cur(p), "functions cannot return structs directly in Okular 0.5.");
+        } else if (ty && (ty_kind(ty) == OK_STRUCT || ty_kind(ty) == OK_UNION)) {
+            Diag *d = perr(p, cur(p), "functions cannot return structs or unions directly in Okular 0.7.");
             diag_note(d, "return `ptr<%s>` instead (spec §12), or write into a pointer parameter.", ty->name);
             n->otype = ty_number; /* recover as number */
         } else {
@@ -1227,7 +1241,9 @@ static Node *parse_toplevel(Parser *p) {
     case T_KW_FUNCTION:
         return parse_toplevel_function(p);
     case T_KW_STRUCT:
-        return parse_structdecl(p);
+        return parse_recorddecl(p, false);
+    case T_KW_UNION:
+        return parse_recorddecl(p, true);
     case T_IDENT: {
         if (isk(p, 1, T_EQ) && isk(p, 2, T_LBRACE))
             return parse_devcol(p);

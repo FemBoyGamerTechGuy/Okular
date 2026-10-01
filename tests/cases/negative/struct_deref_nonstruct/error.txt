@@ -1,1 +1,1 @@
-`n` is a `number` value — `.` accesses struct fields
+`n` is a `number` value — `.` accesses record members

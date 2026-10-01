@@ -54,6 +54,7 @@ typedef struct {
 
 static void build_expr(Ctx *c, Node *e);
 static void build_structlit(Ctx *c, Node *lit, Symbol *into, size_t base_off, OkType st);
+static void build_unionlit(Ctx *c, Node *lit, Symbol *into, size_t base_off, OkType ut);
 
 /* build operand and convert to `want` when a conversion exists (implicit
  * widening, or the literal rule sema already approved — both lower to the
@@ -108,10 +109,14 @@ static void build_arraylit(Ctx *c, Node *lit, Symbol *into, size_t base_off, OkT
                 build_structlit(c, el, into, off, atype->elem);
                 continue;
             }
+            if (ty_kind(atype->elem) == OK_UNION) {
+                build_unionlit(c, el, into, off, atype->elem);
+                continue;
+            }
             build_arraylit(c, el, into, off, atype->elem);
             continue;
         }
-        if (ty_kind(atype->elem) == OK_ARRAY || ty_kind(atype->elem) == OK_STRUCT) {
+        if (ty_kind(atype->elem) == OK_ARRAY || ty_is_record(atype->elem)) {
             /* whole array/struct value: copy its contents into the slot */
             build_addr(c, into, off);
             build_expr(c, el);
@@ -128,9 +133,42 @@ static void build_arraylit(Ctx *c, Node *lit, Symbol *into, size_t base_off, OkT
     }
 }
 
+/* initialize a union variable's storage from an A_ARRAYLIT (spec §8.5):
+ * sema checked exactly one value and stashed the CHOSEN member index in
+ * lit->offset; every member lives at offset 0, so the store lands at the
+ * union's base (the rest of the storage keeps whatever it held — the
+ * documented union contract) */
+static void build_unionlit(Ctx *c, Node *lit, Symbol *into, size_t base_off, OkType ut) {
+    if (lit->args.len != 1) return; /* sema reported the arity error */
+    size_t k = lit->offset < ut->nsfields ? lit->offset : 0;
+    StructField *f = &ut->sfields[k];
+    Node *el = lit->args.items[0];
+    if (el->kind == A_ARRAYLIT) {
+        if (ty_kind(f->type) == OK_ARRAY) { build_arraylit(c, el, into, base_off, f->type); return; }
+        if (ty_kind(f->type) == OK_STRUCT) { build_structlit(c, el, into, base_off, f->type); return; }
+        if (ty_kind(f->type) == OK_UNION) { build_unionlit(c, el, into, base_off, f->type); return; }
+        return; /* sema reported the mismatch */
+    }
+    if (ty_kind(f->type) == OK_ARRAY || ty_is_record(f->type)) {
+        /* whole aggregate value: copy its contents into the member slot */
+        build_addr(c, into, base_off);
+        build_expr(c, el);
+        IrInst cp = { .kind = I_COPY, .type = f->type, .i = ty_bytes(f->type),
+                      .line = el->line, .col = el->col };
+        emit(c->f, cp);
+        return;
+    }
+    build_addr(c, into, base_off);
+    build_operand_conv(c, el, f->type);
+    IrInst st = { .kind = I_STORE_AT, .type = f->type,
+                  .line = el->line, .col = el->col };
+    emit(c->f, st);
+}
+
 /* initialize a struct variable's storage from an A_ARRAYLIT (spec §8.3):
  * field k lands at its declared offset; nested literals recurse */
 static void build_structlit(Ctx *c, Node *lit, Symbol *into, size_t base_off, OkType st) {
+    if (ty_kind(st) == OK_UNION) { build_unionlit(c, lit, into, base_off, st); return; }
     for (size_t k = 0; k < lit->args.len && k < st->nsfields; k++) {
         Node *el = lit->args.items[k];
         StructField *f = &st->sfields[k];
@@ -140,6 +178,10 @@ static void build_structlit(Ctx *c, Node *lit, Symbol *into, size_t base_off, Ok
                 build_structlit(c, el, into, off, f->type);
                 continue;
             }
+            if (ty_kind(f->type) == OK_UNION) {
+                build_unionlit(c, el, into, off, f->type);
+                continue;
+            }
             if (ty_kind(f->type) == OK_ARRAY) {
                 build_arraylit(c, el, into, off, f->type);
                 continue;
@@ -147,7 +189,7 @@ static void build_structlit(Ctx *c, Node *lit, Symbol *into, size_t base_off, Ok
             /* sema reported the mismatch */
             continue;
         }
-        if (ty_kind(f->type) == OK_ARRAY || ty_kind(f->type) == OK_STRUCT) {
+        if (ty_kind(f->type) == OK_ARRAY || ty_is_record(f->type)) {
             build_addr(c, into, off);
             build_expr(c, el);
             IrInst cp = { .kind = I_COPY, .type = f->type, .i = ty_bytes(f->type),
@@ -205,8 +247,8 @@ static void build_expr(Ctx *c, Node *e) {
             build_expr(c, e->a);
             break;
         }
-        if (ty_kind(s->type) == OK_STRUCT) {
-            /* structs evaluate to their storage address (spec §8.3) */
+        if (ty_is_record(s->type)) {
+            /* structs and unions evaluate to their storage address (spec §8.3/§8.5) */
             build_addr(c, s, 0);
             break;
         }
@@ -254,12 +296,12 @@ static void build_expr(Ctx *c, Node *e) {
                           .line = e->line, .col = e->col };
             emit(c->f, ix);
         }
-        if (ty_kind(base_ty->elem) != OK_ARRAY && ty_kind(base_ty->elem) != OK_STRUCT) {
+        if (ty_kind(base_ty->elem) != OK_ARRAY && !ty_is_record(base_ty->elem)) {
             IrInst ld = { .kind = I_LOAD_AT, .type = base_ty->elem,
                           .line = e->line, .col = e->col };
             emit(c->f, ld);
         }
-        /* array/struct elements stay as addresses (value semantics) */
+        /* array/record elements stay as addresses (value semantics) */
         break;
     }
     case A_NULL: {
@@ -277,9 +319,9 @@ static void build_expr(Ctx *c, Node *e) {
         break;
     }
     case A_MEMBER: {
-        /* base.field — the base is a struct value (its address) or, with
-         * autoderef, a ptr<struct>; offset then load if the field is a
-         * scalar (struct/array fields stay as addresses — value semantics) */
+        /* base.field — the base is a record value (its address) or, with
+         * autoderef, a ptr<record>; offset then load if the member is a
+         * scalar (record/array members stay as addresses — value semantics) */
         build_expr(c, e->a);
         if (e->autoderef) {
             IrInst chk = { .kind = I_PTRCHK, .type = e->a->rtype,
@@ -289,7 +331,7 @@ static void build_expr(Ctx *c, Node *e) {
         IrInst off = { .kind = I_ADDOFF, .i = e->offset,
                        .line = e->line, .col = e->col };
         emit(c->f, off);
-        if (ty_kind(e->rtype) != OK_ARRAY && ty_kind(e->rtype) != OK_STRUCT) {
+        if (ty_kind(e->rtype) != OK_ARRAY && !ty_is_record(e->rtype)) {
             IrInst ld = { .kind = I_LOAD_AT, .type = e->rtype,
                           .line = e->line, .col = e->col };
             emit(c->f, ld);
@@ -468,11 +510,11 @@ static void build_stmt(StmtCtx *sc, Node *s) {
             build_arraylit(c, s->a, sym, 0, sym->type);
             break;
         }
-        if (ty_kind(sym->type) == OK_STRUCT && s->a->kind == A_ARRAYLIT) {
+        if (ty_is_record(sym->type) && s->a->kind == A_ARRAYLIT) {
             build_structlit(c, s->a, sym, 0, sym->type);
             break;
         }
-        if (ty_kind(sym->type) == OK_ARRAY || ty_kind(sym->type) == OK_STRUCT) {
+        if (ty_kind(sym->type) == OK_ARRAY || ty_is_record(sym->type)) {
             build_addr(c, sym, 0);          /* dst */
             build_expr(c, s->a);            /* src address */
             IrInst cp = { .kind = I_COPY, .type = sym->type, .i = ty_bytes(sym->type),
@@ -486,7 +528,7 @@ static void build_stmt(StmtCtx *sc, Node *s) {
     }
     case A_ASSIGN: {
         Symbol *sym = s->sym;
-        if (ty_kind(sym->type) == OK_ARRAY || ty_kind(sym->type) == OK_STRUCT) {
+        if (ty_kind(sym->type) == OK_ARRAY || ty_is_record(sym->type)) {
             build_addr(c, sym, 0);          /* dst */
             build_expr(c, s->a);            /* src address */
             IrInst cp = { .kind = I_COPY, .type = sym->type, .i = ty_bytes(sym->type),
@@ -574,7 +616,7 @@ static void build_stmt(StmtCtx *sc, Node *s) {
          * (checked) value's expected type stored at lowering time — sema
          * stored the field type in s->otype for IR */
         OkType ft = s->otype;
-        if (ty_kind(ft) == OK_ARRAY || ty_kind(ft) == OK_STRUCT) {
+        if (ty_kind(ft) == OK_ARRAY || ty_is_record(ft)) {
             build_expr(c, s->c);
             IrInst cp = { .kind = I_COPY, .type = ft, .i = ty_bytes(ft),
                           .line = s->line, .col = s->col };
@@ -816,7 +858,7 @@ IrModule *ir_build_module(OkModule *m) {
             Node *n = m->ast->body.items[i];
             switch (n->kind) {
             case A_DIRECTIVE: case A_LANGCOL: case A_FUNC:
-            case A_VARDECL: case A_DEVCOL: case A_STRUCTDECL:
+            case A_VARDECL: case A_DEVCOL: case A_STRUCTDECL: case A_UNIONDECL:
                 break;
             default:
                 build_stmt(&sc, n);

@@ -1,0 +1,41 @@
+type.text=1
+
+union.Word = {
+    type.uint32 u
+    type.uint8 low
+}.end
+
+union.Mixed = {
+    type.number n
+    type.decimal d
+    type.bool flag
+}.end
+
+function.run() -> number {
+    type.Word w = { 258 }
+    write(w.u)
+    print
+    write(w.low)
+    print
+
+    w.low = 7
+    write(w.low)
+    print
+    write(w.u)
+    print
+
+    type.Mixed m = { 42 }
+    write(m.n)
+    print
+
+    m.d = 2.5
+    write(m.d)
+    print
+
+    m.flag = true
+    write(m.flag)
+    print
+    return 0
+}
+
+run()

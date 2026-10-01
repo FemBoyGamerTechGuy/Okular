@@ -150,7 +150,7 @@ static void gen_function(Buf *out, IrModule *im, IrFunc *f, size_t seq) {
         FuncInfo *cfi = (FuncInfo *)f->insts[i].sym;
         size_t need = 0;
         for (size_t k = 0; k < (size_t)f->insts[i].nargs && k < cfi->nparams; k++)
-            if (ty_kind(cfi->param_types[k]) == OK_ARRAY || ty_kind(cfi->param_types[k]) == OK_STRUCT)
+            if (ty_kind(cfi->param_types[k]) == OK_ARRAY || ty_is_record(cfi->param_types[k]))
                 need += ty_bytes(cfi->param_types[k]);
         if (need > scratch) scratch = need;
     }
@@ -166,7 +166,7 @@ static void gen_function(Buf *out, IrModule *im, IrFunc *f, size_t seq) {
     /* store parameters into their slots (params are slots 0..n-1) */
     for (size_t k = 0; k < f->fi->nparams && k < 6; k++) {
         size_t o = fc.offsets[k];
-        if (ty_kind(f->fi->param_types[k]) == OK_ARRAY || ty_kind(f->fi->param_types[k]) == OK_STRUCT) {
+        if (ty_kind(f->fi->param_types[k]) == OK_ARRAY || ty_is_record(f->fi->param_types[k])) {
             /* the register holds the caller's copy: adopt it by value */
             buf_printf(out, "    mov rsi, %s\n", arg_regs[k]);
             buf_printf(out, "    lea rdi, [rbp-%zu]\n", o);
@@ -214,7 +214,7 @@ static void emit_call(FnCtx *fc, IrInst *in) {
     for (size_t k = 0; k < n && k < 16; k++) arr_off[k] = 0;
     for (size_t k = 0; k < n; k++) {
         OkType t = (k < fi->nparams) ? fi->param_types[k] : ty_number;
-        if (ty_kind(t) == OK_ARRAY || ty_kind(t) == OK_STRUCT) {
+        if (ty_kind(t) == OK_ARRAY || ty_is_record(t)) {
             size_t bytes = ty_bytes(t);
             buf_printf(o, "    mov rax, [rsp+%zu]\n", stack_off);
             buf_puts(o, "    mov rsi, rax\n");
@@ -243,7 +243,7 @@ static void emit_call(FnCtx *fc, IrInst *in) {
     for (size_t k = 0; k < n && k < 6; k++) {
         OkType t = (k < fi->nparams) ? fi->param_types[k] : ty_number;
         size_t oa = fc->oa_base - k * 16;
-        if (ty_kind(t) == OK_ARRAY || ty_kind(t) == OK_STRUCT) {
+        if (ty_kind(t) == OK_ARRAY || ty_is_record(t)) {
             buf_printf(o, "    lea %s, [rbp-%zu]\n", arg_regs[k],
                        fc->scratch_base - arr_off[k]);
             continue;
@@ -649,7 +649,7 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         call_aligned(o, "rt_print");
         break;
     case I_RETURN:
-        if (ty_kind(in->type) == OK_ARRAY || ty_kind(in->type) == OK_STRUCT)
+        if (ty_kind(in->type) == OK_ARRAY || ty_is_record(in->type))
             OK_ICE("RETURN of aggregate type at %zu:%zu (sema should have rejected it)", in->line, in->col);
         if (ty_is_integer(in->type) || in->type == ty_bool || ty_is_ptr(in->type)
             || in->type == ty_null) {
@@ -832,6 +832,20 @@ static void emit_const_elems(GlobCtx *g, const char *label, OkType t, ConstVal *
                 continue;
             }
             emit_const_elems(g, NULL, t->elem, ev);
+        }
+        return;
+    }
+    if (ty_kind(t) == OK_UNION) {
+        /* one activated member's constant, then zero to the union's full
+         * size — deterministic .data even for the overlapping bytes */
+        OkType mt = cv ? cv->mtype : NULL;
+        if (!cv || !cv->valid || !mt) {
+            buf_printf(g->data, "    .zero %zu\n", t->count ? t->count : 8);
+        } else {
+            emit_const_elems(g, NULL, mt, cv);
+            size_t mb = ty_bytes(mt);
+            if (t->count > mb)
+                buf_printf(g->data, "    .zero %zu\n", t->count - mb);
         }
         return;
     }

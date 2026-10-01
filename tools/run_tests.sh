@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/run_tests.sh — the Okular 0.6 test suite (brief §51).
+# tools/run_tests.sh — the Okular 0.7 test suite (brief §51).
 #
 # Layout: tests/cases/{positive,negative,policy,flags}/<name>/
 #   main.ok (+ src/)          the project
@@ -121,7 +121,7 @@ run_one() { # run_one <group> <casedir>
     esac
 }
 
-echo "== Okular 0.6 test suite =="
+echo "== Okular 0.7 test suite =="
 
 for group in positive negative policy flags; do
     echo "-- $group"

@@ -1,0 +1,19 @@
+type.text=1
+
+union.Word = {
+    type.uint32 u
+    type.uint8 low
+}.end
+
+function.run() -> number {
+    type.Word a = { 300 }
+    type.Word b = a
+    b.low = 9
+    write(a.u)
+    print
+    write(b.u)
+    print
+    return 0
+}
+
+run()

@@ -1,1 +1,1 @@
-cannot be laid out: a field type is unknown or circular
+cannot be laid out: a member type is unknown or circular

@@ -217,6 +217,14 @@ static void dump_top(Node *n, int ind) {
         }
         pad(ind); printf("}.end\n");
         break;
+    case A_UNIONDECL:
+        printf("union %s = {\n", n->name);
+        for (size_t i = 0; i < n->nparams; i++) {
+            pad(ind + 2);
+            printf("%s %s\n", ok_type_name(n->params[i].type), n->params[i].name);
+        }
+        pad(ind); printf("}.end\n");
+        break;
     case A_FUNC:
         printf("func %s(", n->name);
         for (size_t i = 0; i < n->nparams; i++)

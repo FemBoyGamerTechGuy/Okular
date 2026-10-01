@@ -24,7 +24,8 @@ typedef struct FuncInfo {
 } FuncInfo;
 
 /* constant value for global initializers (spec §7/§8: constants only).
- * Arrays carry their element constants recursively (spec §8.4). */
+ * Arrays carry their element constants recursively (spec §8.4); unions
+ * carry the CHOSEN member's constant plus its type in `mtype` (spec §8.5). */
 typedef struct ConstVal {
     bool valid;
     OkType type;
@@ -35,6 +36,7 @@ typedef struct ConstVal {
     size_t t_len;
     struct ConstVal *elems; /* array elements (owned) */
     size_t nelems;
+    OkType mtype;           /* union: the activated member's type (0.7) */
 } ConstVal;
 
 typedef struct Symbol {

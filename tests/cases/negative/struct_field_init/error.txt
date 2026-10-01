@@ -1,1 +1,1 @@
-struct fields have no initializers
+struct members have no initializers

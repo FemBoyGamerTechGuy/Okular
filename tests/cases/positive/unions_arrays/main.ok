@@ -1,0 +1,25 @@
+type.text=1
+
+union.Cell = {
+    type.uint16 id
+    type.uint8 parts
+}.end
+
+function.run() -> number {
+    type.array<type.Cell, 3> cells = { { 513 }, { 258 }, { 77 } }
+    write(cells[0].id)
+    print
+    write(cells[1].id)
+    print
+    write(cells[2].id)
+    print
+
+    cells[1].parts = 3
+    write(cells[1].id)
+    print
+    write(cells[0].id)
+    print
+    return 0
+}
+
+run()

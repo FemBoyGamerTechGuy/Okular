@@ -1,0 +1,33 @@
+type.text=1
+
+union.Word = {
+    type.uint32 u
+    type.uint8 low
+}.end
+
+struct.Packet = {
+    type.uint8 kind
+    type.Word payload
+    type.uint16 size
+}.end
+
+function.run() -> number {
+    type.Packet p = { 9, { 258 }, 4 }
+    write(p.kind)
+    print
+    write(p.payload.u)
+    print
+    write(p.size)
+    print
+
+    p.payload.low = 1
+    write(p.payload.u)
+    print
+
+    type.Packet q = { 2, { 1000 }, 1 }
+    write(q.payload.u)
+    print
+    return 0
+}
+
+run()

@@ -1,0 +1,12 @@
+union.Word = {
+    type.number n
+    type.uint8 b
+}.end
+
+function.mk() -> Word {
+    return 1
+}
+
+function.run() -> number {
+    return 0
+}

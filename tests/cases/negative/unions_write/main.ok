@@ -1,0 +1,12 @@
+type.text=1
+
+union.Word = {
+    type.number n
+    type.uint8 b
+}.end
+
+function.run() -> number {
+    type.Word w = { 1 }
+    write(w)
+    return 0
+}

@@ -1,0 +1,33 @@
+type.text=1
+
+union.Value = {
+    type.number n
+    type.uint8 b
+}.end
+
+union.Wide = {
+    type.uint8 small
+    type.array<type.uint8, 4> bytes
+}.end
+
+type.Value config = { 65 }
+type.Value zero = { 0 }
+type.Wide raw = { 9 }
+
+function.run() -> number {
+    write(config.n)
+    print
+    write(config.b)
+    print
+    write(zero.n)
+    print
+    write(raw.small)
+    print
+    write(raw.bytes[0])
+    print
+    write(raw.bytes[3])
+    print
+    return 0
+}
+
+run()

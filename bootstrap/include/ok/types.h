@@ -27,7 +27,8 @@ typedef enum {
     OK_PTR,        /* pointer to elem (spec §12)           */
     OK_NULL,       /* the type of the `null` literal        */
     OK_STRUCT,     /* named record type (spec §8.3, 0.5)    */
-    OK_NAMED,      /* parser placeholder: unresolved struct name */
+    OK_UNION,      /* named overlap type (spec §8.5, 0.7)   */
+    OK_NAMED,      /* parser placeholder: unresolved struct/union name */
 } TypeKind;
 
 /* OkType is a pointer to an interned descriptor. */
@@ -72,8 +73,14 @@ OkType ty_named_placeholder(const char *name);
 
 static inline bool ty_is_ptr(OkType t) { return t && t->kind == OK_PTR; }
 static inline bool ty_is_struct(OkType t) { return t && t->kind == OK_STRUCT; }
+static inline bool ty_is_union(OkType t) { return t && t->kind == OK_UNION; }
+/* records: structs and unions share the field/aggregate machinery */
+static inline bool ty_is_record(OkType t) {
+    return t && (t->kind == OK_STRUCT || t->kind == OK_UNION);
+}
 
-/* struct field lookup by name; NULL when absent */
+/* struct field lookup by name; NULL when absent. For unions the same
+ * table is used: every field sits at offset 0 (spec §8.5). */
 StructField *ty_field(OkType t, const char *name);
 
 /* natural alignment of a type (1/2/4/8) */
