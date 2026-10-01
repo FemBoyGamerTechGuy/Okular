@@ -7,35 +7,44 @@ on:
   pull_request:
 
 jobs:
-  build-and-test:
-    name: Build, test, bootstrap chain
+  selfhost:
+    name: C-free build + self-reproduction + differential suite
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build the bootstrap compiler and all selfhost components
-        run: make selfhost-lex selfhost-parse selfhost-runtime selfhost-assembler selfhost-compiler
+      # THE product path: no C compiler, no as, no ld. The committed native
+      # seed (bin/okular) compiles the compiler from source; the result must
+      # reproduce the seed byte-identically and pass the full suite.
+      - name: Build the Okular compiler with the native seed (zero C)
+        run: make
 
-      - name: Full test suite (positive / negative / policy / flags / differential)
-        run: bash tools/run_tests.sh
+      - name: Self-reproduction + 187-case differential suite
+        run: bash tools/run_selfbuild_check.sh
 
-      - name: Bootstrap chain (stage 0 -> 1 -> 2 -> 3, fixed point, self-build differential)
+  c-differential:
+    name: Legacy C bootstrap differential (transitional until M7)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Full legacy suite through the C bootstrap (560 checks)
+        run: make test-c
+
+      - name: M5 bootstrap chain (stage 0 -> 1 -> 2 -> 3 fixed point)
         run: bash tools/run_bootstrap_chain.sh
 
   release-package:
     name: Package and test the real product
     runs-on: ubuntu-latest
-    needs: build-and-test
+    needs: selfhost
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build everything and run the bootstrap chain
+      - name: Build the compiler (C-free) and package the distribution
         run: |
           make
-          bash tools/run_bootstrap_chain.sh
-
-      - name: Package the downloadable compiler and test it end-to-end
-        run: bash tools/package_release.sh
+          bash tools/package_release.sh
 
       - name: Upload the compiler artifact
         uses: actions/upload-artifact@v4
@@ -79,7 +88,7 @@ jobs:
             dist/*.sha256
           generate_release_notes: true
           body: |
-            **Okular ${{ github.ref_name }}** — native compiler for linux-x86_64.
+            **Okular ${{ github.ref_name }}** — native compiler for linux-x86-64.
 
             Download `okular-${{ github.ref_name }}-linux-x86_64.tar.gz`,
             unpack, and compile your first program:

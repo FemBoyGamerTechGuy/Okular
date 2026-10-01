@@ -1,9 +1,5 @@
-# build artifacts
-build/bootstrap/
-build/okular
-build/rt_code.o
-build/rt_start.o
-runtime/rt.o
+# build artifacts (everything under build/ is derived)
+build/
 
 # project-local build outputs from examples, selfhost, and tests
 examples/*/build/
@@ -15,5 +11,5 @@ tests/tmp/
 *.swp
 .DS_Store
 
-# release staging
-build/release/
+# the C bootstrap runtime object (transitional, derived)
+runtime/rt.o

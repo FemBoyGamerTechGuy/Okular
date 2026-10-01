@@ -219,7 +219,9 @@ function.load_project(text.main_path) -> number {
 }
 
 # the runtime module: compiled into every emitted program; resolved
-# relative to this executable (build/output/ -> ../../src/rt.ok)
+# relative to this executable (build/output/ -> ../../src/rt.ok, a
+# release tree's bin/ -> ../src/rt.ok, the repository's bin/ seed ->
+# ../selfhost/compiler/src/rt.ok)
 function.inject_runtime(text.exe_path) -> number {
     when (sema.find_mod("rt") != null) {
         return 0
@@ -227,12 +229,16 @@ function.inject_runtime(text.exe_path) -> number {
     type.text dir = dirname(exe_path)
     type.text cand1 = path_join(dir, "../../src/rt.ok")
     type.text cand2 = path_join(dir, "../src/rt.ok")
+    type.text cand3 = path_join(dir, "../selfhost/compiler/src/rt.ok")
     type.text rt_path = ""
     when (fs.exists(cand1) == true) {
         rt_path = cand1
     }
     else when (fs.exists(cand2) == true) {
         rt_path = cand2
+    }
+    else when (fs.exists(cand3) == true) {
+        rt_path = cand3
     }
     when (rt_path == "") {
         sys.write(2, "okc: cannot locate the runtime module `src/rt.ok` next to the compiler.\n")

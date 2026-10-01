@@ -1,4 +1,74 @@
-# Okular bootstrap build (brief §62: readable, modular, portable where possible)
+# Okular build (M6: the normal path needs NO C compiler, NO as, NO ld)
+#
+#   make            build/okular  — the Okular compiler, compiled from
+#                   selfhost/compiler sources by bin/okular (the committed
+#                   native seed). Pure Okular -> native x86-64.
+#   make test       the C-free acceptance: the seed must reproduce itself
+#                   byte-identically from source, and the compiler must
+#                   pass the full differential suite.
+#   make release    package + end-to-end test the downloadable compiler.
+#
+# Transitional (until M7 removes the C bootstrap entirely):
+#   make c-bootstrap  build/okular-c — the C bootstrap compiler (needs cc/as/ld)
+#   make test-c       the legacy 560-check suite through the C compiler,
+#                     including the C-vs-Okular parser differential
+#   make bootstrap-chain  the M5 chain: stage 0 (cc) -> 1 -> 2 -> 3
+
+.DEFAULT_GOAL := all
+
+.PHONY: all test test-c clean release selfhost-compiler bootstrap-chain \
+        c-bootstrap selfhost-lex selfhost-parse selfhost-runtime selfhost-assembler
+
+# ---- the normal (C-free) path ----
+
+OKC_SRCS := selfhost/compiler/main.ok $(wildcard selfhost/compiler/src/*.ok)
+
+build/okular: bin/okular $(OKC_SRCS)
+	mkdir -p build
+	cd selfhost/compiler && ../../bin/okular main.ok --out ../../build/okular
+
+all: build/okular
+
+# bin/okular is the committed self-built compiler (stage 2 of the chain).
+# Building the compiler from source with it must reproduce it exactly.
+test: all
+	bash tools/run_selfbuild_check.sh
+
+release: all
+	bash tools/package_release.sh
+
+# ---- the standalone selfhost components (M3/M4/M5 lineage) — all
+# compiled by the Okular compiler now ----
+
+selfhost/lexer/build/output/main: build/okular selfhost/lexer/main.ok selfhost/lexer/src/lexer.ok
+	cd selfhost/lexer && ../../build/okular main.ok
+
+selfhost-lex: selfhost/lexer/build/output/main
+
+selfhost/parser/build/output/main: build/okular selfhost/parser/main.ok selfhost/parser/src/toks.ok selfhost/parser/src/parser.ok
+	cd selfhost/parser && ../../build/okular main.ok
+
+selfhost-parse: selfhost/parser/build/output/main
+
+selfhost/runtime/build/output/main: build/okular selfhost/runtime/main.ok selfhost/runtime/src/rt.ok
+	cd selfhost/runtime && ../../build/okular main.ok
+
+selfhost-runtime: selfhost/runtime/build/output/main
+
+selfhost/assembler/build/output/main: build/okular selfhost/assembler/main.ok selfhost/assembler/src/elf.ok
+	cd selfhost/assembler && ../../build/okular main.ok
+
+selfhost-assembler: selfhost/assembler/build/output/main
+
+selfhost-compiler: build/okular
+
+# ---- the M5 acceptance chain (C-based, transitional) ----
+
+bootstrap-chain: build/okular
+	bash tools/run_bootstrap_chain.sh
+
+# ---- the C bootstrap (transitional until M7) ----
+
 CC      := cc
 CFLAGS  := -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter -Ibootstrap/include
 RTFLAGS := -O2 -ffreestanding -nostdlib -fno-pie -fno-stack-protector \
@@ -13,45 +83,7 @@ HDRS := $(wildcard bootstrap/include/ok/*.h)
 # change silently corrupts the build (found the hard way in M2)
 $(OBJS): $(HDRS)
 
-# the dependency rule above must not become the default goal (found in M3:
-# bare `make` built exactly one object and stopped)
-.DEFAULT_GOAL := all
-
-.PHONY: all test clean selfhost-lex selfhost-parse selfhost-runtime selfhost-assembler
-
-all: build/okular runtime/rt.o
-
-# the Okular-written lexer (M4, docs/roadmap.md): the bootstrap compiler
-# compiles it; --selfhost-lex then uses it as the compiler's tokenizer
-selfhost/lexer/build/output/main: build/okular runtime/rt.o selfhost/lexer/main.ok selfhost/lexer/src/lexer.ok
-	cd selfhost/lexer && ../../build/okular --compile main.ok
-
-selfhost-lex: selfhost/lexer/build/output/main
-
-# the Okular-written parser (M4, docs/roadmap.md): the bootstrap compiler
-# compiles it; --selfhost-parse then uses it as the compiler's parser
-selfhost/parser/build/output/main: build/okular runtime/rt.o selfhost/parser/main.ok selfhost/parser/src/toks.ok selfhost/parser/src/parser.ok
-	cd selfhost/parser && ../../build/okular --compile main.ok
-
-selfhost-parse: selfhost/parser/build/output/main
-
-# the Okular-written runtime (M4, docs/roadmap.md): the output formatters,
-# text arena, conversion builtins, heap allocator, and file operations —
-# all in Okular, on the sys.* syscall floor (spec §6.6)
-selfhost/runtime/build/output/main: build/okular runtime/rt.o selfhost/runtime/main.ok selfhost/runtime/src/rt.ok
-	cd selfhost/runtime && ../../build/okular --compile main.ok
-
-selfhost-runtime: selfhost/runtime/build/output/main
-
-# the integrated assembler seed (M5): emits a native ELF64 executable
-# from Okular — ELF headers, machine code, symbol fixups, chmod — with
-# no `as` and no `ld` anywhere in the chain
-selfhost/assembler/build/output/main: build/okular runtime/rt.o selfhost/assembler/main.ok selfhost/assembler/src/elf.ok
-	cd selfhost/assembler && ../../build/okular --compile main.ok
-
-selfhost-assembler: selfhost/assembler/build/output/main
-
-build/okular: $(OBJS)
+build/okular-c: $(OBJS)
 	@mkdir -p build/bootstrap
 	$(CC) $(CFLAGS) -o $@ $(OBJS)
 
@@ -65,24 +97,11 @@ runtime/rt.o: runtime/rt.c runtime/rt_start.s
 	$(CC) -c -o build/rt_start.o runtime/rt_start.s
 	ld -r -o runtime/rt.o build/rt_code.o build/rt_start.o
 
-test: all selfhost-lex selfhost-parse selfhost-runtime selfhost-assembler bootstrap-chain
-	bash tools/run_tests.sh
+c-bootstrap: build/okular-c runtime/rt.o
+
+test-c: c-bootstrap selfhost-lex selfhost-parse selfhost-runtime selfhost-assembler
+	OKC_BOOTSTRAP=$(CURDIR)/build/okular-c bash tools/run_tests.sh
 
 clean:
-	rm -rf build/bootstrap build/okular build/rt_code.o build/rt_start.o runtime/rt.o
+	rm -rf build
 	rm -rf examples/*/build selfhost/*/build tests/tmp
-
-# the Okular-written compiler (M5): the complete pipeline — project load,
-# sema, IR, x86-64 emission, native ELF64 — in one Okular program
-selfhost/compiler/build/output/main: build/okular runtime/rt.o selfhost/compiler/main.ok $(wildcard selfhost/compiler/src/*.ok)
-	cd selfhost/compiler && ../../build/okular --compile main.ok
-
-selfhost-compiler: selfhost/compiler/build/output/main
-
-# the M5 acceptance test: the bootstrap chain (stage 0 -> 1 -> 2 -> 3,
-# byte-identical fixed point) plus the differential suite through the
-# self-built compiler — permanently in CI
-bootstrap-chain: selfhost/compiler/build/output/main
-	bash tools/run_bootstrap_chain.sh
-
-.PHONY: selfhost-compiler bootstrap-chain

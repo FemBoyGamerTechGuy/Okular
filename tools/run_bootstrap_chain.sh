@@ -13,15 +13,16 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 CDIR="$REPO/selfhost/compiler"
 STAGE2="$CDIR/build/stage2/main"
+CBOOT="$REPO/build/okular-c"
 
-# Stage 0 (assumes `make` already ran; rebuild if missing)
-if [ ! -x "$REPO/build/okular" ]; then
-    (cd "$REPO" && make) || exit 2
+# Stage 0 (the C bootstrap; transitional until M7 removes it)
+if [ ! -x "$CBOOT" ]; then
+    (cd "$REPO" && make c-bootstrap) || exit 2
 fi
 
 # Stage 1: the C bootstrap compiles okc
 rm -rf "$CDIR/build/output"
-(cd "$CDIR" && "$REPO/build/okular" --compile main.ok) || {
+(cd "$CDIR" && "$CBOOT" --compile main.ok) || {
     echo "bootstrap chain: STAGE 1 FAILED (C bootstrap cannot compile okc)"; exit 1; }
 
 # Stage 2: okc compiles itself

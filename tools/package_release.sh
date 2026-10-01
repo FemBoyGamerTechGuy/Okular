@@ -23,12 +23,13 @@ NAME="okular-${VER}-linux-x86_64"
 STAGE="$REPO/build/release/$NAME"
 OUT_TGZ="$REPO/build/release/$NAME.tar.gz"
 
-# the compiler: the SELF-BUILT one (stage 2 of the bootstrap chain), so the
-# shipped binary is proven to come from the Okular source, not from C
-OKC="$REPO/selfhost/compiler/build/stage2/main"
+# the compiler: build/okular, compiled from the Okular sources by the
+# committed native seed (bin/okular) — proven byte-identical to the seed by
+# `make test` (deterministic self-reproduction); zero C in the chain
+OKC="$REPO/build/okular"
 if [ ! -x "$OKC" ]; then
-    echo "package_release: self-built compiler missing at $OKC" >&2
-    echo "  run: make bootstrap-chain first" >&2
+    echo "package_release: compiler missing at $OKC" >&2
+    echo "  run: make first" >&2
     exit 2
 fi
 

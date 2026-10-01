@@ -16,7 +16,7 @@
 
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-OKULAR="$REPO/build/okular"
+OKULAR="${OKC_BOOTSTRAP:-$REPO/build/okular}"
 SELFHOST_LEX="$REPO/selfhost/lexer/build/output/main"
 SELFHOST_PARSE="$REPO/selfhost/parser/build/output/main"
 CASES="$REPO/tests/cases"

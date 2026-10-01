@@ -43,7 +43,7 @@ status table.
 | M3 | Okular can compile portions of the compiler itself | **done (0.13)** — `selfhost/lexer` and now `selfhost/parser` compile real compiler components |
 | M4 | Compiler components rewritten in Okular (lexer, parser, runtime shim) | **done (0.13)** — lexer, parser, and runtime all written in Okular, differentially verified on every positive case |
 | M5 | Okular compiler builds itself | **done (0.14)** — `selfhost/compiler` is the complete compiler in Okular (~13.9k lines: toks, parser, sema, ir, emit, elf, rt); stage 0->1->2->3 bootstrap chain verified with a byte-identical fixed point, and the self-built compiler passes the full 187-case differential suite (`make bootstrap-chain`) |
-| M6 | C bootstrap no longer required | next — strip the C compiler out of the normal build/run path |
+| M6 | C bootstrap no longer required | **done (0.14)** — `make` builds the compiler with the committed native seed (`bin/okular`) and the Okular sources alone: no cc, no as, no ld; `make test` proves the seed reproduces itself byte-identically and passes the differential suite; the C bootstrap is opt-in (`make c-bootstrap` / `make test-c`) for transition differential work |
 | M7 | C bootstrap removed from repository | not started |
 
 ## M2 work items, in dependency order
