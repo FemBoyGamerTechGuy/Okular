@@ -83,7 +83,7 @@ status table.
 8. **Match-style selection** on the `when` foundation (`else when` chains,
    value matching) — extends, never breaks, existing syntax.
 9. **`f32`** — true 32-bit float (needs its own ABI/register path).
-10. ~~**Constants** (`const`), **type inference** (`type.auto`)~~ **done in 0.8**: `const.name = value` folds and inlines at compile time; `type.auto x = init` infers from the initializer (`specs/spec-v0.11.md` §8.1). Const array lengths stay designed (needs module-aware parsing).
+10. ~~**Constants** (`const`), **type inference** (`type.auto`)~~ **done in 0.8**: `const.name = value` folds and inlines at compile time; `type.auto x = init` infers from the initializer (`specs/spec-v0.11.md` §8.1). ~~Const array lengths~~ **done in 0.14**: `type.array<T, NAME>` with module-visible constant names and dotted module paths (`specs/spec-v0.14.md` §8.4).
 11. **Standard library beginnings** — `io`, `text`, `math`, `memory` modules,
     `[libs.use]` binding real code; `oklib` format design.
 12. **ARM64 backend** — second target proves the backend abstraction.

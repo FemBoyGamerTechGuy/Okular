@@ -114,6 +114,7 @@ struct.Ty = {
     type.text sname
     type.ptr<type.Ty> elem
     type.number count
+    type.ptr<type.Node> count_node
     type.number nfields
     type.ptr<type.text> fnames
     type.ptr<type.ptr<type.Ty>> ftypes
@@ -203,6 +204,7 @@ function.new_ty() -> type.ptr<type.Ty> {
     t.sname = ""
     t.elem = null
     t.count = 0
+    t.count_node = null
     t.nfields = 0
     t.fnames = null
     t.ftypes = null
@@ -633,20 +635,47 @@ function.parse_type_prefix() -> type.ptr<type.Ty> {
             return null
         }
         when (expect(toks.K_COMMA) == false) { return null }
-        when (is_at(toks.K_INT) == false) {
-            perr(cur_line(), cur_col(), "the array length must be a whole number of elements.")
-            return null
-        }
-        type.number cnt = spell_int_value(toks.spelling(pos))
+        type.number cnt = 0
+        type.ptr<type.Node> cnt_node = null
         type.number cline = cur_line()
         type.number ccol = cur_col()
-        advance()
+        when (is_at(toks.K_INT)) {
+            cnt = spell_int_value(toks.spelling(pos))
+            advance()
+        }
+        else when (is_at(toks.K_IDENT)) {
+            # constant length: a (possibly dotted) const path — resolved in
+            # sema after all module constants are collected (0.14, spec §8.4)
+            type.ptr<type.Node> cn = new_node(N_PATH, cline, ccol)
+            type.ptr<type.text> parts = alloc<type.text>(4)
+            parts[0] = toks.spelling(pos)
+            type.number pn = 1
+            advance()
+            loop (is_at(toks.K_DOT) and is_path_part(at_kind(1))) {
+                advance()
+                when (pn == 4) {
+                    perr(cur_line(), cur_col(), "array length paths cannot be this long.")
+                    return null
+                }
+                parts[pn] = toks.spelling(pos)
+                pn = pn + 1
+                advance()
+            }
+            cn.parts = parts
+            cn.nparts = pn
+            cnt_node = cn
+            cnt = -1
+        }
+        else {
+            perr(cur_line(), cur_col(), "the array length must be a whole number of elements or a constant name.")
+            return null
+        }
         when (expect(toks.K_GT) == false) { return null }
-        when (cnt == 0 or cnt > 65536) {
+        when (cnt != -1 and (cnt == 0 or cnt > 65536)) {
             perr(cline, ccol, "the array length must be between 1 and 65536 in this compiler.")
             return null
         }
-        when (ty_bytes(elem) * cnt > 1048576) {
+        when (cnt != -1 and ty_bytes(elem) * cnt > 1048576) {
             perr(cline, ccol, "this array type is too large (more than 1 MiB of storage).")
             return null
         }
@@ -654,6 +683,7 @@ function.parse_type_prefix() -> type.ptr<type.Ty> {
         arr.form = F_ARRAY
         arr.elem = elem
         arr.count = cnt
+        arr.count_node = cnt_node
         return arr
     }
 

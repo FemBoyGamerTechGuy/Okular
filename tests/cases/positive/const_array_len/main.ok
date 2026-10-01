@@ -1,0 +1,50 @@
+# const_array_len — `type.array<T, NAME>`: constant array lengths (0.14,
+# spec §8.4). NAME resolves module-visible constants: this file's consts
+# by bare name, other modules' consts by dotted path.
+type.text=1
+
+[source.files.use] = {
+    "sizes"
+}.end
+
+const.SIZE = 4
+const.COLS = 3
+
+type.array<type.number, SIZE> xs = {10, 20, 30, 40}
+type.array<type.number, sizes.WIDE> ys = {1, 2, 3, 4, 5, 6}
+
+# a struct field sized by a constant
+struct.Table = {
+    type.array<type.number, COLS> cells
+}.end
+
+# a function parameter sized by a constant — type identity with the
+# interned literal form must hold (array<number, SIZE> == array<number, 4>)
+function.sum4(type.array<type.number, SIZE>.v) -> number {
+    type.number t = 0
+    loop (i from 0 until 4) {
+        t = t + v[i]
+    }
+    return t
+}
+
+type.Table tab = {{7, 8, 9}}
+
+write(xs[SIZE - 1])
+print
+write(ys[sizes.WIDE - 1])
+print
+write(tab.cells[COLS - 1])
+print
+write(sum4(xs))
+print
+
+# nested: an array of arrays with constant lengths
+type.array<type.array<type.number, COLS>, SIZE> grid = {
+    {1, 2, 3},
+    {4, 5, 6},
+    {7, 8, 9},
+    {10, 11, 12}
+}
+write(grid[SIZE - 1][COLS - 1])
+print

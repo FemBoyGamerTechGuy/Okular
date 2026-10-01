@@ -1,0 +1,5 @@
+# sizes.ok — constants used as array lengths from another module
+type.text=1
+
+const.WIDE = 6
+const.NARROW = 2

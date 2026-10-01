@@ -1,0 +1,5 @@
+# array_len_const_range — constant lengths obey the same 1..65536 rule
+type.text=1
+
+const.BIG = 70000
+type.array<type.number, BIG> xs = {1}

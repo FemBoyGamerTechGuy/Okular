@@ -1,0 +1,5 @@
+# array_len_const_text — a text constant cannot be an array length
+type.text=1
+
+const.NAME = "hi"
+type.array<type.number, NAME> xs = {1, 2}

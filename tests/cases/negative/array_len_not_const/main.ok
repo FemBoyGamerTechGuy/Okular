@@ -1,0 +1,7 @@
+# array_len_not_const — the array length must be a compile-time constant
+type.text=1
+
+type.number n = 4
+type.array<type.number, n> xs = {1, 2, 3, 4}
+write("unreachable")
+print

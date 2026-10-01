@@ -379,6 +379,17 @@ function.canon(type.ptr<type.Ty>.t) -> type.ptr<type.Ty> {
         return intern_ptr(canon(t.elem))
     }
     when (t.form == F_ARRAY) {
+        when (t.count == -1) {
+            # constant length, unresolved: keep a FRESH (non-interned) type;
+            # finalized to the interned form after all constants are
+            # collected (finalize_array_lens, spec §8.4)
+            type.ptr<type.Ty> r = parser.new_ty()
+            r.form = F_ARRAY
+            r.elem = canon(t.elem)
+            r.count = -1
+            r.count_node = t.count_node
+            return r
+        }
         return intern_array(canon(t.elem), t.count)
     }
     return t
@@ -4191,6 +4202,137 @@ function.check_func_body(type.ptr<type.Node>.fn, type.ptr<type.FuncInfo>.fi) -> 
     return 0
 }
 
+# ---------------- constant array lengths (spec §8.4, 0.14) ----------------
+
+# resolve `type.array<T, NAME>` to a concrete interned array type once all
+# constants are collected. NAME is a (possibly dotted) const path resolved
+# from the module's scope: module-level and main.ok constants by their bare
+# name, other modules' constants by their dotted path (`sizes.N`).
+type.number len_fail_reported = 0
+
+function.finalize_ty(type.ptr<type.Ty>.t, type.ptr<type.Node>.at) -> type.ptr<type.Ty> {
+    when (t == null) {
+        return null
+    }
+    when (t.form == F_ARRAY) {
+        type.ptr<type.Ty> elem = finalize_ty(t.elem, at)
+        when (t.count == -1) {
+            type.ptr<type.ConstVal> cv = null
+            when (t.count_node != null) {
+                cv = const_eval(t.count_node)
+            }
+            when (cv == null or cv.valid == 0) {
+                when (t.count_node != null) {
+                    when (len_fail_reported == 0) {
+                        len_fail_reported = 1
+                        serr_node(t.count_node, "`" + path_join(t.count_node.parts, t.count_node.nparts) + "` is not a compile-time integer constant — array lengths must be literal counts or constant names visible from module scope (local constants do not count).")
+                    }
+                }
+                else {
+                    when (len_fail_reported == 0) {
+                        len_fail_reported = 1
+                        serr_node(at, "the array length could not be resolved.")
+                    }
+                }
+                return intern_array(elem, 1)
+            }
+            when (is_integer(cv.ty) == false) {
+                when (len_fail_reported == 0) {
+                    len_fail_reported = 1
+                    serr_node(t.count_node, "the array length constant `" + path_join(t.count_node.parts, t.count_node.nparts) + "` is `" + ty_name(cv.ty) + "`, but the length must be an integer.")
+                }
+                return intern_array(elem, 1)
+            }
+            type.number cnt = cv.i
+            when (cnt == 0 or cnt > 65536) {
+                when (len_fail_reported == 0) {
+                    len_fail_reported = 1
+                    serr_node(t.count_node, "the array length must be between 1 and 65536 in this compiler, but `" + path_join(t.count_node.parts, t.count_node.nparts) + "` is " + number.to_text(cnt) + ".")
+                }
+                return intern_array(elem, 1)
+            }
+            when (ty_bytes(elem) * cnt > 1048576) {
+                when (len_fail_reported == 0) {
+                    len_fail_reported = 1
+                    serr_node(t.count_node, "this array type is too large (more than 1 MiB of storage).")
+                }
+                return intern_array(elem, 1)
+            }
+            return intern_array(elem, cnt)
+        }
+        when (elem != t.elem) {
+            return intern_array(elem, t.count)
+        }
+        return t
+    }
+    when (t.form == F_PTR) {
+        type.ptr<type.Ty> elem = finalize_ty(t.elem, at)
+        when (elem != t.elem) {
+            return intern_ptr(elem)
+        }
+        return t
+    }
+    return t
+}
+
+# walk a module's tree, finalizing every declared type in place
+function.finalize_node(type.ptr<type.Node>.n) -> number {
+    when (n == null) {
+        return 0
+    }
+    n.otype = finalize_ty(n.otype, n)
+    type.number i = 0
+    loop (i < n.nparams) {
+        n.ptypes[i] = finalize_ty(n.ptypes[i], n)
+        i = i + 1
+    }
+    finalize_node(n.a)
+    finalize_node(n.b)
+    finalize_node(n.c)
+    loop (i from 0 until n.nbody) {
+        finalize_node(n.body[i])
+    }
+    loop (i from 0 until n.nbody_else) {
+        finalize_node(n.body_else[i])
+    }
+    loop (i from 0 until n.nargs) {
+        finalize_node(n.args[i])
+    }
+    return 0
+}
+
+# phase-1 collection copied type pointers into symbols and function
+# signatures; finalize those in place too (namespaces recurse with their
+# own scope as the resolution context)
+function.finalize_scope(type.ptr<type.Scope>.scope) -> number {
+    when (scope == null) {
+        return 0
+    }
+    type.ptr<type.Scope> saved = cur_scope
+    cur_scope = scope
+    loop (i from 0 until scope.n) {
+        type.ptr<type.Symbol> s = scope.syms[i]
+        s.ty = finalize_ty(s.ty, s.decl)
+        when (s.kind == SYM_FUNC and s.func != null) {
+            type.ptr<type.FuncInfo> fi = s.func
+            fi.ret = finalize_ty(fi.ret, s.decl)
+            type.number k = 0
+            loop (k < fi.nparams) {
+                fi.ptypes[k] = finalize_ty(fi.ptypes[k], s.decl)
+                when (fi.psyms != null and fi.psyms[k] != null) {
+                    fi.psyms[k].ty = fi.ptypes[k]
+                }
+                k = k + 1
+            }
+        }
+        when (s.kind == SYM_NS and s.ns != null) {
+            finalize_scope(s.ns)
+        }
+    }
+    cur_scope = saved
+    return 0
+}
+
 # ---------------- collect + check: columns, modules ----------------
 
 function.register_const_decl(type.ptr<type.Scope>.scope, type.ptr<type.Node>.n) -> number {
@@ -4637,6 +4779,32 @@ function.sema_run() -> number {
         }
     }
     set_downgrade(0)
+
+    # phase 1.75: resolve constant array lengths (spec §8.4, 0.14).
+    # `type.array<T, NAME>` types carry an unresolved count (-1); now that
+    # every module's constants are collected, resolve them to interned
+    # array types — before struct layout and body checking need the sizes.
+    loop (i from 0 until n_mods) {
+        type.ptr<type.Mod> m = all_mods[i]
+        when (m.state != 1) {
+            continue
+        }
+        type.ptr<type.Scope> mscope = root_scope
+        when (m.name != "main") {
+            type.ptr<type.Symbol> bs = scope_find_local(root_scope, m.name)
+            when (bs != null and bs.ns != null) {
+                mscope = bs.ns
+            }
+        }
+        type.ptr<type.Scope> saved = cur_scope
+        cur_scope = mscope
+        cur_mod = m
+        finalize_node(m.ast)
+        cur_mod = null
+        cur_scope = saved
+    }
+    finalize_scope(root_scope)
+    cur_scope = null
 
     # phase 1.5: register + lay out struct types (fill placeholders in place)
     loop (i from 0 until n_mods) {
