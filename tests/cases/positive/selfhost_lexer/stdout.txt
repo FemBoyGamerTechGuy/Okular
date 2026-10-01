@@ -1,0 +1,233 @@
+1:63 newline
+2:61 newline
+3:1 newline
+4:1 kw-type
+4:5 dot
+4:6 ident text
+4:10 eq
+4:11 int 1
+4:12 newline
+5:1 newline
+6:1 kw-const
+6:6 dot
+6:7 ident limit
+6:13 eq
+6:15 int 100
+6:18 newline
+7:1 kw-type
+7:5 dot
+7:6 ident uint32
+7:13 ident flags
+7:19 eq
+7:21 int 0xF0F0
+7:27 newline
+8:1 kw-type
+8:5 dot
+8:6 ident decimal
+8:14 ident ratio
+8:20 eq
+8:22 decimal 0.5
+8:25 newline
+9:1 newline
+10:1 kw-function
+10:9 dot
+10:10 ident bump
+10:14 lparen
+10:15 ident number
+10:21 dot
+10:22 ident n
+10:23 rparen
+10:25 arrow
+10:28 ident number
+10:35 lbrace
+10:36 newline
+11:5 kw-when
+11:10 lparen
+11:11 ident n
+11:13 lt
+11:15 ident limit
+11:21 kw-and
+11:25 ident flags
+11:31 amp
+11:33 int 0x0F00
+11:40 eqeq
+11:43 int 0x0F00
+11:49 rparen
+11:51 lbrace
+11:52 newline
+12:9 kw-return
+12:16 ident n
+12:18 plus
+12:20 int 1
+12:21 newline
+13:5 rbrace
+13:6 newline
+14:5 kw-else
+14:10 kw-when
+14:15 lparen
+14:16 ident n
+14:18 bangeq
+14:21 int 0
+14:22 rparen
+14:24 lbrace
+14:25 newline
+15:9 kw-return
+15:16 ident n
+15:18 minus
+15:20 int 1
+15:21 newline
+16:5 rbrace
+16:6 newline
+17:5 kw-return
+17:12 ident n
+17:14 star
+17:16 int 2
+17:18 slash
+17:20 int 1
+17:22 percent
+17:24 int 3
+17:25 newline
+18:1 rbrace
+18:2 newline
+19:1 newline
+20:1 kw-type
+20:5 dot
+20:6 ident array
+20:11 lt
+20:12 kw-type
+20:16 dot
+20:17 ident number
+20:23 comma
+20:25 int 3
+20:26 gt
+20:28 ident xs
+20:31 eq
+20:33 lbrace
+20:34 int 1
+20:35 comma
+20:37 int 2
+20:38 comma
+20:40 int 3
+20:41 rbrace
+20:42 newline
+21:1 kw-type
+21:5 dot
+21:6 ident ptr
+21:9 lt
+21:10 kw-type
+21:14 dot
+21:15 ident ptr
+21:18 lt
+21:19 kw-type
+21:23 dot
+21:24 ident number
+21:30 shr
+21:33 ident pp
+21:36 eq
+21:38 kw-null
+21:42 newline
+22:1 newline
+23:1 kw-loop
+23:6 lparen
+23:7 ident i
+23:9 kw-from
+23:14 int 0
+23:16 kw-until
+23:22 int 3
+23:23 rparen
+23:25 lbrace
+23:26 newline
+24:5 kw-write
+24:10 lparen
+24:11 ident xs
+24:13 lbracket
+24:14 ident i
+24:15 rbracket
+24:17 shl
+24:20 int 1
+24:21 rparen
+24:22 newline
+25:5 kw-write
+25:10 lparen
+25:11 text " "
+25:14 rparen
+25:15 newline
+26:1 rbrace
+26:2 newline
+27:1 kw-print
+27:6 newline
+28:1 kw-write
+28:6 lparen
+28:7 tilde
+28:8 ident flags
+28:14 pipe
+28:16 int 0x01
+28:21 caret
+28:23 int 0x10
+28:27 rparen
+28:28 newline
+29:1 kw-print
+29:6 newline
+30:1 kw-write
+30:6 lparen
+30:7 ident bump
+30:11 lparen
+30:12 int 41
+30:14 rparen
+30:15 rparen
+30:16 newline
+31:1 kw-print
+31:6 newline
+32:1 kw-type
+32:5 dot
+32:6 ident text
+32:11 ident msg
+32:15 eq
+32:17 text "tabs:\tand \"quotes\"\n"
+32:42 newline
+33:1 kw-write
+33:6 lparen
+33:7 ident text
+33:11 dot
+33:12 ident length
+33:18 lparen
+33:19 ident msg
+33:22 rparen
+33:23 rparen
+33:24 newline
+34:1 kw-print
+34:6 newline
+35:1 kw-loop
+35:6 lparen
+35:7 kw-true
+35:11 rparen
+35:13 lbrace
+35:14 newline
+36:5 kw-break
+36:10 newline
+37:1 rbrace
+37:2 newline
+38:1 kw-write
+38:6 lparen
+38:7 kw-not
+38:11 kw-false
+38:16 rparen
+38:17 newline
+39:1 kw-print
+39:6 newline
+40:1 kw-write
+40:6 lparen
+40:7 kw-true
+40:12 kw-or
+40:15 kw-false
+40:20 rparen
+40:21 newline
+41:1 kw-print
+41:6 newline
+42:1 kw-release
+42:8 lparen
+42:9 ident pp
+42:11 rparen
+42:12 newline
+43:1 eof
+tokens: 232

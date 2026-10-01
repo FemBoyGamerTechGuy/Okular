@@ -1,0 +1,462 @@
+# lexer.ok — the Okular-written tokenizer (self-hosting seed, M3/M4).
+#
+# Scans one .ok file and prints its token stream as
+#     line:col kind [spelling]
+# one token per line, exactly the token set of the bootstrap lexer
+# (specs/spec-v0.11.md §1): keywords, identifiers, literals, operators,
+# punctuation, newlines-as-statement-separators (suppressed inside
+# ( ) and [ ] groups), and `#` comments.
+#
+# This is the first piece of the compiler written in Okular itself.
+# It reads through fs.read, walks bytes with text.byte_at, cuts
+# spellings with text.slice, and classifies characters with plain
+# integer comparisons — the whole 0.2-0.11 feature set in one file.
+#
+# Kept in sync with tests/cases/positive/selfhost_lexer/src/lexer.ok
+# (the test suite is the proof this component works).
+
+type.text=1
+
+# ---- token kinds (numbered to match bootstrap/src/lexer.c TokKind) ----
+
+const.K_EOF = 0
+const.K_NL = 1
+const.K_IDENT = 2
+const.K_INT = 3
+const.K_DEC = 4
+const.K_TEXT = 5
+const.K_PLUS = 6
+const.K_MINUS = 7
+const.K_STAR = 8
+const.K_SLASH = 9
+const.K_PERCENT = 10
+const.K_EQ = 11
+const.K_EQEQ = 12
+const.K_BANGEQ = 13
+const.K_LT = 14
+const.K_LE = 15
+const.K_GT = 16
+const.K_GE = 17
+const.K_ARROW = 18
+const.K_DOT = 19
+const.K_COMMA = 20
+const.K_AMP = 21
+const.K_PIPE = 22
+const.K_CARET = 23
+const.K_TILDE = 24
+const.K_SHL = 25
+const.K_SHR = 26
+const.K_LPAREN = 27
+const.K_RPAREN = 28
+const.K_LBRACE = 29
+const.K_RBRACE = 30
+const.K_LBRACKET = 31
+const.K_RBRACKET = 32
+const.K_TYPE = 33
+const.K_FUNCTION = 34
+const.K_STRUCT = 35
+const.K_WHEN = 36
+const.K_ELSE = 37
+const.K_LOOP = 38
+const.K_FROM = 39
+const.K_TO = 40
+const.K_UNTIL = 41
+const.K_BREAK = 42
+const.K_CONTINUE = 43
+const.K_RETURN = 44
+const.K_PRINT = 45
+const.K_WRITE = 46
+const.K_TRUE = 47
+const.K_FALSE = 48
+const.K_AND = 49
+const.K_OR = 50
+const.K_NOT = 51
+const.K_END = 52
+const.K_ALLOC = 53
+const.K_RELEASE = 54
+const.K_NULL = 55
+const.K_UNION = 56
+const.K_CONST = 57
+const.K_RESERVED = 58
+
+# ---- kind names, indexed by kind ----
+
+type.array<type.text, 59> KIND_NAMES = {
+    "eof", "newline", "ident", "int", "decimal", "text",
+    "plus", "minus", "star", "slash", "percent",
+    "eq", "eqeq", "bangeq", "lt", "le", "gt", "ge",
+    "arrow", "dot", "comma", "amp",
+    "pipe", "caret", "tilde", "shl", "shr",
+    "lparen", "rparen", "lbrace", "rbrace", "lbracket", "rbracket",
+    "kw-type", "kw-function", "kw-struct", "kw-when", "kw-else", "kw-loop",
+    "kw-from", "kw-to", "kw-until", "kw-break", "kw-continue", "kw-return",
+    "kw-print", "kw-write", "kw-true", "kw-false", "kw-and", "kw-or",
+    "kw-not", "kw-end", "kw-alloc", "kw-release", "kw-null", "kw-union",
+    "kw-const", "kw-reserved"
+}
+
+# ---- keyword table (spelling -> kind) ----
+
+type.array<type.text, 25> KEYWORDS = {
+    "type", "function", "struct", "when", "else", "loop",
+    "from", "to", "until", "break", "continue", "return",
+    "print", "write", "true", "false", "and", "or", "not", "end",
+    "alloc", "release", "null", "union", "const"
+}
+
+type.array<type.number, 25> KEYWORD_KINDS = {
+    33, 34, 35, 36, 37, 38,
+    39, 40, 41, 42, 43, 44,
+    45, 46, 47, 48, 49, 50, 51, 52,
+    53, 54, 55, 56, 57
+}
+
+type.array<type.text, 8> RESERVED_WORDS = {
+    "pointer", "guard", "fail", "with", "priv", "pub", "match", "case"
+}
+
+# ---- scanner state ----
+
+type.text src = ""
+type.number len = 0
+type.number pos = 0
+type.number line = 1
+type.number col = 1
+type.number depth = 0
+type.number count = 0
+
+# ---- byte helpers ----
+
+function.cur() -> number {
+    when (pos < len) {
+        return text.byte_at(src, pos)
+    }
+    return 0
+}
+
+function.look() -> number {
+    when (pos + 1 < len) {
+        return text.byte_at(src, pos + 1)
+    }
+    return 0
+}
+
+function.advance() -> number {
+    when (cur() == 10) {
+        line = line + 1
+        col = 1
+    }
+    else {
+        col = col + 1
+    }
+    pos = pos + 1
+    return 0
+}
+
+function.is_digit(number.b) -> bool {
+    return b >= 48 and b <= 57
+}
+
+function.is_alpha(number.b) -> bool {
+    return (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 95
+}
+
+function.is_alnum(number.b) -> bool {
+    return is_alpha(b) or is_digit(b)
+}
+
+function.is_hex(number.b) -> bool {
+    return (b >= 48 and b <= 57) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102) or b == 95
+}
+
+function.kind_name(number.k) -> text {
+    return KIND_NAMES[k]
+}
+
+function.keyword_kind(text.spelling) -> number {
+    loop (i from 0 until 25) {
+        when (spelling == KEYWORDS[i]) {
+            return KEYWORD_KINDS[i]
+        }
+    }
+    loop (i from 0 until 8) {
+        when (spelling == RESERVED_WORDS[i]) {
+            return K_RESERVED
+        }
+    }
+    return -1
+}
+
+# ---- emit: one line per token ----
+
+function.emit_at(number.l, number.c, number.k, number.has_sp, text.sp) -> number {
+    write(l)
+    write(":")
+    write(c)
+    write(" ")
+    write(kind_name(k))
+    when (has_sp == 1) {
+        write(" ")
+        write(sp)
+    }
+    print
+    count = count + 1
+    return 0
+}
+
+# ---- literal scanners ----
+
+function.scan_text_lit() -> number {
+    type.number s_off = pos
+    type.number s_line = line
+    type.number s_col = col
+    advance()
+    loop (pos < len and cur() != 34) {
+        when (cur() == 92 and pos + 1 < len) {
+            advance()
+        }
+        advance()
+    }
+    when (pos < len) {
+        advance()
+    }
+    type.text sp = text.slice(src, s_off, pos)
+    return emit_at(s_line, s_col, K_TEXT, 1, sp)
+}
+
+function.scan_number() -> number {
+    type.number s_off = pos
+    type.number s_line = line
+    type.number s_col = col
+    type.number is_decimal = 0
+    when (cur() == 48 and (look() == 120 or look() == 88)) {
+        advance()
+        advance()
+        loop (pos < len and is_hex(cur())) {
+            advance()
+        }
+    }
+    else {
+        loop (pos < len and is_digit(cur())) {
+            advance()
+        }
+        when (cur() == 46 and is_digit(look())) {
+            is_decimal = 1
+            advance()
+            loop (pos < len and is_digit(cur())) {
+                advance()
+            }
+        }
+    }
+    type.text sp = text.slice(src, s_off, pos)
+    when (is_decimal == 1) {
+        return emit_at(s_line, s_col, K_DEC, 1, sp)
+    }
+    return emit_at(s_line, s_col, K_INT, 1, sp)
+}
+
+function.scan_ident() -> number {
+    type.number s_off = pos
+    type.number s_line = line
+    type.number s_col = col
+    loop (pos < len and is_alnum(cur())) {
+        advance()
+    }
+    type.text sp = text.slice(src, s_off, pos)
+    type.number kw = keyword_kind(sp)
+    when (kw == -1) {
+        return emit_at(s_line, s_col, K_IDENT, 1, sp)
+    }
+    return emit_at(s_line, s_col, kw, 0, "")
+}
+
+# ---- operators and punctuation ----
+
+function.scan_punct(number.c) -> number {
+    type.number s_line = line
+    type.number s_col = col
+
+    when (c == 43) {
+        advance()
+        return emit_at(s_line, s_col, K_PLUS, 0, "")
+    }
+    else when (c == 42) {
+        advance()
+        return emit_at(s_line, s_col, K_STAR, 0, "")
+    }
+    else when (c == 47) {
+        advance()
+        return emit_at(s_line, s_col, K_SLASH, 0, "")
+    }
+    else when (c == 37) {
+        advance()
+        return emit_at(s_line, s_col, K_PERCENT, 0, "")
+    }
+    else when (c == 45) {
+        advance()
+        when (cur() == 62) {
+            advance()
+            return emit_at(s_line, s_col, K_ARROW, 0, "")
+        }
+        return emit_at(s_line, s_col, K_MINUS, 0, "")
+    }
+    else when (c == 61) {
+        advance()
+        when (cur() == 61) {
+            advance()
+            return emit_at(s_line, s_col, K_EQEQ, 0, "")
+        }
+        return emit_at(s_line, s_col, K_EQ, 0, "")
+    }
+    else when (c == 33) {
+        advance()
+        when (cur() == 61) {
+            advance()
+            return emit_at(s_line, s_col, K_BANGEQ, 0, "")
+        }
+        return emit_at(s_line, s_col, K_NOT, 0, "")
+    }
+    else when (c == 60) {
+        advance()
+        when (cur() == 61) {
+            advance()
+            return emit_at(s_line, s_col, K_LE, 0, "")
+        }
+        when (cur() == 60) {
+            advance()
+            return emit_at(s_line, s_col, K_SHL, 0, "")
+        }
+        return emit_at(s_line, s_col, K_LT, 0, "")
+    }
+    else when (c == 62) {
+        advance()
+        when (cur() == 61) {
+            advance()
+            return emit_at(s_line, s_col, K_GE, 0, "")
+        }
+        when (cur() == 62) {
+            advance()
+            return emit_at(s_line, s_col, K_SHR, 0, "")
+        }
+        return emit_at(s_line, s_col, K_GT, 0, "")
+    }
+    else when (c == 124) {
+        advance()
+        return emit_at(s_line, s_col, K_PIPE, 0, "")
+    }
+    else when (c == 94) {
+        advance()
+        return emit_at(s_line, s_col, K_CARET, 0, "")
+    }
+    else when (c == 126) {
+        advance()
+        return emit_at(s_line, s_col, K_TILDE, 0, "")
+    }
+    else when (c == 46) {
+        advance()
+        return emit_at(s_line, s_col, K_DOT, 0, "")
+    }
+    else when (c == 44) {
+        advance()
+        return emit_at(s_line, s_col, K_COMMA, 0, "")
+    }
+    else when (c == 38) {
+        advance()
+        return emit_at(s_line, s_col, K_AMP, 0, "")
+    }
+    else when (c == 40) {
+        advance()
+        depth = depth + 1
+        return emit_at(s_line, s_col, K_LPAREN, 0, "")
+    }
+    else when (c == 41) {
+        advance()
+        when (depth > 0) {
+            depth = depth - 1
+        }
+        return emit_at(s_line, s_col, K_RPAREN, 0, "")
+    }
+    else when (c == 123) {
+        advance()
+        return emit_at(s_line, s_col, K_LBRACE, 0, "")
+    }
+    else when (c == 125) {
+        advance()
+        return emit_at(s_line, s_col, K_RBRACE, 0, "")
+    }
+    else when (c == 91) {
+        advance()
+        depth = depth + 1
+        return emit_at(s_line, s_col, K_LBRACKET, 0, "")
+    }
+    else when (c == 93) {
+        advance()
+        when (depth > 0) {
+            depth = depth - 1
+        }
+        return emit_at(s_line, s_col, K_RBRACKET, 0, "")
+    }
+
+    write("unexpected byte ")
+    write(c)
+    write(" at ")
+    write(line)
+    write(":")
+    write(col)
+    print
+    advance()
+    return 0
+}
+
+# ---- one scan step: dispatch on the current byte ----
+
+function.scan_step() -> number {
+    type.number c = cur()
+
+    when (c == 32 or c == 9 or c == 13) {
+        advance()
+        return 0
+    }
+    else when (c == 10) {
+        type.number s_line = line
+        type.number s_col = col
+        advance()
+        when (depth == 0) {
+            return emit_at(s_line, s_col, K_NL, 0, "")
+        }
+        return 0
+    }
+    else when (c == 35) {
+        loop (pos < len and cur() != 10) {
+            advance()
+        }
+        return 0
+    }
+    else when (c == 34) {
+        return scan_text_lit()
+    }
+    else when (is_digit(c)) {
+        return scan_number()
+    }
+    else when (is_alpha(c)) {
+        return scan_ident()
+    }
+    return scan_punct(c)
+}
+
+# ---- entry: tokenize one file, return the token count ----
+
+function.tokenize(text.path) -> number {
+    src = fs.read(path)
+    len = text.length(src)
+    pos = 0
+    line = 1
+    col = 1
+    depth = 0
+    count = 0
+    loop (pos < len) {
+        scan_step()
+    }
+    emit_at(line, col, K_EOF, 0, "")
+    return count
+}

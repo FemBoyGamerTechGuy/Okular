@@ -5,8 +5,9 @@ build/rt_code.o
 build/rt_start.o
 runtime/rt.o
 
-# project-local build outputs from examples and tests
+# project-local build outputs from examples, selfhost, and tests
 examples/*/build/
+selfhost/*/build/
 tests/cases/*/build/
 tests/tmp/
 

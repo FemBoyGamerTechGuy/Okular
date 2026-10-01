@@ -1,0 +1,42 @@
+# sample.ok — exercises every token form of spec §1 (0.11).
+# Tokenized by selfhost/lexer, the Okular-written tokenizer.
+
+type.text=1
+
+const.limit = 100
+type.uint32 flags = 0xF0F0
+type.decimal ratio = 0.5
+
+function.bump(number.n) -> number {
+    when (n < limit and flags & 0x0F00 == 0x0F00) {
+        return n + 1
+    }
+    else when (n != 0) {
+        return n - 1
+    }
+    return n * 2 / 1 % 3
+}
+
+type.array<type.number, 3> xs = {1, 2, 3}
+type.ptr<type.ptr<type.number>> pp = null
+
+loop (i from 0 until 3) {
+    write(xs[i] << 1)
+    write(" ")
+}
+print
+write(~flags | 0x01 ^ 0x10)
+print
+write(bump(41))
+print
+type.text msg = "tabs:\tand \"quotes\"\n"
+write(text.length(msg))
+print
+loop (true) {
+    break
+}
+write(not false)
+print
+write(true or false)
+print
+release(pp)

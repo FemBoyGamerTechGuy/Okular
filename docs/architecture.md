@@ -1,6 +1,6 @@
 # Okular Bootstrap Compiler — Architecture
 
-**Version:** 0.10
+**Version:** 0.11
 **Applies to:** `bootstrap/` (the C implementation)
 
 > The C implementation is scaffolding. It exists because Okular does not yet
@@ -291,12 +291,24 @@ Regression policy (brief §51): every fixed bug gets a case.
 ```
 M1  bootstrap C compiler compiles real Okular programs      [done in 0.1]
 M2  language covers substantial normal programs             [0.2+]
-M3  Okular can compile portions of the compiler             [tracked in roadmap]
-M4  compiler components rewritten in Okular (lexer first)
+M3  Okular can compile portions of the compiler             [underway: selfhost/lexer]
+M4  compiler components rewritten in Okular (lexer first)   [lexer component exists]
 M5  Okular compiler builds itself
 M6  C bootstrap no longer required
 M7  C bootstrap removed from the repository
 ```
+
+The first compiler component written in Okular exists: `selfhost/lexer`
+(`src/lexer.ok`) tokenizes .ok files with the same token set, token
+numbering, and newline/grouping rules as `bootstrap/src/lexer.c` — reading
+through `fs.read`, walking bytes with `text.byte_at`, cutting spellings
+with `text.slice`, classifying characters with integer comparisons, and
+building its keyword table from global text arrays. The bootstrap compiler
+compiles it and the test suite proves it against a golden token stream
+(`tests/cases/positive/selfhost_lexer`). What remains for M4 is wiring it
+into the pipeline as the compiler's actual lexer (driver integration, token
+consumption from the Okular program's output or a shared format), then the
+parser, then the runtime shim.
 
 Progress is tracked in `docs/roadmap.md` — never claimed before it is true.
 

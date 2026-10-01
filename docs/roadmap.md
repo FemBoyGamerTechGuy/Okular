@@ -25,8 +25,8 @@ shifts, Rust-ordered precedence, and `>>` splitting for nested type arguments
 |----|-----------|--------|
 | M1 | C bootstrap compiler; hello-world and small programs run natively | **done (0.1)** |
 | M2 | Language covers substantial normal programs | in progress — arrays (0.2), fixed-width integers (0.3), pointers + heap (0.4), structs (0.5), text conversions (0.6), unions (0.7), constants + type.auto (0.8), text operations (0.9), file builtins (0.10), bitwise + shifts (0.11) |
-| M3 | Okular can compile portions of the compiler itself | not started |
-| M4 | Compiler components rewritten in Okular (lexer first, then runtime shim) | not started |
+| M3 | Okular can compile portions of the compiler itself | **underway (0.11)** — `selfhost/lexer` tokenizes .ok files (same token set and numbering as the bootstrap lexer); proven by `tests/cases/positive/selfhost_lexer` |
+| M4 | Compiler components rewritten in Okular (lexer first, then runtime shim) | lexer component exists; pipeline integration next |
 | M5 | Okular compiler builds itself | not started |
 | M6 | C bootstrap no longer required | not started |
 | M7 | C bootstrap removed from repository | not started |
@@ -74,6 +74,25 @@ shifts, Rust-ordered precedence, and `>>` splitting for nested type arguments
 12. **ARM64 backend** — second target proves the backend abstraction.
 13. **Optimizer framework** — register allocation, DCE, inlining on the IR;
     constant folding already exists as the first pass.
+
+## M3/M4 work items (self-hosting)
+
+1. ~~**Tokenizer in Okular**~~ **done in 0.11**: `selfhost/lexer/src/lexer.ok`
+   — the full token set of spec §1 (keywords, literals with hex/underscores/
+   escapes, all operators including `<<`/`>>`, newline suppression inside
+   ( ) and [ ] groups, `#` comments), same kind numbering as
+   `bootstrap/src/lexer.c`, verified against a golden token stream
+   (`tests/cases/positive/selfhost_lexer`).
+2. **Token interface** — a machine-readable token format the Okular lexer
+   can emit and the bootstrap parser can consume (or an in-process bridge),
+   so `selfhost/lexer` becomes the compiler's actual lexer (M4 begins).
+3. **Parser in Okular** — recursive descent over the token stream; needs
+   the struct/union/array machinery to represent the AST.
+4. **Runtime shim in Okular** — rewrite `runtime/rt.c` (write/print, traps,
+   allocator, text arena) as Okular code compiled by the bootstrap
+   compiler, replacing the freestanding C shim.
+5. **Own integrated assembler** — the last external tool dependency
+   (`as`/`ld`) moves in-house (spec §15).
 
 ## Deliberate non-goals
 

@@ -1396,6 +1396,10 @@ An implementation claiming "Okular 0.1" must:
 * Tests: 468 → 514 (bitwise basics/shifts/precedence/fold/globals,
   nested generics, two shift-trap programs, eight negative cases);
   `examples/bitwise`; spec 0.10 → 0.11.
+* **Self-hosting seed (M3)**: `selfhost/lexer` — the tokenizer written
+  in Okular (`selfhost/lexer/src/lexer.ok`), same token set and kind
+  numbering as `bootstrap/src/lexer.c`, proven by the golden-stream test
+  `tests/cases/positive/selfhost_lexer` (517 checks total).
 
 ### 0.10
 

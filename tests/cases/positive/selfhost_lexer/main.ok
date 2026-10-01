@@ -1,0 +1,20 @@
+# main.ok — runs the Okular-written tokenizer over sample.ok.
+#
+# The bootstrap compiler compiles this program (written in Okular) that
+# itself performs the compiler's first phase: lexing Okular source.
+# Milestone M3 made real (docs/roadmap.md).
+
+type.text=1
+[source.files.use] = {
+    "lexer"
+}.end
+
+function.main() -> number {
+    type.number n = lexer.tokenize("sample.ok")
+    write("tokens: ")
+    write(n)
+    print
+    return 0
+}
+
+main()
