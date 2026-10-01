@@ -5,7 +5,7 @@ before the test suite proves it.**
 
 ## Where we are
 
-**Okular 0.11 — milestone M2→M3 (systems types).** 0.2 added fixed-length
+**Okular 0.12 — milestone M2→M3 (systems types).** 0.2 added fixed-length
 arrays; 0.3 the fixed-width integer family (`int8`…`uint64`, `byte`,
 aliases) with wrapping arithmetic, the widening lattice, contextual literal
 typing, and the `T.to_U(x)` conversion builtins; 0.4 pointers and manual
@@ -17,14 +17,16 @@ semantics, nesting, arrays of structs, heap structs; 0.6 the **text conversion b
 overlap layout, type-directed literals, documented reinterpretation
 (`specs/spec-v0.11.md` §8.5); 0.8 **constants + type.auto** (§8.1); 0.9 **text operations** — `text.length`, bounds-checked `text.byte_at`, O(1) `text.slice` (§4.5); 0.10 **file builtins** — `fs.read`/`fs.save`/`fs.exists` over raw syscalls (§6.4); 0.11 **bitwise operations** — `& | ^ ~ << >>` with range-checked
 shifts, Rust-ordered precedence, and `>>` splitting for nested type arguments
-(§9). See `specs/spec-v0.11.md` §22 for the honest status table.
+(§9); 0.12 **environment builtins** — `env.arg_count()`/`env.arg(i)`, the
+program's command line (§6.5). See `specs/spec-v0.12.md` §22 for the honest
+status table.
 
 ## Milestones
 
 | ID | Milestone | Status |
 |----|-----------|--------|
 | M1 | C bootstrap compiler; hello-world and small programs run natively | **done (0.1)** |
-| M2 | Language covers substantial normal programs | in progress — arrays (0.2), fixed-width integers (0.3), pointers + heap (0.4), structs (0.5), text conversions (0.6), unions (0.7), constants + type.auto (0.8), text operations (0.9), file builtins (0.10), bitwise + shifts (0.11) |
+| M2 | Language covers substantial normal programs | in progress — arrays (0.2), fixed-width integers (0.3), pointers + heap (0.4), structs (0.5), text conversions (0.6), unions (0.7), constants + type.auto (0.8), text operations (0.9), file builtins (0.10), bitwise + shifts (0.11), env builtins (0.12) |
 | M3 | Okular can compile portions of the compiler itself | **underway (0.11)** — `selfhost/lexer` tokenizes .ok files (same token set and numbering as the bootstrap lexer); proven by `tests/cases/positive/selfhost_lexer` |
 | M4 | Compiler components rewritten in Okular (lexer first, then runtime shim) | lexer component exists; pipeline integration next |
 | M5 | Okular compiler builds itself | not started |

@@ -1,0 +1,20 @@
+type.text=1
+
+function.main() -> number {
+    write(env.arg_count())
+    print
+    # arguments after the program name: 1 .. arg_count-1
+    loop (i from 1 until env.arg_count()) {
+        write(i)
+        write(" ")
+        write(env.arg(i))
+        print
+    }
+    when (env.arg(2) == "beta") {
+        write("third-arg-ok")
+        print
+    }
+    return 0
+}
+
+main()

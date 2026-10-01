@@ -26,6 +26,7 @@ typedef enum {
     A_MEMBER,        /* base.field — struct field access on a non-path base (spec §8.3) */
     A_TEXTOP,        /* text.length / text.byte_at / text.slice builtin (0.9, spec §4.5); fvalue = TextOp */
     A_FSOP,          /* fs.read / fs.write / fs.exists builtin (0.10, spec §6.4); fvalue = FsOp */
+    A_ENVOP,         /* env.arg_count / env.arg builtin (0.12, spec §6.5); fvalue = EnvOp */
     /* statements */
     A_VARDECL,       /* type.<T> name = init (init may be A_ARRAYLIT) */
     A_ASSIGN,        /* path = value */
@@ -66,6 +67,9 @@ typedef enum { TOP_LEN, TOP_BYTE, TOP_SLICE } TextOp;
 
 /* file builtin sub-operations (A_FSOP, 0.10 spec §6.4) */
 typedef enum { FSOP_READ, FSOP_WRITE, FSOP_EXISTS } FsOp;
+
+/* environment builtin sub-operations (A_ENVOP, 0.12 spec §6.5) */
+typedef enum { ENVOP_ARGC, ENVOP_ARG } EnvOp;
 
 typedef struct Node Node;
 

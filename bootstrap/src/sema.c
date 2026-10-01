@@ -1579,6 +1579,54 @@ static OkType check_call(SemaCtx *c, Node *n) {
             return n->rtype;
         }
     }
+    /* environment builtins (0.12, spec §6.5): env.arg_count() -> number,
+     * env.arg(i) -> text — the program's own command-line arguments.
+     * Recognized before scope resolution like fs.* and text.*; the same
+     * rename rule applies to a developer column named `env`. */
+    if (n->nparts == 2 && strcmp(n->parts[0], "env") == 0) {
+        EnvOp op;
+        size_t want_args;
+        const char *sig;
+        if (strcmp(n->parts[1], "arg_count") == 0) {
+            op = ENVOP_ARGC; want_args = 0; sig = "env.arg_count() -> number";
+        } else if (strcmp(n->parts[1], "arg") == 0) {
+            op = ENVOP_ARG; want_args = 1; sig = "env.arg(number.index) -> text";
+        } else {
+            op = -1; want_args = 0; sig = NULL;
+        }
+        if (sig) {
+            Symbol *clash = scope_lookup(c->cur_scope, n->parts[0]);
+            if (clash && clash->kind == SYM_NS && scope_find_local(clash->ns, n->parts[1])) {
+                Diag *d = serr(c, n, "`%s` is a built-in environment operation; `%s.%s` must be renamed.",
+                               path_join_str(n->parts, n->nparts), n->parts[0], n->parts[1]);
+                (void)d;
+            }
+            if (n->args.len != want_args) {
+                Diag *d = serr(c, n, "`%s` expects %zu argument%s, but %zu were given.",
+                               path_join_str(n->parts, n->nparts), want_args,
+                               want_args == 1 ? "" : "s", n->args.len);
+                diag_note(d, "signature: %s", sig);
+            }
+            if (op == ENVOP_ARG) {
+                for (size_t i = 0; i < n->args.len; i++) {
+                    Node *arg = n->args.items[i];
+                    OkType at = check_expr(c, arg);
+                    if (i == 0 && !ty_is_integer(at)) {
+                        Diag *d = serr(c, arg, "the index of `env.arg` must be an integer, but a `%s` value was given.",
+                                       ok_type_name(at));
+                        diag_note(d, "signature: %s", sig);
+                    }
+                }
+            } else {
+                for (size_t i = 0; i < n->args.len; i++)
+                    check_expr(c, n->args.items[i]);
+            }
+            n->kind = A_ENVOP;
+            n->fvalue = (int)op;
+            n->rtype = (op == ENVOP_ARGC) ? ty_number : ty_text;
+            return n->rtype;
+        }
+    }
     /* path_join_str returns a shared static buffer: copy the call name
      * before checking arguments, whose own path resolution would
      * silently overwrite it (found while testing array diagnostics) */
@@ -1914,6 +1962,11 @@ static OkType check_expr(SemaCtx *c, Node *e) {
     }
     case A_FSOP: {
         /* sema rewrote an fs builtin call into this node; same story */
+        for (size_t i = 0; i < e->args.len; i++) check_expr(c, e->args.items[i]);
+        return e->rtype;
+    }
+    case A_ENVOP: {
+        /* sema rewrote an env builtin call into this node (0.12, §6.5) */
         for (size_t i = 0; i < e->args.len; i++) check_expr(c, e->args.items[i]);
         return e->rtype;
     }

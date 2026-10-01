@@ -46,6 +46,10 @@ static u64 outlen = 0;
 static u8 text_arena[TEXT_ARENA_BYTES];
 static u64 arena_used = 0;
 
+/* invocation environment (0.12, spec §6.5): forwarded from _start */
+static u64 rt_argc_v = 0;
+static char **rt_argv_v = 0;
+
 static i64 sys_write(int fd, const void *buf, u64 len) {
     i64 ret;
     __asm__ volatile ("syscall"
@@ -106,9 +110,12 @@ static i64 sys_fstat(int fd, struct linux_stat *buf) {
     return ret;
 }
 
-void rt_init(void) {
-    /* buffers live in .bss: zeroed by the loader. Kept as the future hook
-     * for runtime bring-up. */
+void rt_init(long argc, char **argv) {
+    /* buffers live in .bss: zeroed by the loader. The kernel hands _start
+     * the argument vector on the stack; rt_start.s forwards it here
+     * (0.12, spec §6.5 — the env builtins). */
+    rt_argc_v = (u64)argc;
+    rt_argv_v = argv;
 }
 
 void rt_exit(i64 code) {
@@ -633,6 +640,32 @@ static i64 open_path(const u8 *path, u64 plen, int flags, int mode) {
 }
 
 typedef struct { u8 *ptr; u64 len; } RtText;
+
+/* ---------------- invocation environment (0.12, spec §6.5) ----------------
+ * Command-line arguments, exposed to Okular programs through the env
+ * builtins. Argument bytes land in the text arena — immutable,
+ * process-lifetime, like every other runtime-produced text. */
+
+
+u64 rt_env_arg_count(void) {
+    return rt_argc_v;
+}
+
+
+/* rt_env_arg(i) -> (ptr, len) in rax:rdx (the text ABI); out-of-range
+ * indices are bounds traps (exit 70, D24) — never silent empty text */
+RtText rt_env_arg(u64 i) {
+    if (i >= rt_argc_v) {
+        rt_bounds_trap_named("env argument index ", (i64)i, rt_argc_v);
+    }
+    const char *s = rt_argv_v[i];
+    u64 len = 0;
+    while (s[len] != 0) len++;
+    u8 *dst = text_take(len);
+    for (u64 k = 0; k < len; k++) dst[k] = (u8)s[k];
+    RtText t = { dst, len };
+    return t;
+}
 
 /* rt_fs_read(pathptr, pathlen) -> (ptr, len) in rax:rdx (the text ABI) */
 RtText rt_fs_read(const u8 *path, u64 plen) {

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# tools/run_tests.sh — the Okular 0.11 test suite (brief §51).
+# tools/run_tests.sh — the Okular 0.12 test suite (brief §51).
 #
 # Layout: tests/cases/{positive,negative,policy,flags}/<name>/
 #   main.ok (+ src/)          the project
 #   flags                     extra compiler flags (optional, one line)
 #   entry_name                rename main.ok to this before compiling (optional)
+#   args                      program arguments (optional, one line, split on spaces)
 #   stdout.txt                expected program stdout (positive/policy)
 #   exit.txt                  expected program exit code (positive/policy)
 #   error.txt                 patterns that must appear in compiler stderr (negative)
@@ -56,6 +57,12 @@ run_one() { # run_one <group> <casedir>
     local flags=""
     if [ -f "$work/flags" ]; then flags="$(cat "$work/flags")"; fi
 
+    # program arguments (0.12: the env builtins) — split on spaces
+    local prog_args=()
+    if [ -f "$work/args" ]; then
+        read -r -a prog_args < "$work/args"
+    fi
+
     local cout cerr cexit
     cout="$TMP/$group.$name.compile.out"; cerr="$TMP/$group.$name.compile.err"
     $OKULAR --compile $flags "$work/$entry" >"$cout" 2>"$cerr"
@@ -70,7 +77,7 @@ run_one() { # run_one <group> <casedir>
         fi
         local out pexit
         out="$TMP/$group.$name.run.out"
-        (cd "$work" && "$work/build/output/main") >"$out" 2>/dev/null
+        (cd "$work" && "$work/build/output/main" "${prog_args[@]}") >"$out" 2>/dev/null
         pexit=$?
         if [ -f "$dir/stdout.txt" ]; then
             check "$group/$name stdout" diff -q "$dir/stdout.txt" "$out" >/dev/null
@@ -99,7 +106,7 @@ run_one() { # run_one <group> <casedir>
         if [ "$cexit" -eq 0 ] && [ -f "$dir/stdout.txt" ]; then
             local out pexit
             out="$TMP/$group.$name.run.out"
-            (cd "$work" && "$work/build/output/main") >"$out" 2>/dev/null
+            (cd "$work" && "$work/build/output/main" "${prog_args[@]}") >"$out" 2>/dev/null
             pexit=$?
             check "$group/$name program stdout" diff -q "$dir/stdout.txt" "$out" >/dev/null
             [ "$pexit" -eq 0 ] || echo "  note: $group/$name program exited $pexit"
@@ -121,7 +128,7 @@ run_one() { # run_one <group> <casedir>
     esac
 }
 
-echo "== Okular 0.11 test suite =="
+echo "== Okular 0.12 test suite =="
 
 for group in positive negative policy flags; do
     echo "-- $group"

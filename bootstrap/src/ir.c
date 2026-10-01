@@ -411,6 +411,18 @@ static void build_expr(Ctx *c, Node *e) {
         emit(c->f, inst);
         break;
     }
+    case A_ENVOP: {
+        /* env.arg_count / env.arg (0.12, spec §6.5): the index (when
+         * present) is any integer type, converted to `number` */
+        if (e->fvalue == ENVOP_ARG) {
+            build_operand_conv(c, e->args.items[0], ty_number);
+        }
+        IrInst inst = { .kind = (e->fvalue == ENVOP_ARGC) ? I_ENV_ARGC : I_ENV_ARG,
+                        .type = e->rtype,
+                        .line = e->line, .col = e->col };
+        emit(c->f, inst);
+        break;
+    }
     case A_CONV: {
         /* explicit conversion builtin `T.to_U(x)` (spec §4.4) */
         build_expr(c, e->a);
@@ -1256,6 +1268,13 @@ void ir_fold(IrFunc *f) {
             if (sp >= 1) sp--;
             stack[sp++] = (FoldVal){ .known = false, .type = ty_bool };
             break;
+        case I_ENV_ARGC:
+            stack[sp++] = (FoldVal){ .known = false, .type = ty_number };
+            break;
+        case I_ENV_ARG:
+            if (sp >= 1) sp--;    /* the index */
+            stack[sp++] = (FoldVal){ .known = false, .type = ty_text };
+            break;
         case I_STORE_LOCAL: case I_STORE_GLOBAL: case I_POP:
         case I_JMPF: case I_WRITE:
             if (sp > 0) sp--;
@@ -1338,6 +1357,8 @@ static const char *ir_kind_name(IrKind k) {
     case I_FS_READ: return "FS_READ";
     case I_FS_WRITE: return "FS_WRITE";
     case I_FS_EXISTS: return "FS_EXISTS";
+    case I_ENV_ARGC: return "ENV_ARGC";
+    case I_ENV_ARG: return "ENV_ARG";
     case I_CONV: return "CONV";
     case I_BINOP: return "BINOP";
     case I_UNOP: return "UNOP";

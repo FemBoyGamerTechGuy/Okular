@@ -1,0 +1,8 @@
+type.text=1
+
+function.main() -> number {
+    write(env.arg("zero"))
+    return 0
+}
+
+main()

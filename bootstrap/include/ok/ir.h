@@ -26,6 +26,9 @@ typedef enum {
     I_FS_READ,       /* (path)                -> text        */
     I_FS_WRITE,      /* (path, data)          -> number      */
     I_FS_EXISTS,     /* (path)                -> bool        */
+    /* environment operations (0.12, spec §6.5): argv access */
+    I_ENV_ARGC,      /* ()                    -> number      */
+    I_ENV_ARG,       /* (index)               -> text        */
     I_LOAD_LOCAL,    /* slot                  -> type        */
     I_STORE_LOCAL,   /* slot  (pops)                            */
     I_LOAD_GLOBAL,   /* sym: Symbol*          -> type        */

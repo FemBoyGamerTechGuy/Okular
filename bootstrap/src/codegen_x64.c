@@ -835,6 +835,21 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         push_rax(o);
         break;
     }
+    case I_ENV_ARGC: {
+        /* env.arg_count() (0.12, spec §6.5) */
+        call_aligned(o, "rt_env_arg_count");
+        push_rax(o);
+        break;
+    }
+    case I_ENV_ARG: {
+        /* env.arg(i): pop the index; rt_env_arg returns (ptr, len) in
+         * rax:rdx — the text ABI (bounds-trapped, text-arena-backed) */
+        pop_rax(o);
+        buf_puts(o, "    mov rdi, rax\n");
+        call_aligned(o, "rt_env_arg");
+        push_pair_rax_rdx(o);
+        break;
+    }
     case I_LOAD_AT: {
         buf_puts(o, "    pop rax\n"); /* address */
         if (in->type == ty_text) {

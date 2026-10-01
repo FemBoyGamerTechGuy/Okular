@@ -3,7 +3,7 @@
 A simple, fast programming language designed for building large
 applications with minimal code.
 
-**Status:** Okular 0.11 — milestones M2→M3. The C bootstrap compiler
+**Status:** Okular 0.12 — milestones M2→M3. The C bootstrap compiler
 builds and runs real Okular programs natively on x86-64 Linux — arrays
 and structs with value semantics, the full fixed-width integer family,
 pointers with manual memory: `&x`, `*p`, `alloc<T>(n)` / `release(p)`
@@ -12,7 +12,8 @@ records with predictable layout, unions with type-directed literals (spec §8.5)
 `text.to_number`, ...), and **bitwise operations** (`& | ^ ~ << >>` with
 range-checked shifts — spec §9). **Self-hosting has started:** the first
 compiler component written in Okular — the tokenizer — lives in
-`selfhost/lexer` and is proven by the test suite.
+`selfhost/lexer` and is proven by the test suite. Programs read their own
+command-line arguments (`env.arg_count()`, `env.arg(i)` — spec §6.5).
 
 ```ok
 type.text=1
@@ -82,8 +83,8 @@ build/        build artifacts
 ## Documentation
 
 * [Getting started](docs/getting-started.md) — build, compile, run
-* [Language basics](docs/language-basics.md) — a tour of Okular 0.11
-* [Specification v0.11](specs/spec-v0.11.md) — the definition, with an
+* [Language basics](docs/language-basics.md) — a tour of Okular 0.12
+* [Specification v0.12](specs/spec-v0.12.md) — the definition, with an
   implementation status table that says exactly what works
 * [Architecture](docs/architecture.md) — how the bootstrap compiler is
   built and how it will self-host
@@ -93,7 +94,7 @@ build/        build artifacts
 
 ```console
 $ make test
-passed: 517   failed: 0
+passed: 528   failed: 0
 ALL TESTS PASSED
 ```
 
