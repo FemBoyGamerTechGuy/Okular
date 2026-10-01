@@ -1,0 +1,19 @@
+type.text=1
+
+struct.Node = {
+    type.number kind
+}.end
+
+function.main() -> number {
+    type.ptr<type.Node> n = alloc<type.Node>(1)
+    n.kind = 42
+    type.ptr<type.number> raw = alloc<type.number>(4)
+    raw[0] = 9
+    write(raw[0])
+    print
+    write(n.kind)
+    print
+    return 0
+}
+
+main()

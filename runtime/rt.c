@@ -488,9 +488,15 @@ void *rt_alloc(u64 bytes) {
         if (fb->size >= need) {
             u64 rem = fb->size - need;
             if (rem >= HEAP_ALIGN + HEAP_ALIGN) {
-                /* split: allocate the front, free the tail */
+                /* split: allocate the front, free the tail.
+                 * The tail is a NEW BLOCK: its 16-byte header sits AFTER
+                 * this allocation's payload, at data+need — not inside it.
+                 * (0.12 fix: `tail = data + need` wrote the tail header
+                 * into the allocated payload and the next allocation's
+                 * header into the PREVIOUS block's payload — 16-byte
+                 * overlap, silent field clobbering; heap_split_regression) */
                 u8 *data = (u8 *)fb;
-                u8 *tail = data + need;
+                u8 *tail = data + need + HEAP_ALIGN;
                 u64 tail_payload = rem - HEAP_ALIGN;
                 *(u64 *)(tail - HEAP_ALIGN) = tail_payload;   /* tail header */
                 FreeBlock *nb = (FreeBlock *)tail;
@@ -535,7 +541,12 @@ void rt_release(void *ptr) {
     if (fb->next && (u8 *)fb + HEAP_ALIGN + fb->size == (u8 *)fb->next) {
         fb->size += HEAP_ALIGN + fb->next->size;
         fb->next = fb->next->next;
-        *(u64 *)(data - HEAP_ALIGN) = fb->size;   /* keep the header honest */
+        /* the header at data-16 stays POISONED (=1): a free block's header
+         * is never read on any legitimate path (allocation rewrites it,
+         * release only reads pointers that must be allocated), and keeping
+         * the poison is what detects double release after coalescing
+         * (ptr_double_release; writing the merged size back used to erase
+         * the marker and let the second release through) */
     }
     /* coalesce backward (with the previous block) */
     FreeBlock *prev = 0, *cur = heap_free;

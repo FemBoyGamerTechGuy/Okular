@@ -1,0 +1,88 @@
+type.text=1
+
+# heap_split_regression — rt_alloc's split used to compute the tail block
+# payload at `data + need`, writing the tail's 16-byte header INSIDE the
+# allocated payload and the next block's header inside the PREVIOUS block's
+# payload. Fields stored before a later allocation were silently clobbered
+# (found while probing the language for the self-hosted parser, 0.12).
+
+struct.Node = {
+    type.number kind
+    type.text tag
+}.end
+
+function.main() -> number {
+    # 1. a field stored before a second allocation must survive it
+    type.ptr<type.Node> n = alloc<type.Node>(1)
+    n.kind = 42
+    type.ptr<type.number> raw = alloc<type.number>(4)
+    when (n.kind == 42) { write("keep") } print
+
+    # 2. an allocation followed by a store, then another allocation
+    type.ptr<type.number> a = alloc<type.number>(2)
+    a[0] = 7
+    a[1] = 8
+    type.ptr<type.number> b = alloc<type.number>(2)
+    b[0] = 9
+    b[1] = 10
+    when (a[0] == 7 and a[1] == 8 and b[0] == 9 and b[1] == 10) {
+        write("nodelay")
+    }
+    print
+
+    # 3. interleaved: allocate, store, allocate, re-check earlier stores
+    type.ptr<type.Node> p = alloc<type.Node>(1)
+    p.kind = 100
+    p.tag = "p"
+    type.ptr<type.Node> q = alloc<type.Node>(1)
+    q.kind = 200
+    q.tag = "q"
+    type.ptr<type.Node> r = alloc<type.Node>(1)
+    r.kind = 300
+    r.tag = "r"
+    when (p.kind == 100 and q.kind == 200 and r.kind == 300) {
+        write("interleave")
+    }
+    print
+    when (p.tag == "p" and q.tag == "q" and r.tag == "r") {
+        write("tags")
+    }
+    print
+
+    # 4. many sequential allocations, each checked after ALL allocations
+    type.ptr<type.ptr<type.number>> ps = alloc<type.ptr<type.number>>(8)
+    loop (i from 0 until 8) {
+        ps[i] = alloc<type.number>(1)
+        ps[i][0] = i * 11
+    }
+    type.number total = 0
+    loop (i from 0 until 8) {
+        total = total + ps[i][0]
+    }
+    when (total == 0 + 11 + 22 + 33 + 44 + 55 + 66 + 77) {
+        write("seq")
+    }
+    print
+
+    # 5. release and reuse must not corrupt neighbors
+    release(a)
+    release(b)
+    type.ptr<type.number> c = alloc<type.number>(2)
+    c[0] = 5
+    c[1] = 6
+    when (c[0] == 5 and c[1] == 6 and ps[0][0] == 0 and ps[7][0] == 77) {
+        write("reuse")
+    }
+    print
+
+    release(n)
+    release(raw)
+    release(p)
+    release(q)
+    release(r)
+    release(ps)
+    release(c)
+    return 0
+}
+
+main()
