@@ -17,7 +17,7 @@ $(OBJS): $(HDRS)
 # bare `make` built exactly one object and stopped)
 .DEFAULT_GOAL := all
 
-.PHONY: all test clean selfhost-lex selfhost-parse selfhost-runtime
+.PHONY: all test clean selfhost-lex selfhost-parse selfhost-runtime selfhost-assembler
 
 all: build/okular runtime/rt.o
 
@@ -43,6 +43,14 @@ selfhost/runtime/build/output/main: build/okular selfhost/runtime/main.ok selfho
 
 selfhost-runtime: selfhost/runtime/build/output/main
 
+# the integrated assembler seed (M5): emits a native ELF64 executable
+# from Okular — ELF headers, machine code, symbol fixups, chmod — with
+# no `as` and no `ld` anywhere in the chain
+selfhost/assembler/build/output/main: build/okular selfhost/assembler/main.ok selfhost/assembler/src/elf.ok
+	cd selfhost/assembler && ../../build/okular --compile main.ok
+
+selfhost-assembler: selfhost/assembler/build/output/main
+
 build/okular: $(OBJS)
 	@mkdir -p build/bootstrap
 	$(CC) $(CFLAGS) -o $@ $(OBJS)
@@ -57,7 +65,7 @@ runtime/rt.o: runtime/rt.c runtime/rt_start.s
 	$(CC) -c -o build/rt_start.o runtime/rt_start.s
 	ld -r -o runtime/rt.o build/rt_code.o build/rt_start.o
 
-test: all selfhost-lex selfhost-parse selfhost-runtime
+test: all selfhost-lex selfhost-parse selfhost-runtime selfhost-assembler
 	bash tools/run_tests.sh
 
 clean:

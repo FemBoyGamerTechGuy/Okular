@@ -1,0 +1,3 @@
+emitted okular-assembled: 72 code+data bytes
+native from Okular
+no as, no ld

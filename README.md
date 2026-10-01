@@ -25,10 +25,12 @@ Okular lexer, `--selfhost-parse` routes parsing through the Okular
 parser (the machine AST protocol rebuilds the tree sema consumes), and
 `--selfhost-verify` differentially proves the two parsers' outputs
 byte-identical across the whole positive suite — end-to-end program
-output is identical through both paths. 0.13 also adds the system
-module (`sys.write/read/open/mmap/...` — spec §23),
-`text.from_bytes`, and the `ptr.to_number`/`number.to_ptr` address
-conversions the runtime is built on.
+output is identical through both paths. The **runtime** is written in
+Okular too (`selfhost/runtime`, on the `sys.*` syscall floor — spec
+§23), and the **integrated assembler has begun** (`selfhost/assembler`
+emits a running native ELF64 executable from Okular with no `as` and no
+`ld`). 0.13 also adds `text.from_bytes` and the
+`ptr.to_number`/`number.to_ptr` address conversions.
 
 ```ok
 type.text=1

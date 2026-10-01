@@ -1,0 +1,279 @@
+# elf.ok — the integrated assembler seed, written in Okular (M5).
+#
+# Emits a complete native x86-64 Linux executable — ELF64 headers, the
+# machine code, the data — and hands it to fs.save + sys.chmod. No `as`,
+# no `ld`: this is the roadmap's "own integrated assembler" beginning,
+# and the kernel of the M5 compiler's backend.
+#
+# The emitter is a growable byte buffer with a symbol table and two
+# fixup kinds:
+#   ABS32 — a 32-bit absolute virtual address, patched at layout time
+#           (mov esi, imm32-style data references)
+#   REL32 — a 32-bit instruction-relative delta, patched as
+#           target - (fixup_site + 4)  (call/jmp rel32)
+# The layout: [ ELF header 64 ][ program header 56 ][ code ][ data ],
+# mapped by one PT_LOAD at BASE, entry at BASE + CODE_OFF.
+
+type.text=1
+
+const.BASE = 4194304          # 0x400000 — the traditional static base
+const.CODE_OFF = 120          # 64 (ehdr) + 56 (phdr)
+
+# ---- the code buffer ----
+
+type.ptr<type.byte> buf = null
+type.number blen = 0
+type.number bcap = 0
+
+function.reserve(number.need) -> number {
+    when (buf == null) {
+        bcap = 4096
+        buf = sys.mmap(bcap)
+        when (buf == null) {
+            die_("mmap failed for the code buffer")
+        }
+        blen = 0
+    }
+    when (blen + need > bcap) {
+        type.number nc = bcap
+        loop (blen + need > nc) {
+            nc = nc * 2
+        }
+        type.ptr<type.byte> nb = sys.mmap(nc)
+        when (nb == null) {
+            die_("mmap failed growing the code buffer")
+        }
+        loop (i from 0 until blen) {
+            nb[i] = buf[i]
+        }
+        buf = nb
+        bcap = nc
+    }
+    return 0
+}
+
+function.put(number.b) -> number {
+    reserve(1)
+    buf[blen] = number.to_uint8(b)
+    blen = blen + 1
+    return 0
+}
+
+function.put32(number.v) -> number {
+    put(v - (v / 256) * 256)
+    put((v / 256) - ((v / 256) / 256) * 256)
+    put((v / 65536) - ((v / 65536) / 256) * 256)
+    put(v / 16777216)
+    return 0
+}
+
+function.put64(number.v) -> number {
+    loop (i from 0 until 8) {
+        type.number w = 1
+        loop (k from 0 until i) {
+            w = w * 256
+        }
+        put((v / w) - ((v / w) / 256) * 256)
+    }
+    return 0
+}
+
+function.here() -> number {
+    return blen
+}
+
+# ---- symbols and fixups ----
+
+type.array<type.number, 64> sym_off = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+type.array<type.number, 64> sym_def = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+type.number nsym = 0
+
+# fixups: kind 0 = ABS32, kind 1 = REL32
+type.array<type.number, 256> fx_off = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+type.array<type.number, 256> fx_kind = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+type.array<type.number, 256> fx_sym = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+type.number nfx = 0
+
+# symbol ids (fixed for the seed; the M5 compiler will register by name)
+const.SYM_ENTRY = 0
+const.SYM_WRITE = 1
+const.SYM_MSG = 2
+
+function.sym_def_(number.id, number.off) -> number {
+    sym_off[id] = off
+    sym_def[id] = 1
+    return 0
+}
+
+function.fixup(number.kind, number.off, number.sym) -> number {
+    fx_off[nfx] = off
+    fx_kind[nfx] = kind
+    fx_sym[nfx] = sym
+    nfx = nfx + 1
+    return 0
+}
+
+# ---- instruction emitters ----
+# register numbers for the B8+r (mov r32, imm32) opcode row
+const.R_EAX = 0
+const.R_ECX = 1
+const.R_EDX = 2
+const.R_EBX = 3
+const.R_ESP = 4
+const.R_EBP = 5
+const.R_ESI = 6
+const.R_EDI = 7
+
+function.mov_imm32(number.reg, number.v) -> number {
+    put(184 + reg)
+    put32(v)
+    return 0
+}
+
+# mov e??, imm32 with an ABS32 fixup on the immediate (data references)
+function.mov_imm32_sym(number.reg, number.sym) -> number {
+    put(184 + reg)
+    fixup(0, here(), sym)
+    put32(0)
+    return 0
+}
+
+function.call_sym(number.sym) -> number {
+    put(232)
+    fixup(1, here(), sym)
+    put32(0)
+    return 0
+}
+
+function.syscall() -> number {
+    put(15)
+    put(5)
+    return 0
+}
+
+function.ret() -> number {
+    put(195)
+    return 0
+}
+
+function.nop_pad() -> number {
+    put(144)
+    return 0
+}
+
+# ---- the ELF64 writer ----
+
+function.wr16_at(ptr<byte>.o, number.off, number.v) -> number {
+    o[off] = number.to_uint8(v - (v / 256) * 256)
+    o[off + 1] = number.to_uint8(v / 256)
+    return 0
+}
+
+function.wr32_at(ptr<byte>.o, number.off, number.v) -> number {
+    loop (i from 0 until 4) {
+        type.number w = 1
+        loop (k from 0 until i) {
+            w = w * 256
+        }
+        o[off + i] = number.to_uint8((v / w) - ((v / w) / 256) * 256)
+    }
+    return 0
+}
+
+function.wr64_at(ptr<byte>.o, number.off, number.v) -> number {
+    loop (i from 0 until 8) {
+        type.number w = 1
+        loop (k from 0 until i) {
+            w = w * 256
+        }
+        o[off + i] = number.to_uint8((v / w) - ((v / w) / 256) * 256)
+    }
+    return 0
+}
+
+function.emit_elf(text.path) -> number {
+    # layout: [ ehdr 64 ][ phdr 56 ][ code ][ data ] — one PT_LOAD maps
+    # the whole file at BASE; entry = BASE + CODE_OFF
+    type.number total = CODE_OFF + blen
+    type.ptr<type.byte> img = sys.mmap(total + 64)
+    when (img == null) {
+        die_("mmap failed for the output image")
+    }
+
+    # --- ELF64 header ---
+    # e_ident: 7F 'E' 'L' 'F' 02 01 01 00 + zeros
+    img[0] = 127
+    img[1] = 69
+    img[2] = 76
+    img[3] = 70
+    img[4] = 2
+    img[5] = 1
+    img[6] = 1
+    img[7] = 0
+    loop (i from 8 until 16) {
+        img[i] = 0
+    }
+    wr16_at(img, 16, 2)            # e_type = ET_EXEC
+    wr16_at(img, 18, 62)           # e_machine = EM_X86_64
+    wr32_at(img, 20, 1)            # e_version
+    wr64_at(img, 24, BASE + CODE_OFF)   # e_entry
+    wr64_at(img, 32, 64)           # e_phoff
+    wr64_at(img, 40, 0)            # e_shoff (no sections)
+    wr32_at(img, 48, 0)            # e_flags
+    wr16_at(img, 52, 64)           # e_ehsize
+    wr16_at(img, 54, 56)           # e_phentsize
+    wr16_at(img, 56, 1)            # e_phnum
+    wr16_at(img, 58, 0)            # e_shentsize
+    wr16_at(img, 60, 0)            # e_shnum
+    wr16_at(img, 62, 0)            # e_shstrndx
+
+    # --- one program header: PT_LOAD R+X, whole file at BASE ---
+    wr32_at(img, 64, 1)            # p_type = PT_LOAD
+    wr32_at(img, 68, 5)            # p_flags = R+X
+    wr64_at(img, 72, 0)            # p_offset
+    wr64_at(img, 80, BASE)         # p_vaddr
+    wr64_at(img, 88, BASE)         # p_paddr
+    wr64_at(img, 96, total)        # p_filesz
+    wr64_at(img, 104, total)       # p_memsz
+    wr64_at(img, 112, 4096)        # p_align
+
+    # --- copy the code in, THEN apply the fixups (patching the image,
+    # not the buffer — the buffer keeps its zero placeholders) ---
+    loop (i from 0 until blen) {
+        img[CODE_OFF + i] = buf[i]
+    }
+    loop (i from 0 until nfx) {
+        type.number site = CODE_OFF + fx_off[i]
+        when (fx_kind[i] == 0) {
+            # ABS32: the symbol's virtual address
+            wr32_at(img, site, BASE + CODE_OFF + sym_off[fx_sym[i]])
+        }
+        else {
+            # REL32: target - next_instruction, both BUFFER offsets — the
+            # vaddr bases cancel; do NOT add CODE_OFF to only one side
+            type.number rel = sym_off[fx_sym[i]] - (fx_off[i] + 4)
+            wr32_at(img, site, rel)
+        }
+    }
+
+    # --- write the file and make it executable ---
+    type.text image = text.from_bytes(img, total)
+    fs.save(path, image)
+    sys.chmod(path, 448)
+    return 0
+}
+
+function.die_(text.msg) -> number {
+    sys.write(2, "okular assembler: ")
+    sys.write(2, msg)
+    sys.write(2, "\n")
+    sys.exit(70)
+    return 0
+}
+
+function.reset() -> number {
+    blen = 0
+    nsym = 0
+    nfx = 0
+    return 0
+}

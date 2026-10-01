@@ -120,8 +120,14 @@ status table.
    (spec §23). Proven by `tests/cases/positive/selfhost_runtime` (25
    subsystem checks). The C shim keeps only the raw syscall wrappers;
    flipping generated code to call `ok_rt_*` happens with the M5 driver.
-5. **Own integrated assembler** — the last external tool dependency
-   (`as`/`ld`) moves in-house (spec §15).
+5. ~~**Own integrated assembler**~~ **begun in 0.13 (the M5 seed)**:
+   `selfhost/assembler` emits a complete native x86-64 ELF64 executable
+   from Okular — ELF headers, machine code, a symbol table with ABS32
+   and REL32 fixups, `fs.save`, `sys.chmod` — and the emitted binary
+   runs (`tests/cases/positive/selfhost_assembler`, verified by the
+   suite's new `exec_after` chain). No `as`, no `ld` anywhere in that
+   chain. Growing this emitter into the full backend IS the M5 backend
+   work; the C bootstrap keeps `as`/`ld` until it retires.
 6. **Sema in Okular** — the type checker (collect + check) is the largest
    remaining C component; the M5 self-build needs it. Requires growing
    the machine protocol from AST records to symbol/type records, or (the

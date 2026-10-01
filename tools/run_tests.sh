@@ -91,6 +91,14 @@ run_one() { # run_one <group> <casedir>
         out="$TMP/$group.$name.run.out"
         (cd "$work" && "$work/build/output/main" "${prog_args[@]}") >"$out" 2>/dev/null
         pexit=$?
+        # a program may produce an artifact to execute (self-hosting chains:
+        # the assembler emits a native binary and the suite runs it too).
+        # `exec_after` names the artifact relative to the work directory.
+        if [ -f "$work/exec_after" ]; then
+            local after="$(cat "$work/exec_after")"
+            (cd "$work" && "./$after") >>"$out" 2>/dev/null
+            pexit=$?
+        fi
         if [ -f "$dir/stdout.txt" ]; then
             check "$group/$name stdout" diff -q "$dir/stdout.txt" "$out" >/dev/null
         fi

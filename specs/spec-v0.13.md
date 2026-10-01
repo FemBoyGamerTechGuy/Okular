@@ -1422,6 +1422,7 @@ An implementation claiming "Okular 0.1" must:
 | Self-hosted parser (full grammar in Okular) | — | implemented (0.13; `--selfhost-parse` bridge, differentially verified) |
 | Machine AST protocol (parser bridge) | — | implemented (0.13) |
 | Self-hosted runtime (formatters, arena, allocator, fs) | — | implemented (0.13; `selfhost/runtime`, on `sys.*`) |
+| Integrated assembler: native ELF emission from Okular | §15 | begun (0.13; `selfhost/assembler`, M5 seed) |
 
 "implemented" above means: covered by the test suite in `tests/`.
 
@@ -1507,6 +1508,12 @@ the conversion family (`T.to_U`): the source type names the operation.
 * Short-circuit booleans and the parser work above land in the same
   0.13 release: the parser found the codegen defects, and the runtime
   proves the fixes at scale.
+* **The integrated assembler begins** (§15, M5 seed): `selfhost/assembler`
+  emits a native ELF64 executable from Okular — headers, code, symbol
+  fixups (ABS32 data references, REL32 calls), chmod — with no `as` and
+  no `ld`. The emitted binary runs: "native from Okular / no as, no ld"
+  (`tests/cases/positive/selfhost_assembler`; the suite executes the
+  artifact through its new `exec_after` chain).
 
 ### 0.12
 

@@ -1,0 +1,58 @@
+# main.ok — drives the integrated assembler (M5 seed).
+#
+# Emits a real native executable: a _start that calls a write function
+# (REL32 call fixup) referencing a message in the data area (ABS32
+# fixup), then exits. The produced binary needs no runtime, no libc,
+# no assembler, no linker — the whole chain from Okular code to a
+# running process is demonstrated end to end.
+
+type.text=1
+
+[source.files.use] = {
+    "elf"
+}.end
+
+function.main() -> number {
+    type.text msg = "native from Okular\n"
+    type.text msg2 = "no as, no ld\n"
+    type.number mlen = text.length(msg) + text.length(msg2)
+
+    elf.reset()
+
+    # ---- _start (SYM_ENTRY) ----
+    elf.sym_def_(elf.SYM_ENTRY, elf.here())
+    # write(1, msg, mlen) — via our own emitted function
+    elf.mov_imm32(elf.R_EDI, 1)                 # fd = 1
+    elf.mov_imm32_sym(elf.R_ESI, elf.SYM_MSG)   # rsi = &msg (ABS32 fixup)
+    elf.mov_imm32(elf.R_EDX, mlen)              # rdx = length
+    elf.call_sym(elf.SYM_WRITE)                 # rel32 call fixup
+    # exit(0)
+    elf.mov_imm32(elf.R_EDI, 0)
+    elf.mov_imm32(elf.R_EAX, 60)
+    elf.syscall()
+
+    # ---- the write function (SYM_WRITE): write(fd, buf, len) in rdi/rsi/rdx ----
+    elf.sym_def_(elf.SYM_WRITE, elf.here())
+    elf.mov_imm32(elf.R_EAX, 1)                 # SYS_write
+    elf.syscall()
+    elf.ret()
+
+    # ---- the data area (SYM_MSG) ----
+    elf.sym_def_(elf.SYM_MSG, elf.here())
+    loop (i from 0 until text.length(msg)) {
+        elf.put(text.byte_at(msg, i))
+    }
+    loop (i from 0 until text.length(msg2)) {
+        elf.put(text.byte_at(msg2, i))
+    }
+
+    elf.emit_elf("okular-assembled")
+
+    write("emitted okular-assembled: ")
+    write(elf.blen)
+    write(" code+data bytes")
+    print
+    return 0
+}
+
+main()
