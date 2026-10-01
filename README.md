@@ -10,9 +10,11 @@ pointers with manual memory: `&x`, `*p`, `alloc<T>(n)` / `release(p)`
 over a real heap allocator, null checks, scaled pointer arithmetic,
 records with predictable layout, unions with type-directed literals (spec §8.5), the full conversion builtin set (`number.to_text`,
 `text.to_number`, ...), and **bitwise operations** (`& | ^ ~ << >>` with
-range-checked shifts — spec §9). **Self-hosting has started:** the first
-compiler component written in Okular — the tokenizer — lives in
-`selfhost/lexer` and is proven by the test suite. Programs read their own
+range-checked shifts — spec §9). **Self-hosting is underway (M4 begun):** the
+compiler's lexing phase can run on the tokenizer written in Okular —
+`selfhost/lexer`, proven by the test suite and differentially verified
+against the C lexer on the whole positive suite
+(`okular --compile --selfhost-lex <binary>`, `make selfhost-lex`). Programs read their own
 command-line arguments (`env.arg_count()`, `env.arg(i)` — spec §6.5).
 
 ```ok
@@ -94,7 +96,7 @@ build/        build artifacts
 
 ```console
 $ make test
-passed: 528   failed: 0
+passed: 530   failed: 0
 ALL TESTS PASSED
 ```
 

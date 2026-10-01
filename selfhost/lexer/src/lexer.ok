@@ -125,6 +125,15 @@ type.number col = 1
 type.number depth = 0
 type.number count = 0
 
+# 0 = human stream (line:col kind spelling, for reading)
+# 1 = machine stream (ok/selfhost.h protocol, for the compiler bridge)
+type.number machine = 0
+
+function.set_machine(number.m) -> number {
+    machine = m
+    return 0
+}
+
 # ---- byte helpers ----
 
 function.cur() -> number {
@@ -188,8 +197,32 @@ function.keyword_kind(text.spelling) -> number {
 }
 
 # ---- emit: one line per token ----
+#
+# human:   line:col kind [spelling]
+# machine: kind line col slen [raw spelling] — the exact protocol of
+#          bootstrap/src/selfhost_bridge.c (K L C S <S bytes> NL)
 
 function.emit_at(number.l, number.c, number.k, number.has_sp, text.sp) -> number {
+    when (machine == 1) {
+        write(k)
+        write(" ")
+        write(l)
+        write(" ")
+        write(c)
+        write(" ")
+        when (has_sp == 1) {
+            write(text.length(sp))
+            write(" ")
+            write(sp)
+        }
+        else {
+            write(0)
+            write(" ")
+        }
+        print
+        count = count + 1
+        return 0
+    }
     write(l)
     write(":")
     write(c)
@@ -266,6 +299,10 @@ function.scan_ident() -> number {
     type.number kw = keyword_kind(sp)
     when (kw == -1) {
         return emit_at(s_line, s_col, K_IDENT, 1, sp)
+    }
+    when (kw == K_RESERVED) {
+        # reserved words carry their spelling (the diagnostic names it)
+        return emit_at(s_line, s_col, kw, 1, sp)
     }
     return emit_at(s_line, s_col, kw, 0, "")
 }

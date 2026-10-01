@@ -6,6 +6,7 @@
 #include "ok/sema.h"
 #include "ok/ir.h"
 #include "ok/codegen.h"
+#include "ok/selfhost.h"
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -80,6 +81,10 @@ int driver_compile(OkOptions *opt) {
     diag_init(&de);
     de.force_warning = false;
 
+    /* M4 bridge: route tokenization through the Okular-written lexer when
+     * requested (--selfhost-lex); set before anything lexes a file */
+    selfhost_set_lexer(opt->selfhost_lex);
+
     /* debug dumps that only need the front end */
     if (opt->dump_tokens || opt->dump_ast) {
         SourceFile *f = source_load(opt->main_path, "main.ok");
@@ -88,7 +93,8 @@ int driver_compile(OkOptions *opt) {
             diag_free(&de);
             return 2;
         }
-        TokList *toks = lex_file(f, &de);
+        TokList *toks = selfhost_enabled() ? selfhost_lex_file(f, opt->main_path, &de)
+                                           : lex_file(f, &de);
         if (opt->dump_tokens) {
             printf("== TOKENS: main.ok ==\n");
             for (size_t i = 0; i < toks->len; i++) {

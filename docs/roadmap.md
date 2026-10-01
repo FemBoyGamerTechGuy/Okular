@@ -28,7 +28,7 @@ status table.
 | M1 | C bootstrap compiler; hello-world and small programs run natively | **done (0.1)** |
 | M2 | Language covers substantial normal programs | in progress — arrays (0.2), fixed-width integers (0.3), pointers + heap (0.4), structs (0.5), text conversions (0.6), unions (0.7), constants + type.auto (0.8), text operations (0.9), file builtins (0.10), bitwise + shifts (0.11), env builtins (0.12) |
 | M3 | Okular can compile portions of the compiler itself | **underway (0.11)** — `selfhost/lexer` tokenizes .ok files (same token set and numbering as the bootstrap lexer); proven by `tests/cases/positive/selfhost_lexer` |
-| M4 | Compiler components rewritten in Okular (lexer first, then runtime shim) | lexer component exists; pipeline integration next |
+| M4 | Compiler components rewritten in Okular (lexer first, then runtime shim) | **begun (0.12)** — `--selfhost-lex` uses the Okular-written lexer as the compiler's tokenizer (differentially verified on all positive cases); C lexer remains the default |
 | M5 | Okular compiler builds itself | not started |
 | M6 | C bootstrap no longer required | not started |
 | M7 | C bootstrap removed from repository | not started |
@@ -85,9 +85,14 @@ status table.
    ( ) and [ ] groups, `#` comments), same kind numbering as
    `bootstrap/src/lexer.c`, verified against a golden token stream
    (`tests/cases/positive/selfhost_lexer`).
-2. **Token interface** — a machine-readable token format the Okular lexer
-   can emit and the bootstrap parser can consume (or an in-process bridge),
-   so `selfhost/lexer` becomes the compiler's actual lexer (M4 begins).
+2. ~~**Token interface**~~ **done in 0.12**: the machine token stream
+   (`K L C S <bytes>` records, `bootstrap/src/selfhost_bridge.c`) plus the
+   `--selfhost-lex <binary>` flag — the bootstrap compiler spawns the
+   compiled `selfhost/lexer` program for every project file and consumes
+   its token stream. `make selfhost-lex` builds the component;
+   `tests/cases/flags/selfhost_lex` compiles a full program through it;
+   the whole positive suite was differentially verified to produce
+   identical results through both lexers.
 3. **Parser in Okular** — recursive descent over the token stream; needs
    the struct/union/array machinery to represent the AST.
 4. **Runtime shim in Okular** — rewrite `runtime/rt.c` (write/print, traps,

@@ -34,6 +34,9 @@ typedef struct OkOptions {
     bool legacy;         /* -l  */
     const char *output;  /* -o  (NULL = build/output/<mainname>) */
     const char *main_path;
+    /* --selfhost-lex <binary>: tokenize through the Okular-written lexer
+     * (M4 bridge, docs/roadmap.md) instead of bootstrap/src/lexer.c */
+    const char *selfhost_lex;
     /* debug dumps (used by the test suite) */
     bool dump_tokens, dump_ast, dump_ir, dump_symbols, emit_asm_only;
 } OkOptions;

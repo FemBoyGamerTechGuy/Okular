@@ -1408,8 +1408,17 @@ An implementation claiming "Okular 0.1" must:
   named `env` must be renamed, exactly like `fs`.
 * The test runner supports an `args` file per case (one line, split on
   spaces) so programs with arguments are testable.
+* **Self-hosting: the lexer bridge (M4 begun)**:
+  `okular --compile --selfhost-lex <binary>` tokenizes every project
+  file through the compiled Okular-written tokenizer
+  (`selfhost/lexer`, machine token stream per
+  `bootstrap/src/selfhost_bridge.c`) instead of the C lexer. The C
+  lexer stays the default; the whole positive suite was verified to
+  produce identical results through both. `make selfhost-lex` builds
+  the component; `tests/cases/flags/selfhost_lex` covers the flag.
 * Tests: 517 → 528 (env args with arguments, the index trap, two
-  negative cases); spec 0.11 → 0.12.
+  negative cases) and 530 with the lexer-bridge flag case; spec
+  0.11 → 0.12.
 
 ### 0.11
 

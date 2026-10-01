@@ -298,17 +298,27 @@ M6  C bootstrap no longer required
 M7  C bootstrap removed from the repository
 ```
 
-The first compiler component written in Okular exists: `selfhost/lexer`
-(`src/lexer.ok`) tokenizes .ok files with the same token set, token
-numbering, and newline/grouping rules as `bootstrap/src/lexer.c` — reading
-through `fs.read`, walking bytes with `text.byte_at`, cutting spellings
-with `text.slice`, classifying characters with integer comparisons, and
-building its keyword table from global text arrays. The bootstrap compiler
-compiles it and the test suite proves it against a golden token stream
-(`tests/cases/positive/selfhost_lexer`). What remains for M4 is wiring it
-into the pipeline as the compiler's actual lexer (driver integration, token
-consumption from the Okular program's output or a shared format), then the
-parser, then the runtime shim.
+The first compiler component written in Okular exists and is USABLE as
+the compiler's lexer: `selfhost/lexer` (`src/lexer.ok`) tokenizes .ok
+files with the same token set, token numbering, and newline/grouping
+rules as `bootstrap/src/lexer.c` — reading through `fs.read`, walking
+bytes with `text.byte_at`, cutting spellings with `text.slice`,
+classifying characters with integer comparisons, and building its
+keyword table from global text arrays. It takes its input path as a
+command-line argument (the `env` builtins) and emits either a human
+stream or the machine protocol of `bootstrap/src/selfhost_bridge.c`.
+
+`okular --compile --selfhost-lex <binary>` routes every project file's
+tokenization through the compiled Okular program: the bridge spawns it,
+parses the machine token stream, and reconstructs the token payloads
+(literal values, unescaped text) the parser expects. `make selfhost-lex`
+builds the component; `tests/cases/flags/selfhost_lex` compiles a real
+program through it; and the entire positive suite was differentially
+verified — identical executables, identical output — through both
+lexers before the flag landed. The C lexer remains the default while
+the bridge accumulates mileage; flipping the default (and deleting
+`bootstrap/src/lexer.c`) is the M4 exit for the lexer, alongside the
+parser and the runtime shim.
 
 Progress is tracked in `docs/roadmap.md` — never claimed before it is true.
 

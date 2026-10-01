@@ -17,9 +17,16 @@ $(OBJS): $(HDRS)
 # bare `make` built exactly one object and stopped)
 .DEFAULT_GOAL := all
 
-.PHONY: all test clean
+.PHONY: all test clean selfhost-lex
 
 all: build/okular runtime/rt.o
+
+# the Okular-written lexer (M4, docs/roadmap.md): the bootstrap compiler
+# compiles it; --selfhost-lex then uses it as the compiler's tokenizer
+selfhost/lexer/build/output/main: build/okular selfhost/lexer/main.ok selfhost/lexer/src/lexer.ok
+	cd selfhost/lexer && ../../build/okular --compile main.ok
+
+selfhost-lex: selfhost/lexer/build/output/main
 
 build/okular: $(OBJS)
 	@mkdir -p build/bootstrap
@@ -35,9 +42,9 @@ runtime/rt.o: runtime/rt.c runtime/rt_start.s
 	$(CC) -c -o build/rt_start.o runtime/rt_start.s
 	ld -r -o runtime/rt.o build/rt_code.o build/rt_start.o
 
-test: all
+test: all selfhost-lex
 	bash tools/run_tests.sh
 
 clean:
 	rm -rf build/bootstrap build/okular build/rt_code.o build/rt_start.o runtime/rt.o
-	rm -rf examples/*/build tests/tmp
+	rm -rf examples/*/build selfhost/*/build tests/tmp

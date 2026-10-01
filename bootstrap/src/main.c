@@ -22,6 +22,7 @@ static void usage(FILE *out) {
         "  -s, --strict       strict build mode (spec §2.1/§14)\n"
         "  -l, --legacy       legacy compatibility (spec §14; no legacy syntax exists yet)\n"
         "  -o, --output PATH  executable output path (default build/output/<name>)\n"
+        "  --selfhost-lex BIN tokenize through the Okular-written lexer (M4 bridge)\n"
         "  --version          print the version\n"
         "  --help             this help\n\n"
         "debug (test suite):\n"
@@ -53,6 +54,12 @@ int main(int argc, char **argv) {
                 return 2;
             }
             opt.output = argv[++i];
+        } else if (strcmp(a, "--selfhost-lex") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "okular: `%s` needs the path to the compiled selfhost/lexer program.\n", a);
+                return 2;
+            }
+            opt.selfhost_lex = argv[++i];
         } else if (strcmp(a, "--version") == 0) {
             printf("Okular %s\n", OK_VERSION);
             return 0;

@@ -17,11 +17,16 @@
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OKULAR="$REPO/build/okular"
+SELFHOST_LEX="$REPO/selfhost/lexer/build/output/main"
 CASES="$REPO/tests/cases"
 TMP="$REPO/tests/tmp"
 
 if [ ! -x "$OKULAR" ]; then
     echo "run_tests: compiler not built at $OKULAR — run \`make\` first." >&2
+    exit 2
+fi
+if [ ! -x "$SELFHOST_LEX" ]; then
+    echo "run_tests: self-hosted lexer not built at $SELFHOST_LEX — run \`make selfhost-lex\` first." >&2
     exit 2
 fi
 
@@ -56,6 +61,7 @@ run_one() { # run_one <group> <casedir>
 
     local flags=""
     if [ -f "$work/flags" ]; then flags="$(cat "$work/flags")"; fi
+    flags="${flags//@selfhost@/$SELFHOST_LEX}"
 
     # program arguments (0.12: the env builtins) — split on spaces
     local prog_args=()

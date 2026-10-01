@@ -1,5 +1,7 @@
 /* project.c — project discovery, module graph, optional-source policy. */
 #include "ok/project.h"
+#include "ok/lexer.h"
+#include "ok/selfhost.h"
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -78,7 +80,11 @@ static void module_lex(OkModule *m, DiagEngine *de) {
         m->broken = true;
         return;
     }
-    m->toks = lex_file(m->src, de);
+    /* M4 bridge: --selfhost-lex routes tokenization through the
+     * Okular-written lexer (docs/roadmap.md); otherwise the C lexer.
+     * m->path is the real filesystem path (m->src->path is a display name) */
+    m->toks = selfhost_enabled() ? selfhost_lex_file(m->src, m->path, de)
+                                 : lex_file(m->src, de);
     if (de->errors > m->err_watermark) {
         m->state = MOD_FAILED;
         m->broken = true;
