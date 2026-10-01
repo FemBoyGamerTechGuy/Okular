@@ -25,7 +25,7 @@ also runs in Okular itself (`selfhost/parser`, milestone M4)
 > a faithful port of the C recursive descent parser). `--selfhost-parse`
 > routes the compiler's parsing phase through it; `--selfhost-verify`
 > differentially proves the trees byte-identical on the whole positive
-> suite. See §23 and docs/roadmap.md.
+> suite. See §23/§24 and docs/roadmap.md.
 
 > This specification is the source of truth for the Okular language.
 > When the implementation changes the language, this document changes with it.
@@ -1391,6 +1391,10 @@ An implementation claiming "Okular 0.1" must:
 | Constants `const.name = value` (fold, inline, no storage) | §8.1 | implemented (0.8) |
 | Type inference `type.auto x = init` | §8.1 | implemented (0.8) |
 | Text ops: `text.length` / `text.byte_at` / `text.slice` | §4.5 | implemented (0.9) |
+| Text from bytes: `text.from_bytes` | §4.5 | implemented (0.13) |
+| System builtins: `sys.write/read/open/close/size/mmap/exit/chmod` | §6.6 | implemented (0.13) |
+| Pointer address conversions: `ptr.to_number` / `number.to_ptr` | §12 | implemented (0.13) |
+| Keyword path members (`sys.write`, `mod.print`) | §1 | implemented (0.13; `end` stays reserved) |
 | File builtins: `fs.read` / `fs.save` / `fs.exists` | §6.4 | implemented (0.10) |
 | Environment builtins: `env.arg_count` / `env.arg` | §6.5 | implemented (0.12) |
 | Short-circuit `and`/`or` | §9 | implemented (0.13) |
@@ -1417,12 +1421,51 @@ An implementation claiming "Okular 0.1" must:
 | Self-hosted lexer (token stream in Okular) | — | implemented (0.11; `--selfhost-lex` bridge 0.12) |
 | Self-hosted parser (full grammar in Okular) | — | implemented (0.13; `--selfhost-parse` bridge, differentially verified) |
 | Machine AST protocol (parser bridge) | — | implemented (0.13) |
+| Self-hosted runtime (formatters, arena, allocator, fs) | — | implemented (0.13; `selfhost/runtime`, on `sys.*`) |
 
 "implemented" above means: covered by the test suite in `tests/`.
 
 ---
 
-## 23. Changelog
+## 23. The System Module (implemented in 0.13)
+
+The typed raw-syscall floor (`sys.*`). Every entry is one Linux x86-64
+syscall plus ABI adaptation — no policy, no buffering, no hidden state.
+The Okular-written runtime (`selfhost/runtime`) is built entirely on
+these; user programs may call them for direct system interfaces.
+
+```ok
+type.number n  = sys.write(1, "bytes to stdout\n")     # fd, buffer -> count
+type.number fd = sys.open("path", 577, 420)             # path, flags, mode -> fd
+type.number g  = sys.read(fd, buf, 64)                  # fd, ptr<byte>, len -> count
+type.number sz = sys.size(fd)                           # fd -> file size
+type.number c  = sys.close(fd)                          # fd -> 0 or -errno
+type.number m  = sys.chmod("path", 448)                 # path, mode -> 0 or -errno
+type.ptr<type.byte> p = sys.mmap(4096)                  # len -> bytes (null on failure)
+sys.exit(1)                                             # terminate; never returns
+```
+
+Semantics, honestly:
+
+* `sys.write` takes the buffer as `text` (the immutable byte view);
+  `sys.read` reads into a caller-owned `ptr<byte>` buffer.
+* `sys.mmap` maps anonymous zeroed private memory; the result is raw
+  byte storage, not a heap block — `release` must not be called on it.
+  Failures return `null`, never a trap.
+* `sys.open`/`read`/`close`/`size`/`chmod` return negative errno-shaped
+  values on failure (the kernel convention), not traps: syscall-level
+  error handling belongs to the caller.
+* `sys.exit` never returns; the compiler emits `hlt` after it.
+* These are the floor. Everything else — buffering, parsing, the
+  allocator, file convenience (`fs.*`) — is policy above them, and in
+  0.13 that policy also exists as Okular code (`selfhost/runtime`).
+
+Pointer address conversions (§12, 0.13): `ptr.to_number(p)` reads any
+pointer's address as u64 bits; `number.to_ptr(x)` reifies `ptr<byte>`
+from them. Raw by design — the memory-model escape hatch. Named after
+the conversion family (`T.to_U`): the source type names the operation.
+
+## 24. Changelog
 
 ### 0.13
 
@@ -1448,6 +1491,22 @@ An implementation claiming "Okular 0.1" must:
   buffer growth.
 * The Okular-written lexers now accept `_` digit grouping (`1_000_000`)
   like the C lexer and stop text literals at newline.
+* **The system module** (§23/§6.6): `sys.write/read/open/close/size/
+  mmap/exit/chmod` — the typed raw-syscall floor. Keywords are now legal
+  dotted-path members (`sys.write`, §1) except `end`.
+* **`text.from_bytes`** (§4.5): adopt a byte buffer as immutable text —
+  the raw-memory bridge the Okular runtime builds every text through.
+* **Pointer address conversions** (§12): `ptr.to_number` /
+  `number.to_ptr` — the explicit address-bits escape hatch.
+* **The runtime written in Okular** (milestone M4): `selfhost/runtime` —
+  output formatters, the text arena, all to_text/parse conversions,
+  text equality and concatenation, the free-list heap allocator
+  (splitting, coalescing, double-release detection, the 0.13 block
+  geometry), and the file operations — on the `sys.*` floor. What
+  remains in C is the syscall wrappers themselves.
+* Short-circuit booleans and the parser work above land in the same
+  0.13 release: the parser found the codegen defects, and the runtime
+  proves the fixes at scale.
 
 ### 0.12
 

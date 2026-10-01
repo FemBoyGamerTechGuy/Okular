@@ -1,0 +1,27 @@
+ok number_to_text
+ok zero
+ok negative
+ok int64-min+1
+ok uint_to_text
+ok decimal_to_text
+ok decimal-frac
+ok decimal-neg
+ok bool-true
+ok bool-false
+ok text_to_number
+ok parse-negative
+ok text_to_decimal
+ok parse-decimal-neg
+ok text_eq
+ok text_eq-ne
+ok concat
+ok concat-empty
+ok alloc-16
+ok no-overlap
+ok reuse-block
+ok seq-contents
+ok fs-roundtrip
+ok fs-exists
+ok fs-exists-no
+written by the Okular runtime
+42

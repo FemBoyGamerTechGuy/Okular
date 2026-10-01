@@ -299,6 +299,11 @@ bool ty_convertible(OkType from, OkType to) {
     if (from == ty_void || to == ty_void) return false;
     /* null -> ptr is a pure representation no-op for IR operand conversion */
     if (from == ty_null && ty_is_ptr(to)) return true;
+    /* pointer <-> integer address bits (0.13, spec §12): explicit, raw,
+     * and deliberately unsafe — the escape hatch real memory code needs
+     * (linked structures in raw memory, the self-hosted allocator). */
+    if (ty_is_ptr(from) && to == ty_number) return true;
+    if (ty_is_integer(from) && ty_is_ptr(to)) return true;
     if (ty_is_integer(from) && ty_is_integer(to)) return true;
     if (ty_is_integer(from) && to == ty_decimal) return true;
     if (from == ty_decimal && ty_is_integer(to)) return true;

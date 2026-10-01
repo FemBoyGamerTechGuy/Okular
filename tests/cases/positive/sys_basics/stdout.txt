@@ -1,0 +1,8 @@
+sys.write works
+count-ok
+9
+9
+9
+read-len-ok
+bytes-ok
+mmap-ok

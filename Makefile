@@ -17,7 +17,7 @@ $(OBJS): $(HDRS)
 # bare `make` built exactly one object and stopped)
 .DEFAULT_GOAL := all
 
-.PHONY: all test clean selfhost-lex selfhost-parse
+.PHONY: all test clean selfhost-lex selfhost-parse selfhost-runtime
 
 all: build/okular runtime/rt.o
 
@@ -35,6 +35,14 @@ selfhost/parser/build/output/main: build/okular selfhost/parser/main.ok selfhost
 
 selfhost-parse: selfhost/parser/build/output/main
 
+# the Okular-written runtime (M4, docs/roadmap.md): the output formatters,
+# text arena, conversion builtins, heap allocator, and file operations —
+# all in Okular, on the sys.* syscall floor (spec §6.6)
+selfhost/runtime/build/output/main: build/okular selfhost/runtime/main.ok selfhost/runtime/src/rt.ok
+	cd selfhost/runtime && ../../build/okular --compile main.ok
+
+selfhost-runtime: selfhost/runtime/build/output/main
+
 build/okular: $(OBJS)
 	@mkdir -p build/bootstrap
 	$(CC) $(CFLAGS) -o $@ $(OBJS)
@@ -49,7 +57,7 @@ runtime/rt.o: runtime/rt.c runtime/rt_start.s
 	$(CC) -c -o build/rt_start.o runtime/rt_start.s
 	ld -r -o runtime/rt.o build/rt_code.o build/rt_start.o
 
-test: all selfhost-lex selfhost-parse
+test: all selfhost-lex selfhost-parse selfhost-runtime
 	bash tools/run_tests.sh
 
 clean:

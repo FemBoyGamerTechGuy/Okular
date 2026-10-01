@@ -782,6 +782,16 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         push_rax(o);
         break;
     }
+    case I_TEXT_FROMBYTES: {
+        /* text.from_bytes(buf, len) (0.13, spec §4.5): a text value IS a
+         * (ptr, len) pair — pop the count and the pointer, re-push them
+         * in the text ABI shape. No copy, no runtime call: the bytes are
+         * adopted as immutable by contract. */
+        buf_puts(o, "    pop rdx\n");     /* len */
+        buf_puts(o, "    pop rax\n");     /* buf ptr */
+        push_pair_rax_rdx(o);              /* rax = ptr (top), rdx = len */
+        break;
+    }
     case I_TEXT_SLICE: {
         /* pop to (r10), pop from (r11), pop text (rax=ptr, rdx=len);
          * bounds: 0 <= from <= to <= len, end-exclusive; traps otherwise.
@@ -848,6 +858,92 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
         buf_puts(o, "    mov rdi, rax\n");
         call_aligned(o, "rt_env_arg");
         push_pair_rax_rdx(o);
+        break;
+    }
+    case I_SYSOP: {
+        /* sys.* builtins (0.13, spec §6.6): typed raw syscalls. Operands
+         * were pushed in call order; pop and marshal per op. Text
+         * operands ride the (ptr,len) pair ABI; sys.mmap returns a
+         * ptr<byte> (null on failure); sys.exit never returns. */
+        switch (in->i) {
+        case SYSOP_WRITE: {
+            /* fd, text(buf): pop the text pair, pop the fd */
+            pop_pair_rax_rdx(o);                 /* buf: rax=ptr, rdx=len */
+            buf_puts(o, "    mov r9, rax\n    mov r10, rdx\n");
+            pop_rax(o);                          /* fd */
+            buf_puts(o, "    mov rdi, rax\n    mov rsi, r9\n    mov rdx, r10\n");
+            call_aligned(o, "rt_sys_write");
+            push_rax(o);
+            break;
+        }
+        case SYSOP_READ: {
+            /* fd, buf(ptr), len: pop len, pop ptr, pop fd */
+            pop_rax(o);                          /* len */
+            buf_puts(o, "    mov r9, rax\n");
+            pop_rax(o);                          /* ptr */
+            buf_puts(o, "    mov r10, rax\n");
+            pop_rax(o);                          /* fd */
+            buf_puts(o, "    mov rdi, rax\n    mov rsi, r10\n    mov rdx, r9\n");
+            call_aligned(o, "rt_sys_read");
+            push_rax(o);
+            break;
+        }
+        case SYSOP_OPEN: {
+            /* path(text), flags, mode: pop mode, pop flags, pop path */
+            pop_rax(o);                          /* mode */
+            buf_puts(o, "    mov r9, rax\n");
+            pop_rax(o);                          /* flags */
+            buf_puts(o, "    mov r10, rax\n");
+            pop_pair_rax_rdx(o);                 /* path: rax=ptr, rdx=len */
+            buf_puts(o, "    mov rdi, rax\n    mov rsi, rdx\n");
+            buf_puts(o, "    mov rdx, r10\n    mov rcx, r9\n");
+            call_aligned(o, "rt_sys_open");
+            push_rax(o);
+            break;
+        }
+        case SYSOP_CLOSE: {
+            pop_rax(o);
+            buf_puts(o, "    mov rdi, rax\n");
+            call_aligned(o, "rt_sys_close");
+            push_rax(o);
+            break;
+        }
+        case SYSOP_SIZE: {
+            pop_rax(o);
+            buf_puts(o, "    mov rdi, rax\n");
+            call_aligned(o, "rt_sys_size");
+            push_rax(o);
+            break;
+        }
+        case SYSOP_MMAP: {
+            pop_rax(o);                          /* len */
+            buf_puts(o, "    mov rdi, rax\n");
+            call_aligned(o, "rt_sys_mmap");
+            push_rax(o);                         /* ptr<byte> or null */
+            break;
+        }
+        case SYSOP_EXIT: {
+            pop_rax(o);                          /* code */
+            buf_puts(o, "    mov rdi, rax\n");
+            call_aligned(o, "rt_sys_exit");
+            buf_puts(o, "    hlt\n");           /* never reached */
+            push_rax(o);                         /* stack discipline */
+            break;
+        }
+        case SYSOP_CHMOD: {
+            /* path(text), mode: pop mode, pop path */
+            pop_rax(o);                          /* mode */
+            buf_puts(o, "    mov r9, rax\n");
+            pop_pair_rax_rdx(o);                 /* path: rax=ptr, rdx=len */
+            buf_puts(o, "    mov rdi, rax\n    mov rsi, rdx\n    mov rdx, r9\n");
+            call_aligned(o, "rt_sys_chmod");
+            push_rax(o);
+            break;
+        }
+        default:
+            OK_ICE("bad sysop %llu at %zu:%zu", (unsigned long long)in->i,
+                   in->line, in->col);
+        }
         break;
     }
     case I_LOAD_AT: {

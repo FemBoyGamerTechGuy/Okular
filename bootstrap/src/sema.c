@@ -1441,6 +1441,64 @@ static OkType check_call(SemaCtx *c, Node *n) {
     /* conversion builtins (`int32.to_uint8(x)`) are recognized before
      * scope resolution — the `<type>.to_<type>` path belongs to the
      * language, not to any namespace (spec §4.4) */
+    /* pointer-address conversions (0.13, spec §12): `ptr.to_number(p)`
+     * reads a pointer's address as u64 bits; `number.to_ptr(x)` reifies
+     * a byte pointer from them. Raw by design — the memory-model escape
+     * hatch (the Okular-written allocator is the first user). */
+    if (n->nparts == 2 &&
+        (strcmp(n->parts[0], "ptr") == 0 && strcmp(n->parts[1], "to_number") == 0)) {
+        Symbol *clash = scope_lookup(c->cur_scope, n->parts[0]);
+        if (clash && clash->kind == SYM_NS && scope_find_local(clash->ns, n->parts[1])) {
+            Diag *d = serr(c, n, "`ptr.to_number` is a built-in conversion; `%s.%s` must be renamed.",
+                           n->parts[0], n->parts[1]);
+            (void)d;
+        }
+        if (n->args.len != 1) {
+            Diag *d = serr(c, n, "`ptr.to_number` converts exactly one value, but %zu were given.",
+                           n->args.len);
+            diag_note(d, "form: `ptr.to_number(value)`.");
+            return ty_number;
+        }
+        Node *arg = n->args.items[0];
+        OkType at = check_expr(c, arg);
+        if (!ty_is_ptr(at) && at != ty_null) {
+            Diag *d = serr(c, arg, "`ptr.to_number` converts a pointer, but a `%s` value was given.",
+                           ok_type_name(at));
+            diag_note(d, "form: `ptr.to_number(value)` — any `ptr<T>` (or `null`).");
+        }
+        n->kind = A_CONV;
+        n->a = arg;
+        n->otype = ty_number;
+        n->rtype = ty_number;
+        return ty_number;
+    }
+    if (n->nparts == 2 &&
+        (strcmp(n->parts[0], "number") == 0 && strcmp(n->parts[1], "to_ptr") == 0)) {
+        Symbol *clash = scope_lookup(c->cur_scope, n->parts[0]);
+        if (clash && clash->kind == SYM_NS && scope_find_local(clash->ns, n->parts[1])) {
+            Diag *d = serr(c, n, "`number.to_ptr` is a built-in conversion; `%s.%s` must be renamed.",
+                           n->parts[0], n->parts[1]);
+            (void)d;
+        }
+        if (n->args.len != 1) {
+            Diag *d = serr(c, n, "`number.to_ptr` converts exactly one value, but %zu were given.",
+                           n->args.len);
+            diag_note(d, "form: `number.to_ptr(address)`.");
+            return ty_ptr(ty_uint8);
+        }
+        Node *arg = n->args.items[0];
+        OkType at = check_expr(c, arg);
+        if (!ty_is_integer(at)) {
+            Diag *d = serr(c, arg, "`number.to_ptr` converts an integer address, but a `%s` value was given.",
+                           ok_type_name(at));
+            diag_note(d, "form: `number.to_ptr(address)` — produces `ptr<byte>`.");
+        }
+        n->kind = A_CONV;
+        n->a = arg;
+        n->otype = ty_ptr(ty_uint8);
+        n->rtype = n->otype;
+        return n->rtype;
+    }
     {
         OkType cfrom, cto;
         if (conv_builtin_lookup(n->parts, n->nparts, &cfrom, &cto)) {
@@ -1467,6 +1525,8 @@ static OkType check_call(SemaCtx *c, Node *n) {
             op = TOP_BYTE; want_args = 2; sig = "text.byte_at(text.s, number.i) -> uint8";
         } else if (strcmp(n->parts[1], "slice") == 0) {
             op = TOP_SLICE; want_args = 3; sig = "text.slice(text.s, number.from, number.to) -> text (end-exclusive)";
+        } else if (strcmp(n->parts[1], "from_bytes") == 0) {
+            op = TOP_FROMBYTES; want_args = 2; sig = "text.from_bytes(ptr<byte>.buf, number.len) -> text";
         } else {
             op = -1; want_args = 0; sig = NULL;
         }
@@ -1484,13 +1544,29 @@ static OkType check_call(SemaCtx *c, Node *n) {
                 diag_note(d, "signature: %s", sig);
             }
             /* first argument must be text; integer positions take any
-             * integer (contextual literal typing applies) */
+             * integer (contextual literal typing applies). from_bytes is
+             * the exception: (ptr<byte>, number) — it wraps a byte buffer
+             * as immutable text (0.13, spec §4.5) */
             size_t check_n = n->args.len < want_args ? n->args.len : want_args;
             bool ok_args = true;
             for (size_t i = 0; i < n->args.len; i++) {
                 Node *arg = n->args.items[i];
                 OkType at = check_expr(c, arg);
                 if (i >= check_n) continue;
+                if (op == TOP_FROMBYTES) {
+                    if (i == 0 && !(ty_is_ptr(at) && ty_kind(at->elem) == OK_UINT8)) {
+                        Diag *d = serr(c, arg, "argument 1 of `text.from_bytes` must be `ptr<byte>`, but a `%s` value was given.",
+                                       ok_type_name(at));
+                        diag_note(d, "signature: %s", sig);
+                        ok_args = false;
+                    } else if (i == 1 && !ty_is_integer(at)) {
+                        Diag *d = serr(c, arg, "argument 2 of `text.from_bytes` must be the byte count, but a `%s` value was given.",
+                                       ok_type_name(at));
+                        diag_note(d, "signature: %s", sig);
+                        ok_args = false;
+                    }
+                    continue;
+                }
                 if (i == 0) {
                     if (at != ty_text) {
                         Diag *d = serr(c, arg, "argument 1 of `%s` must be `text`, but a `%s` value was given.",
@@ -1625,6 +1701,116 @@ static OkType check_call(SemaCtx *c, Node *n) {
             n->fvalue = (int)op;
             n->rtype = (op == ENVOP_ARGC) ? ty_number : ty_text;
             return n->rtype;
+        }
+    }
+    /* system builtins (0.13, spec §6.6): the typed raw-syscall surface —
+     * sys.write/read/open/close/size/mmap/exit/chmod. The Okular-written
+     * runtime (selfhost/runtime) is built on these; user programs may use
+     * them for direct system interfaces (§19 of the design brief).
+     * Recognized before scope resolution like fs., env., and text. */
+    if (n->nparts == 2 && strcmp(n->parts[0], "sys") == 0) {
+        SysOp op;
+        size_t want_args;
+        const char *sig;
+        OkType rty;
+        if (strcmp(n->parts[1], "write") == 0) {
+            op = SYSOP_WRITE; want_args = 2; sig = "sys.write(number.fd, text.buf) -> number"; rty = ty_number;
+        } else if (strcmp(n->parts[1], "read") == 0) {
+            op = SYSOP_READ; want_args = 3; sig = "sys.read(number.fd, ptr<byte>.buf, number.len) -> number"; rty = ty_number;
+        } else if (strcmp(n->parts[1], "open") == 0) {
+            op = SYSOP_OPEN; want_args = 3; sig = "sys.open(text.path, number.flags, number.mode) -> number"; rty = ty_number;
+        } else if (strcmp(n->parts[1], "close") == 0) {
+            op = SYSOP_CLOSE; want_args = 1; sig = "sys.close(number.fd) -> number"; rty = ty_number;
+        } else if (strcmp(n->parts[1], "size") == 0) {
+            op = SYSOP_SIZE; want_args = 1; sig = "sys.size(number.fd) -> number"; rty = ty_number;
+        } else if (strcmp(n->parts[1], "mmap") == 0) {
+            op = SYSOP_MMAP; want_args = 1; sig = "sys.mmap(number.len) -> ptr<byte>"; rty = ty_ptr(ty_uint8);
+        } else if (strcmp(n->parts[1], "exit") == 0) {
+            op = SYSOP_EXIT; want_args = 1; sig = "sys.exit(number.code)"; rty = ty_void;
+        } else if (strcmp(n->parts[1], "chmod") == 0) {
+            op = SYSOP_CHMOD; want_args = 2; sig = "sys.chmod(text.path, number.mode) -> number"; rty = ty_number;
+        } else {
+            op = -1; want_args = 0; sig = NULL; rty = ty_void;
+        }
+        if (sig) {
+            Symbol *clash = scope_lookup(c->cur_scope, n->parts[0]);
+            if (clash && clash->kind == SYM_NS && scope_find_local(clash->ns, n->parts[1])) {
+                Diag *d = serr(c, n, "`%s` is a built-in system operation; `%s.%s` must be renamed.",
+                               path_join_str(n->parts, n->nparts), n->parts[0], n->parts[1]);
+                (void)d;
+            }
+            if (n->args.len != want_args) {
+                Diag *d = serr(c, n, "`%s` expects %zu argument%s, but %zu were given.",
+                               path_join_str(n->parts, n->nparts), want_args,
+                               want_args == 1 ? "" : "s", n->args.len);
+                diag_note(d, "signature: %s", sig);
+            }
+            /* argument shapes, in call order */
+            for (size_t i = 0; i < n->args.len; i++) {
+                Node *arg = (Node *)n->args.items[i];
+                OkType at = check_expr(c, arg);
+                Diag *d = NULL;
+                switch (op) {
+                case SYSOP_WRITE:
+                    if (i == 0 && !ty_is_integer(at))
+                        d = serr(c, arg, "the file descriptor of `sys.write` must be an integer, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    else if (i == 1 && at != ty_text)
+                        d = serr(c, arg, "the buffer of `sys.write` must be `text`, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    break;
+                case SYSOP_READ:
+                    if (i == 0 && !ty_is_integer(at))
+                        d = serr(c, arg, "the file descriptor of `sys.read` must be an integer, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    else if (i == 1 && !(ty_is_ptr(at) && ty_kind(at->elem) == OK_UINT8))
+                        d = serr(c, arg, "the buffer of `sys.read` must be `ptr<byte>`, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    else if (i == 2 && !ty_is_integer(at))
+                        d = serr(c, arg, "the length of `sys.read` must be an integer, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    break;
+                case SYSOP_OPEN:
+                    if (i == 0 && at != ty_text)
+                        d = serr(c, arg, "the path of `sys.open` must be `text`, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    else if (i == 1 && !ty_is_integer(at))
+                        d = serr(c, arg, "the flags of `sys.open` must be an integer, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    else if (i == 2 && !ty_is_integer(at))
+                        d = serr(c, arg, "the mode of `sys.open` must be an integer, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    break;
+                case SYSOP_CLOSE: case SYSOP_SIZE:
+                    if (!ty_is_integer(at))
+                        d = serr(c, arg, "the file descriptor of `sys.%s` must be an integer, but a `%s` value was given.",
+                                 op == SYSOP_CLOSE ? "close" : "size", ok_type_name(at));
+                    break;
+                case SYSOP_MMAP:
+                    if (!ty_is_integer(at))
+                        d = serr(c, arg, "the length of `sys.mmap` must be an integer, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    break;
+                case SYSOP_EXIT:
+                    if (!ty_is_integer(at))
+                        d = serr(c, arg, "the exit code of `sys.exit` must be an integer, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    break;
+                case SYSOP_CHMOD:
+                    if (i == 0 && at != ty_text)
+                        d = serr(c, arg, "the path of `sys.chmod` must be `text`, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    else if (i == 1 && !ty_is_integer(at))
+                        d = serr(c, arg, "the mode of `sys.chmod` must be an integer, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    break;
+                }
+                if (d) diag_note(d, "signature: %s", sig);
+            }
+            n->kind = A_SYSOP;
+            n->fvalue = (int)op;
+            n->rtype = rty;
+            return rty;
         }
     }
     /* path_join_str returns a shared static buffer: copy the call name
@@ -1967,6 +2153,11 @@ static OkType check_expr(SemaCtx *c, Node *e) {
     }
     case A_ENVOP: {
         /* sema rewrote an env builtin call into this node (0.12, §6.5) */
+        for (size_t i = 0; i < e->args.len; i++) check_expr(c, e->args.items[i]);
+        return e->rtype;
+    }
+    case A_SYSOP: {
+        /* sema rewrote a sys builtin call into this node (0.13, §6.6) */
         for (size_t i = 0; i < e->args.len; i++) check_expr(c, e->args.items[i]);
         return e->rtype;
     }
@@ -2443,7 +2634,11 @@ static void check_stmt(SemaCtx *c, Node *s) {
     }
     case A_EXPRSTMT: {
         OkType t = check_expr(c, s->a);
-        if (s->a->kind != A_CALL && s->a->kind != A_WRITE) {
+        /* builtin calls are rewritten by check_expr: fs., env., sys., and
+         * text operations become A_FSOP/A_ENVOP/A_SYSOP/A_TEXTOP nodes */
+        if (s->a->kind != A_CALL && s->a->kind != A_WRITE &&
+            s->a->kind != A_FSOP && s->a->kind != A_ENVOP &&
+            s->a->kind != A_SYSOP && s->a->kind != A_TEXTOP) {
             serr(c, s->a, "an expression statement must be a call like `physics.fall(3)` or `write(x)`.");
         }
         (void)t;

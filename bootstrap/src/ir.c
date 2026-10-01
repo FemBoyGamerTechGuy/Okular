@@ -385,7 +385,20 @@ static void build_expr(Ctx *c, Node *e) {
     case A_TEXTOP: {
         /* text.length / text.byte_at / text.slice (0.9, spec §4.5):
          * operands build left-to-right; integer positions convert to
-         * number; the instruction consumes them from the operand stack */
+         * number; the instruction consumes them from the operand stack.
+         * from_bytes (0.13): (ptr<byte>, number) — the pointer rides as
+         * itself, the count converts to number */
+        if (e->fvalue == TOP_FROMBYTES) {
+            for (size_t i = 0; i < e->args.len; i++) {
+                Node *arg = e->args.items[i];
+                if (i == 0) build_expr(c, arg);           /* ptr<byte> */
+                else build_operand_conv(c, arg, ty_number); /* count */
+            }
+            IrInst inst = { .kind = I_TEXT_FROMBYTES, .type = e->rtype,
+                            .line = e->line, .col = e->col };
+            emit(c->f, inst);
+            break;
+        }
         for (size_t i = 0; i < e->args.len; i++) {
             Node *arg = e->args.items[i];
             build_operand_conv(c, arg, (i == 0) ? ty_text : ty_number);
@@ -418,6 +431,23 @@ static void build_expr(Ctx *c, Node *e) {
             build_operand_conv(c, e->args.items[0], ty_number);
         }
         IrInst inst = { .kind = (e->fvalue == ENVOP_ARGC) ? I_ENV_ARGC : I_ENV_ARG,
+                        .type = e->rtype,
+                        .line = e->line, .col = e->col };
+        emit(c->f, inst);
+        break;
+    }
+    case A_SYSOP: {
+        /* sys.* builtins (0.13, spec §6.6): operands ride the stack in
+         * call order; the backend adapts the ABI per op. Integer
+         * arguments normalize to `number` (the syscall ABI width). */
+        for (size_t k = 0; k < e->args.len; k++) {
+            Node *arg = (Node *)e->args.items[k];
+            if (arg->rtype && ty_is_integer(arg->rtype))
+                build_operand_conv(c, arg, ty_number);
+            else
+                build_expr(c, arg);   /* text (ptr,len pair) or ptr */
+        }
+        IrInst inst = { .kind = I_SYSOP, .i = (uint64_t)e->fvalue,
                         .type = e->rtype,
                         .line = e->line, .col = e->col };
         emit(c->f, inst);
@@ -1308,6 +1338,10 @@ void ir_fold(IrFunc *f) {
             if (sp >= 3) sp -= 3; /* text + from + to */
             stack[sp++] = (FoldVal){ .known = false, .type = ty_text };
             break;
+        case I_TEXT_FROMBYTES:
+            if (sp >= 2) sp -= 2; /* ptr + count */
+            stack[sp++] = (FoldVal){ .known = false, .type = ty_text };
+            break;
         case I_FS_READ:
             if (sp >= 1) sp--;    /* the path text */
             stack[sp++] = (FoldVal){ .known = false, .type = ty_text };
@@ -1327,6 +1361,23 @@ void ir_fold(IrFunc *f) {
             if (sp >= 1) sp--;    /* the index */
             stack[sp++] = (FoldVal){ .known = false, .type = ty_text };
             break;
+        case I_SYSOP: {
+            /* sys.* (0.13, §6.6): pops per op, pushes per result type.
+             * Nothing is foldable — every op is an effectful syscall. */
+            switch (in.i) {
+            case SYSOP_WRITE:   if (sp >= 2) sp -= 2; break;   /* fd, text */
+            case SYSOP_READ:    if (sp >= 3) sp -= 3; break;   /* fd, buf, len */
+            case SYSOP_OPEN:    if (sp >= 3) sp -= 3; break;   /* path, flags, mode */
+            case SYSOP_CLOSE:   if (sp >= 1) sp -= 1; break;
+            case SYSOP_SIZE:    if (sp >= 1) sp -= 1; break;
+            case SYSOP_CHMOD:   if (sp >= 2) sp -= 2; break;   /* path, mode */
+            case SYSOP_MMAP:    if (sp >= 1) sp -= 1; break;
+            case SYSOP_EXIT:    break;      /* never returns */
+            }
+            if (in.i != (uint64_t)SYSOP_EXIT)
+                stack[sp++] = (FoldVal){ .known = false, .type = in.type };
+            break;
+        }
         case I_STORE_LOCAL: case I_STORE_GLOBAL: case I_POP:
         case I_JMPF: case I_WRITE:
             if (sp > 0) sp--;
@@ -1406,11 +1457,13 @@ static const char *ir_kind_name(IrKind k) {
     case I_TEXT_LEN: return "TEXT_LEN";
     case I_TEXT_BYTE: return "TEXT_BYTE";
     case I_TEXT_SLICE: return "TEXT_SLICE";
+    case I_TEXT_FROMBYTES: return "TEXT_FROMBYTES";
     case I_FS_READ: return "FS_READ";
     case I_FS_WRITE: return "FS_WRITE";
     case I_FS_EXISTS: return "FS_EXISTS";
     case I_ENV_ARGC: return "ENV_ARGC";
     case I_ENV_ARG: return "ENV_ARG";
+    case I_SYSOP: return "SYSOP";
     case I_CONV: return "CONV";
     case I_BINOP: return "BINOP";
     case I_UNOP: return "UNOP";

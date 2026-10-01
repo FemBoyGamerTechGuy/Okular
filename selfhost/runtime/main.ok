@@ -1,0 +1,100 @@
+# main.ok — exercises the Okular-written runtime (selfhost/runtime).
+#
+# Every subsystem gets driven: the output formatters, the to_text and
+# parsing conversions, text equality and concatenation, the heap
+# allocator (allocation, splitting, release, coalescing, reuse), and the
+# file operations. Kept in sync with tests/cases/positive/selfhost_runtime.
+
+type.text=1
+
+[source.files.use] = {
+    "rt"
+}.end
+
+function.check(bool.ok, text.what) -> number {
+    when (ok) {
+        write("ok ")
+    }
+    else {
+        write("FAIL ")
+    }
+    write(what)
+    print
+    return 0
+}
+
+function.main() -> number {
+    # ---- 1. number formatting (buffer + digits) ----
+    type.text save = rt.number_to_text(12345)
+    check(rt.text_eq(save, "12345") == 1, "number_to_text")
+    check(rt.text_eq(rt.number_to_text(0), "0") == 1, "zero")
+    check(rt.text_eq(rt.number_to_text(-987), "-987") == 1, "negative")
+    check(rt.text_eq(rt.number_to_text(0 - 9223372036854775807), "-9223372036854775807") == 1, "int64-min+1")
+    check(rt.text_eq(rt.uint_to_text(42), "42") == 1, "uint_to_text")
+
+    # ---- 2. decimal formatting ----
+    check(rt.text_eq(rt.decimal_to_text(1.5), "1.500000") == 1, "decimal_to_text")
+    check(rt.text_eq(rt.decimal_to_text(0.25), "0.250000") == 1, "decimal-frac")
+    check(rt.text_eq(rt.decimal_to_text(-2.75), "-2.750000") == 1, "decimal-neg")
+
+    # ---- 3. bool formatting ----
+    check(rt.text_eq(rt.bool_to_text(1), "true") == 1, "bool-true")
+    check(rt.text_eq(rt.bool_to_text(0), "false") == 1, "bool-false")
+
+    # ---- 4. parsing ----
+    check(rt.text_to_number("12345") == 12345, "text_to_number")
+    check(rt.text_to_number("-42") == -42, "parse-negative")
+    check(rt.text_to_decimal("1.5") == 1.5, "text_to_decimal")
+    check(rt.text_to_decimal("-0.25") == 0.0 - 0.25, "parse-decimal-neg")
+    when (rt.text_eq("a", "b") == 0) { }
+
+    # ---- 5. equality + concat ----
+    check(rt.text_eq("abc", "abc") == 1, "text_eq")
+    check(rt.text_eq("abc", "abd") == 0, "text_eq-ne")
+    check(rt.text_eq(rt.concat("foo", "bar"), "foobar") == 1, "concat")
+    check(rt.text_eq(rt.concat("", "x"), "x") == 1, "concat-empty")
+
+    # ---- 6. the allocator ----
+    type.ptr<type.byte> a = rt.mem_alloc(16)
+    check(a != null, "alloc-16")
+    a[0] = 1
+    a[15] = 2
+    type.ptr<type.byte> b = rt.mem_alloc(32)
+    b[0] = 3
+    # a field written BEFORE a later allocation must survive it (the
+    # 0.13 split-geometry regression)
+    check(a[0] == 1 and a[15] == 2 and b[0] == 3, "no-overlap")
+
+    # release and exact-size reuse
+    type.number addr_b = ptr.to_number(b)
+    rt.mem_release(b)
+    type.ptr<type.byte> c = rt.mem_alloc(32)
+    check(ptr.to_number(c) == addr_b, "reuse-block")
+    rt.mem_release(a)
+    rt.mem_release(c)
+
+    # many small allocations, contents preserved across growth
+    type.number total = 0
+    loop (i from 0 until 64) {
+        type.ptr<type.byte> p = rt.mem_alloc(64)
+        p[0] = number.to_uint8(i)
+        total = total + p[0]
+    }
+    check(total == 0 + 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + 22 + 23 + 24 + 25 + 26 + 27 + 28 + 29 + 30 + 31 + 32 + 33 + 34 + 35 + 36 + 37 + 38 + 39 + 40 + 41 + 42 + 43 + 44 + 45 + 46 + 47 + 48 + 49 + 50 + 51 + 52 + 53 + 54 + 55 + 56 + 57 + 58 + 59 + 60 + 61 + 62 + 63, "seq-contents")
+
+    # ---- 7. files through the runtime's own fs layer ----
+    rt.fs_save("runtime_selftest.tmp", "runtime-fs-roundtrip")
+    type.text back = rt.fs_read("runtime_selftest.tmp")
+    check(rt.text_eq(back, "runtime-fs-roundtrip") == 1, "fs-roundtrip")
+    check(rt.fs_exists("runtime_selftest.tmp") == 1, "fs-exists")
+    check(rt.fs_exists("no_such_file_hopefully") == 0, "fs-exists-no")
+
+    # ---- 8. the output path end to end ----
+    rt.write_text("written by the Okular runtime")
+    rt.print_flush()
+    rt.write_number(6 * 7)
+    rt.print_flush()
+    return 0
+}
+
+main()

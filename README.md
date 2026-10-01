@@ -16,15 +16,19 @@ spec §9), and **short-circuit `and`/`or`** (spec §9 — `p != null and
 *p == x` guards do not trap). Programs read their own command-line
 arguments (`env.arg_count()`, `env.arg(i)` — spec §6.5).
 
-**Self-hosting (M4):** both the tokenizer (`selfhost/lexer`) and now the
-**parser** (`selfhost/parser` — the complete grammar, in Okular) are
-compiled by the bootstrap compiler and verified against the C
-implementation: `--selfhost-lex` routes tokenization through the Okular
-lexer, `--selfhost-parse` routes parsing through the Okular parser (the
-machine AST protocol rebuilds the tree sema consumes), and
+**Self-hosting (M4):** the tokenizer (`selfhost/lexer`), the **parser**
+(`selfhost/parser` — the complete grammar, in Okular), and the **runtime**
+(`selfhost/runtime` — formatters, text arena, conversions, the heap
+allocator, file operations, on the `sys.*` syscall floor) are all
+written in Okular. `--selfhost-lex` routes tokenization through the
+Okular lexer, `--selfhost-parse` routes parsing through the Okular
+parser (the machine AST protocol rebuilds the tree sema consumes), and
 `--selfhost-verify` differentially proves the two parsers' outputs
 byte-identical across the whole positive suite — end-to-end program
-output is identical through both paths.
+output is identical through both paths. 0.13 also adds the system
+module (`sys.write/read/open/mmap/...` — spec §23),
+`text.from_bytes`, and the `ptr.to_number`/`number.to_ptr` address
+conversions the runtime is built on.
 
 ```ok
 type.text=1

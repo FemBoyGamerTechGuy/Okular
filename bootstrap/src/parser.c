@@ -82,6 +82,41 @@ void parser_register_struct_names(TokList *toks) {
     }
 }
 
+
+/* keyword spellings (0.13, spec §6.6): keywords are legal path members —
+ * `sys.write`, `mod.print` — except `end`, which is the column
+ * terminator `.end` and must stay reserved. Keywords carry no text
+ * payload on any lexer path, so the spelling comes from the kind. */
+static const char *tok_keyword_name(TokKind k) {
+    switch (k) {
+    case T_KW_TYPE: return "type";       case T_KW_FUNCTION: return "function";
+    case T_KW_STRUCT: return "struct";   case T_KW_WHEN: return "when";
+    case T_KW_ELSE: return "else";       case T_KW_LOOP: return "loop";
+    case T_KW_FROM: return "from";       case T_KW_TO: return "to";
+    case T_KW_UNTIL: return "until";     case T_KW_BREAK: return "break";
+    case T_KW_CONTINUE: return "continue"; case T_KW_RETURN: return "return";
+    case T_KW_PRINT: return "print";     case T_KW_WRITE: return "write";
+    case T_KW_TRUE: return "true";       case T_KW_FALSE: return "false";
+    case T_KW_AND: return "and";         case T_KW_OR: return "or";
+    case T_KW_NOT: return "not";         case T_KW_ALLOC: return "alloc";
+    case T_KW_RELEASE: return "release"; case T_KW_NULL: return "null";
+    case T_KW_UNION: return "union";     case T_KW_CONST: return "const";
+    default: return NULL;
+    }
+}
+
+/* may this token continue a dotted path? identifiers and (nearly all)
+ * keywords; `end` is excluded (spec §3.1 terminator) */
+static bool is_path_part(TokKind k) {
+    return k == T_IDENT || tok_keyword_name(k) != NULL;
+}
+
+/* the path-member spelling: the token's text, or the keyword's name */
+static char *path_part_text(Tok *t) {
+    if (t->kind == T_IDENT) return ok_xstrdup(t->text ? t->text : "");
+    return ok_xstrdup(tok_keyword_name(t->kind));
+}
+
 /* ---- token helpers ---- */
 
 static Tok *cur(Parser *p) { return &p->toks->items[p->pos]; }
@@ -430,9 +465,9 @@ static Node *parse_primary(Parser *p) {
         Vec parts; vec_init(&parts);
         vec_push(&parts, ok_xstrdup(t->text));
         advance(p);
-        while (is(p, T_DOT) && isk(p, 1, T_IDENT)) {
+        while (is(p, T_DOT) && is_path_part(at(p, 1)->kind)) {
             advance(p);
-            vec_push(&parts, ok_xstrdup(cur(p)->text));
+            vec_push(&parts, path_part_text(cur(p)));
             advance(p);
         }
         n->parts = (char **)parts.items;
@@ -493,14 +528,14 @@ static Node *parse_postfix(Parser *p) {
             e = ix;
             continue;
         }
-        if (is(p, T_DOT) && isk(p, 1, T_IDENT)) {
+        if (is(p, T_DOT) && is_path_part(at(p, 1)->kind)) {
             /* member access on a computed base: base.field (spec §8.3).
              * Dotted paths (a.b) stay A_PATH — only postfix bases land here */
             Tok *t = cur(p);
             advance(p); /* . */
             Node *mem = node_new(p->ar, A_MEMBER, t->line, t->col);
             mem->a = e;
-            mem->name = ok_xstrdup(cur(p)->text);
+            mem->name = path_part_text(cur(p));
             advance(p);
             e = mem;
             continue;

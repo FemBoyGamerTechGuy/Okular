@@ -1,0 +1,72 @@
+type.text=1
+
+# sys_basics — the system module (0.13, spec §6.6): typed raw syscalls.
+# Everything here is a direct Linux x86-64 syscall surface: write to a
+# file descriptor, open/close/size a file, read into a byte buffer,
+# anonymous memory, exit codes. This is the floor the Okular-written
+# runtime (selfhost/runtime) is built on.
+
+const.O_RDONLY = 0
+const.O_WRONLY_CREAT_TRUNC = 577
+const.MODE_644 = 420
+
+function.main() -> number {
+    # 1. write bytes to stdout (fd 1) and count them
+    type.number n = sys.write(1, "sys.write works\n")
+    when (n == 16) {
+        write("count-ok")
+        print
+    }
+
+    # 2. create a file, size it, read it back through a byte buffer
+    type.number fd = sys.open("sys_basics.tmp", O_WRONLY_CREAT_TRUNC, MODE_644)
+    when (fd >= 0) {
+        type.number w = sys.write(fd, "roundtrip")
+        sys.close(fd)
+        write(w)
+        print
+
+        type.number rd = sys.open("sys_basics.tmp", O_RDONLY, 0)
+        type.number sz = sys.size(rd)
+        write(sz)
+        print
+
+        # read into a heap byte buffer, then inspect the bytes
+        type.ptr<type.byte> buf = sys.mmap(64)
+        when (buf != null) {
+            type.number got = sys.read(rd, buf, sz)
+            write(got)
+            print
+            type.text back = text.slice("xroundtripx", 1, 10)
+            when (got == sz) {
+                write("read-len-ok")
+                print
+            }
+            type.number ok = 1
+            loop (i from 0 until 9) {
+                when (buf[i] != text.byte_at(back, i)) {
+                    ok = 0
+                }
+            }
+            when (ok == 1) {
+                write("bytes-ok")
+                print
+            }
+        }
+        sys.close(rd)
+    }
+
+    # 3. mmap: writable anonymous memory
+    type.ptr<type.byte> m = sys.mmap(4096)
+    when (m != null) {
+        m[0] = 65
+        m[1] = 66
+        when (m[0] == 65 and m[1] == 66) {
+            write("mmap-ok")
+            print
+        }
+    }
+    return 0
+}
+
+main()

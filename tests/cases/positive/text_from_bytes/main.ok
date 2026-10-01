@@ -1,0 +1,33 @@
+type.text=1
+
+# text.from_bytes (0.13, spec §4.5): wrap a byte buffer as immutable text.
+# With sys.mmap this is also the bridge from raw memory into the text world.
+
+function.main() -> number {
+    type.ptr<type.byte> buf = sys.mmap(64)
+    when (buf == null) {
+        write("mmap-failed")
+        print
+        return 1
+    }
+    buf[0] = 104
+    buf[1] = 105
+    buf[2] = 33
+    type.text t = text.from_bytes(buf, 3)
+    write(t)
+    print
+    write(text.length(t))
+    print
+    when (t == "hi!") {
+        write("eq-ok")
+        print
+    }
+    write(text.byte_at(t, 2))
+    print
+    type.text s = text.slice(t, 1, 3)
+    write(s)
+    print
+    return 0
+}
+
+main()

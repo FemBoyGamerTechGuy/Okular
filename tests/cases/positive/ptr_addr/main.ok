@@ -1,0 +1,36 @@
+type.text=1
+
+# ptr.to_number / number.to_ptr (0.13, spec §12): the explicit address-bits
+# escape hatch — round-trips, null, byte-level inspection of a number.
+
+function.main() -> number {
+    type.ptr<type.number> p = alloc<type.number>(4)
+    p[0] = 42
+    type.number addr = ptr.to_number(p)
+    type.ptr<type.byte> b = number.to_ptr(addr)
+    # little-endian: the low byte of 42 is 42
+    write(b[0])
+    print
+    when (ptr.to_number(p) == addr) {
+        write("roundtrip-ok")
+        print
+    }
+    when (ptr.to_number(null) == 0) {
+        write("null-ok")
+        print
+    }
+    # rebuild a number pointer from its address and read through it
+    type.ptr<type.number> q = alloc<type.number>(1)
+    q[0] = 7
+    type.number qaddr = ptr.to_number(q)
+    type.ptr<type.byte> qb = number.to_ptr(qaddr)
+    # write a new low byte through the byte view: 7 -> 263? no: low byte
+    qb[0] = 9
+    write(q[0])
+    print
+    release(p)
+    release(q)
+    return 0
+}
+
+main()

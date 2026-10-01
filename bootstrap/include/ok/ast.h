@@ -25,7 +25,7 @@ typedef enum {
     A_ALLOC,         /* alloc<T>(count) (a = count, otype = ptr<T>) */
     A_MEMBER,        /* base.field — struct field access on a non-path base (spec §8.3) */
     A_TEXTOP,        /* text.length / text.byte_at / text.slice builtin (0.9, spec §4.5); fvalue = TextOp */
-    A_FSOP,          /* fs.read / fs.write / fs.exists builtin (0.10, spec §6.4); fvalue = FsOp */
+    A_FSOP,          /* fs.read / fs.save / fs.exists builtin (0.10, spec §6.4); fvalue = FsOp */
     A_ENVOP,         /* env.arg_count / env.arg builtin (0.12, spec §6.5); fvalue = EnvOp */
     /* statements */
     A_VARDECL,       /* type.<T> name = init (init may be A_ARRAYLIT) */
@@ -49,6 +49,10 @@ typedef enum {
     A_CONSTDECL,     /* const.name = expr — folded at compile time (0.8, spec §8.1) */
     A_FUNC,          /* function.<name>(params) -> ret { body } */
     A_FILE,          /* one parsed .ok file */
+    /* sema-created (never in a parsed tree): the machine AST protocol's
+     * kind numbers are append-only — selfhost/parser's N_* table mirrors
+     * them, so new kinds MUST be added at the end, never inserted */
+    A_SYSOP,         /* sys.* system-call builtin (0.13, spec §6.6); fvalue = SysOp */
 } NodeKind;
 
 typedef enum {
@@ -63,13 +67,26 @@ typedef enum {
 typedef enum { UN_NEG, UN_NOT, UN_ADDR, UN_DEREF, UN_BNOT } UnOp;
 
 /* text builtin sub-operations (A_TEXTOP, 0.9 spec §4.5) */
-typedef enum { TOP_LEN, TOP_BYTE, TOP_SLICE } TextOp;
+typedef enum { TOP_LEN, TOP_BYTE, TOP_SLICE, TOP_FROMBYTES } TextOp;
 
 /* file builtin sub-operations (A_FSOP, 0.10 spec §6.4) */
 typedef enum { FSOP_READ, FSOP_WRITE, FSOP_EXISTS } FsOp;
 
 /* environment builtin sub-operations (A_ENVOP, 0.12 spec §6.5) */
 typedef enum { ENVOP_ARGC, ENVOP_ARG } EnvOp;
+
+/* system builtin sub-operations (A_SYSOP, 0.13 spec §6.6): the typed raw
+ * syscall surface — the floor the Okular-written runtime is built on */
+typedef enum {
+    SYSOP_WRITE,     /* sys.write(fd, buf)            -> number  */
+    SYSOP_READ,      /* sys.read(fd, buf, len)        -> number  */
+    SYSOP_OPEN,      /* sys.open(path, flags, mode)   -> number  */
+    SYSOP_CLOSE,     /* sys.close(fd)                 -> number  */
+    SYSOP_SIZE,      /* sys.size(fd)                  -> number  */
+    SYSOP_MMAP,      /* sys.mmap(len)                 -> ptr<byte> */
+    SYSOP_EXIT,      /* sys.exit(code)                -> (never)  */
+    SYSOP_CHMOD,     /* sys.chmod(path, mode)         -> number  */
+} SysOp;
 
 typedef struct Node Node;
 

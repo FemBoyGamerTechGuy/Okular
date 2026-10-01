@@ -461,6 +461,20 @@ function.kind_name(number.k) -> text {
     return "unknown token"
 }
 
+
+# ---- keyword path members (spec §6.6, 0.13) ----
+#
+# Keywords are legal dotted-path members (`sys.write`, `mod.print`) except
+# `end`, the column terminator. Keyword tokens carry their source span, so
+# the spelling comes straight from the buffer.
+
+function.is_path_part(number.k) -> bool {
+    when (k == toks.K_IDENT) { return true }
+    when (k == toks.K_END) { return false }
+    when (k >= toks.K_TYPE and k <= toks.K_CONST) { return true }
+    return false
+}
+
 # expect a kind; on mismatch record a diagnostic and return false.
 # The `>>` split (spec §9): when a type-argument close needs `>` and the
 # current token is `>>`, one `>` is consumed and the other stays current.
@@ -866,7 +880,7 @@ function.parse_primary() -> type.ptr<type.Node> {
         parts[0] = toks.spelling(pos)
         pn = 1
         advance()
-        loop (is_at(toks.K_DOT) and at_kind(1) == toks.K_IDENT) {
+        loop (is_at(toks.K_DOT) and is_path_part(at_kind(1))) {
             advance()
             when (pn == pcap) {
                 type.ptr<type.text> np = alloc<type.text>(pcap * 2)
@@ -968,7 +982,7 @@ function.parse_postfix() -> type.ptr<type.Node> {
             ix.b = idx
             e = ix
         }
-        else when (is_at(toks.K_DOT) and at_kind(1) == toks.K_IDENT) {
+        else when (is_at(toks.K_DOT) and is_path_part(at_kind(1))) {
             type.number tline = cur_line()
             type.number tcol = cur_col()
             advance()

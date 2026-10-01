@@ -110,6 +110,68 @@ static i64 sys_fstat(int fd, struct linux_stat *buf) {
     return ret;
 }
 
+/* ---------------- system builtins (0.13, spec §6.6) ----------------
+ *
+ * The typed raw-syscall floor: everything else in this shim (formatting,
+ * conversion, the allocator, fs/env) is expressible in Okular on top of
+ * these. Each wrapper is one syscall plus ABI adaptation; no logic. */
+
+static i64 sys_chmod_(const char *path, int mode) {
+    i64 ret;
+    __asm__ volatile ("syscall"
+                      : "=a"(ret)
+                      : "a"(90L), "D"(path), "S"((u64)(i64)mode)
+                      : "rcx", "r11", "memory");
+    return ret;
+}
+
+i64 rt_sys_write(i64 fd, const u8 *p, u64 len) {
+    return sys_write((int)fd, p, len);
+}
+
+i64 rt_sys_read(i64 fd, u8 *p, u64 len) {
+    return sys_read((int)fd, p, len);
+}
+
+i64 rt_sys_open(const u8 *path, u64 plen, i64 flags, i64 mode) {
+    char buf[256];
+    if (plen >= sizeof buf) return -36; /* ENAMETOOLONG */
+    for (u64 i = 0; i < plen; i++) buf[i] = (char)path[i];
+    buf[plen] = 0;
+    return sys_open(buf, (int)flags, (int)mode);
+}
+
+i64 rt_sys_close(i64 fd) {
+    return sys_close((int)fd);
+}
+
+i64 rt_sys_size(i64 fd) {
+    struct linux_stat st;
+    if (sys_fstat((int)fd, &st) < 0) return -1;
+    return (i64)st.st_size;
+}
+
+static i64 sys_mmap(u64 len);
+
+u8 *rt_sys_mmap(u64 len) {
+    if (len == 0) return 0;
+    i64 p = sys_mmap(len);
+    if (p < 0 && p > -4096) return 0;
+    return (u8 *)(u64)p;
+}
+
+void rt_sys_exit(i64 code) {
+    sys_exit((int)code);
+}
+
+i64 rt_sys_chmod(const u8 *path, u64 plen, i64 mode) {
+    char buf[256];
+    if (plen >= sizeof buf) return -36;
+    for (u64 i = 0; i < plen; i++) buf[i] = (char)path[i];
+    buf[plen] = 0;
+    return sys_chmod_(buf, (int)mode);
+}
+
 void rt_init(long argc, char **argv) {
     /* buffers live in .bss: zeroed by the loader. The kernel hands _start
      * the argument vector on the stack; rt_start.s forwards it here
@@ -444,7 +506,7 @@ typedef struct FreeBlock {
 static FreeBlock *heap_free = 0;      /* sorted by address, ascending */
 static u64 heap_total = 0;
 
-static i64 sys_mmap(u64 len) {
+i64 sys_mmap(u64 len) {
     i64 ret;
     register i64 r10 __asm__("r10") = 0x22;   /* MAP_PRIVATE|MAP_ANONYMOUS */
     register i64 r8  __asm__("r8")  = -1;

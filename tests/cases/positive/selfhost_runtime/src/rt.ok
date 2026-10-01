@@ -1,0 +1,684 @@
+# rt.ok — the Okular-written runtime (M4, self-hosting).
+#
+# A faithful port of runtime/rt.c's LOGIC into Okular, built directly on
+# the system module (spec §6.6): the output buffer and its formatters,
+# the text arena, the conversion builtins, the heap allocator (free-list
+# with splitting and coalescing, the 0.13 block geometry), the file
+# operations, and the trap family. What remains in C is only the thin
+# syscall floor itself (rt.c's rt_sys_* wrappers) — every byte of policy
+# above it lives here.
+#
+# Layout conventions (mirroring rt.c, spec §12):
+#   heap block:  [ header 16B: size u64 ][ payload ... ]
+#   free block:  payload[0..8) = size (mirrors the header),
+#                payload[8..16) = next free block's address bits
+#   text arena:  bump region; text values are (ptr, len) views into it
+
+type.text=1
+
+const.MI_B = 1048576
+
+# ---- byte-level memory access over ptr<byte> ----
+
+function.rd64(ptr<byte>.p, number.off) -> number {
+    # little-endian u64: byte i weighs 256^i
+    type.number v = 0
+    type.number w = 1
+    loop (i from 0 until 8) {
+        v = v + p[off + i] * w
+        w = w * 256
+    }
+    return v
+}
+
+function.wr64(ptr<byte>.p, number.off, number.v) -> number {
+    # little-endian u64: byte i = (v / 256^i) & 0xFF
+    type.number w = 1
+    loop (i from 0 until 8) {
+        p[off + i] = number.to_uint8(v / w)
+        w = w * 256
+    }
+    return 0
+}
+
+function.pot(number.e) -> number {
+    # 2^e for 0..63 (byte assembly only)
+    type.number r = 1
+    loop (i from 0 until e) {
+        r = r * 2
+    }
+    return r
+}
+
+function.wr_byte(ptr<byte>.p, number.off, number.v) -> number {
+    p[off] = number.to_uint8(v)
+    return 0
+}
+
+# ---- the output buffer ----
+
+type.ptr<type.byte> out_buf = null
+type.number out_len = 0
+const.OUT_CAP = 65536
+
+function.out_ensure() -> number {
+    when (out_buf == null) {
+        out_buf = sys.mmap(OUT_CAP)
+        when (out_buf == null) {
+            raw_die()
+        }
+        out_len = 0
+    }
+    return 0
+}
+
+function.out_reserve(number.need) -> number {
+    when (out_len + need > OUT_CAP) {
+        trap("output buffer overflow (65536 bytes per line) — flush with `print` more often", 75)
+    }
+    return 0
+}
+
+function.put_byte(number.b) -> number {
+    out_ensure()
+    out_buf[out_len] = number.to_uint8(b)
+    out_len = out_len + 1
+    return 0
+}
+
+function.put_dec_digits(number.v) -> number {
+    # decimal digits of v, most-significant first
+    type.array<type.number, 20> tmp = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    type.number n = 0
+    loop (v > 0) {
+        tmp[n] = v - (v / 10) * 10
+        v = v / 10
+        n = n + 1
+    }
+    when (n == 0) {
+        put_byte(48)
+    }
+    loop (i from 0 until n) {
+        put_byte(48 + tmp[n - 1 - i])
+    }
+    return 0
+}
+
+# ---- write family (statement-level formatting into the buffer) ----
+
+function.write_number(number.v) -> number {
+    out_ensure()
+    when (v < 0) {
+        out_reserve(1)
+        put_byte(45)
+        # INT64_MIN's magnitude does not fit i64; its digits are fixed
+        when (0 - v < 0) {
+            write_text("9223372036854775808")
+            return 0
+        }
+        v = 0 - v
+    }
+    out_reserve(20)
+    put_dec_digits(v)
+    return 0
+}
+
+function.write_uint(number.v) -> number {
+    out_ensure()
+    out_reserve(20)
+    put_dec_digits(v)
+    return 0
+}
+
+function.write_text(text.s) -> number {
+    out_ensure()
+    type.number n = text.length(s)
+    out_reserve(n)
+    loop (i from 0 until n) {
+        put_byte(text.byte_at(s, i))
+    }
+    return 0
+}
+
+function.write_bool(number.b) -> number {
+    when (b != 0) {
+        write_text("true")
+    }
+    else {
+        write_text("false")
+    }
+    return 0
+}
+
+function.write_decimal(decimal.d) -> number {
+    # documented v0.1 approximation: 6 fractional digits, integer-only for
+    # |x| >= 1e15 (spec §11) — the same shape as rt.c
+    when (d != d) {
+        write_text("nan")
+        return 0
+    }
+    when (d < 0.0) {
+        write_text("-")
+        d = 0.0 - d
+    }
+    when (d != 0.0 and d * 2.0 == d) {
+        write_text("inf")
+        return 0
+    }
+    when (d >= 1000000000000000.0) {
+        write_number(decimal.to_number(d))
+        return 0
+    }
+    type.number ip = decimal.to_number(d)
+    type.decimal frac = d - number.to_decimal(ip)
+    type.number f6 = decimal.to_number(frac * 1000000.0 + 0.5)
+    when (f6 == 1000000) {
+        ip = ip + 1
+        f6 = 0
+    }
+    write_number(ip)
+    write_text(".")
+    # six fractional digits, zero padded
+    type.array<type.number, 6> dg = {0, 0, 0, 0, 0, 0}
+    loop (i from 0 until 6) {
+        dg[5 - i] = f6 - (f6 / 10) * 10
+        f6 = f6 / 10
+    }
+    out_reserve(6)
+    loop (i from 0 until 6) {
+        put_byte(48 + dg[i])
+    }
+    return 0
+}
+
+function.print_flush() -> number {
+    out_ensure()
+    when (out_len > 0) {
+        out_reserve(1)
+        put_byte(10)
+        type.text t = text.from_bytes(out_buf, out_len)
+        sys.write(1, t)
+        out_len = 0
+    }
+    return 0
+}
+
+# ---- the text arena ----
+
+type.ptr<type.byte> arena = null
+type.number arena_used = 0
+const.ARENA_CAP = 1048576
+
+function.arena_ensure() -> number {
+    when (arena == null) {
+        arena = sys.mmap(ARENA_CAP)
+        when (arena == null) {
+            raw_die()
+        }
+    }
+    return 0
+}
+
+function.arena_take(number.len) -> type.ptr<type.byte> {
+    arena_ensure()
+    when (arena_used + len > ARENA_CAP) {
+        trap("text arena exhausted (1 MiB of text per run)", 62)
+    }
+    type.ptr<type.byte> p = arena + arena_used
+    arena_used = arena_used + len
+    return p
+}
+
+# ---- to_text family (text results live in the arena) ----
+
+function.number_to_text(number.v) -> text {
+    # format into a scratch region of the arena, then view it
+    type.number save = out_len
+    out_ensure()
+    out_len = 0
+    write_number(v)
+    type.text t = text.from_bytes(out_buf, out_len)
+    out_len = save
+    return t
+}
+
+function.uint_to_text(number.v) -> text {
+    type.number save = out_len
+    out_ensure()
+    out_len = 0
+    write_uint(v)
+    type.text t = text.from_bytes(out_buf, out_len)
+    out_len = save
+    return t
+}
+
+function.decimal_to_text(decimal.d) -> text {
+    type.number save = out_len
+    out_ensure()
+    out_len = 0
+    write_decimal(d)
+    type.text t = text.from_bytes(out_buf, out_len)
+    out_len = save
+    return t
+}
+
+function.bool_to_text(number.b) -> text {
+    when (b != 0) {
+        return "true"
+    }
+    return "false"
+}
+
+# ---- parsing (text -> number / decimal) ----
+
+function.digit(number.b) -> number {
+    when (b >= 48 and b <= 57) {
+        return b - 48
+    }
+    return -1
+}
+
+function.text_to_number(text.s) -> number {
+    # strict [+-]?digits (the C parser's contract: loud failure)
+    type.number n = text.length(s)
+    type.number i = 0
+    type.number neg = 0
+    when (i < n) {
+        type.number b = text.byte_at(s, i)
+        when (b == 45) {
+            neg = 1
+            i = i + 1
+        }
+        else when (b == 43) {
+            i = i + 1
+        }
+    }
+    when (i >= n) {
+        text_number_trap(s)
+    }
+    type.number v = 0
+    type.number digits = 0
+    loop (i from i until n) {
+        type.number d = digit(text.byte_at(s, i))
+        when (d < 0) {
+            text_number_trap(s)
+        }
+        v = v * 10 + d
+        digits = digits + 1
+    }
+    when (digits == 0 or digits > 19) {
+        text_number_trap(s)
+    }
+    when (neg == 1) {
+        return 0 - v
+    }
+    return v
+}
+
+function.text_to_decimal(text.s) -> decimal {
+    # strict [+-]?digits[.digits] (the C parser's contract: loud failure)
+    type.number n = text.length(s)
+    type.number i = 0
+    type.number neg = 0
+    when (i < n) {
+        type.number b = text.byte_at(s, i)
+        when (b == 45) {
+            neg = 1
+            i = i + 1
+        }
+        else when (b == 43) {
+            i = i + 1
+        }
+    }
+    type.decimal ip = 0.0
+    type.number int_digits = 0
+    loop (i < n) {
+        type.number d = digit(text.byte_at(s, i))
+        when (d < 0) {
+            break
+        }
+        ip = ip * 10.0 + number.to_decimal(d)
+        int_digits = int_digits + 1
+        i = i + 1
+    }
+    when (int_digits == 0) {
+        text_number_trap(s)
+    }
+    type.decimal frac = 0.0
+    type.decimal scale = 0.1
+    when (i < n and text.byte_at(s, i) == 46) {
+        i = i + 1
+        type.number frac_digits = 0
+        loop (i < n) {
+            type.number d = digit(text.byte_at(s, i))
+            when (d < 0) {
+                break
+            }
+            frac = frac + number.to_decimal(d) * scale
+            scale = scale * 0.1
+            frac_digits = frac_digits + 1
+            i = i + 1
+        }
+        when (frac_digits == 0) {
+            text_number_trap(s)
+        }
+    }
+    when (i != n) {
+        text_number_trap(s)
+    }
+    type.decimal r = ip + frac
+    when (neg == 1) {
+        r = 0.0 - r
+    }
+    return r
+}
+
+function.text_number_trap(text.s) -> number {
+    write_err("okular runtime error: text is not a number: \"")
+    write_err(s)
+    write_err("\"\n")
+    sys.exit(76)
+    return 0
+}
+
+# ---- text equality and concatenation ----
+
+function.text_eq(text.a, text.b) -> number {
+    type.number la = text.length(a)
+    type.number lb = text.length(b)
+    when (la != lb) {
+        return 0
+    }
+    loop (i from 0 until la) {
+        when (text.byte_at(a, i) != text.byte_at(b, i)) {
+            return 0
+        }
+    }
+    return 1
+}
+
+function.concat(text.a, text.b) -> text {
+    type.number la = text.length(a)
+    type.number lb = text.length(b)
+    type.ptr<type.byte> dst = arena_take(la + lb)
+    loop (i from 0 until la) {
+        dst[i] = number.to_uint8(text.byte_at(a, i))
+    }
+    loop (i from 0 until lb) {
+        dst[la + i] = number.to_uint8(text.byte_at(b, i))
+    }
+    return text.from_bytes(dst, la + lb)
+}
+
+# ---- stderr + traps ----
+
+type.ptr<type.byte> err_buf = null
+
+function.write_err(text.s) -> number {
+    # stderr is unbuffered: one syscall per piece (traps are rare)
+    sys.write(2, s)
+    return 0
+}
+
+function.trap(text.msg, number.code) -> number {
+    write_err("okular runtime error: ")
+    write_err(msg)
+    write_err("\n")
+    sys.exit(code)
+    return 0
+}
+
+function.raw_die() -> number {
+    # startup failures have no buffers to lean on
+    sys.write(2, "okular runtime error: mmap failed")
+    sys.write(2, "\n")
+    sys.exit(74)
+    return 0
+}
+
+# ---- the heap allocator (spec §12; the 0.13 block geometry) ----
+#
+# Blocks: [ header 16B: payload size ][ payload ... ]; all sizes multiple
+# of 16. Free blocks carry (size, next) in their first 16 payload bytes;
+# the list is address-ordered, first-fit, with splitting and both-way
+# coalescing. Chunks come from sys.mmap (1 MiB growth unit).
+
+type.ptr<type.byte> heap_free = null
+type.number heap_total = 0
+const.CHUNK = 1048576
+const.ALIGN = 16
+
+function.block_hdr(ptr<byte>.data) -> type.ptr<type.byte> {
+    return data - 16
+}
+
+function.hdr_size(ptr<byte>.data) -> number {
+    return rd64(data - 16, 0)
+}
+
+function.set_hdr_size(ptr<byte>.data, number.size) -> number {
+    wr64(data - 16, 0, size)
+    return 0
+}
+
+function.next_free(ptr<byte>.fb) -> type.ptr<type.byte> {
+    return number.to_ptr(rd64(fb, 8))
+}
+
+function.set_next_free(ptr<byte>.fb, ptr<byte>.n) -> number {
+    wr64(fb, 8, ptr.to_number(n))
+    return 0
+}
+
+function.round16(number.bytes) -> number {
+    type.number r = bytes / 16
+    type.number rem = bytes - r * 16
+    when (rem > 0) {
+        r = r + 1
+    }
+    return r * 16
+}
+
+function.heap_grow(number.need) -> number {
+    # fresh chunk: [ header 16B ][ one free block spanning the rest ] —
+    # the header lives INSIDE the mapping (rt.c's convention), so the
+    # first block's payload starts at base+16
+    type.number len = need + 16 + CHUNK - 1
+    len = (len / CHUNK) * CHUNK
+    type.ptr<type.byte> base = sys.mmap(len)
+    when (base == null) {
+        trap("heap exhausted (mmap failed)", 29)
+    }
+    type.number payload = len - 16
+    type.ptr<type.byte> data = base + 16
+    # the fresh chunk is the highest address: append to the list tail
+    set_hdr_size(data, payload)
+    wr64(data, 0, payload)
+    set_next_free(data, null)
+    when (heap_free == null) {
+        heap_free = data
+    }
+    else {
+        type.ptr<type.byte> cur = heap_free
+        loop (next_free(cur) != null) {
+            cur = next_free(cur)
+        }
+        set_next_free(cur, data)
+    }
+    heap_total = heap_total + len
+    return 0
+}
+
+function.mem_alloc(number.bytes) -> type.ptr<type.byte> {
+    when (bytes == 0) {
+        trap("allocation of zero bytes", 25)
+    }
+    type.number need = round16(bytes)
+    type.ptr<type.byte> prev = null
+    type.ptr<type.byte> fb = heap_free
+    loop (fb != null) {
+        type.number size = rd64(fb, 0)
+        when (size >= need) {
+            type.number rem = size - need
+            when (rem >= 32) {
+                # split: allocate the front, free the tail. The tail is a
+                # NEW block: its 16-byte header sits AFTER this payload,
+                # at fb+need — never inside it (the 0.13 fix's geometry)
+                type.ptr<type.byte> tail = fb + need + 16
+                type.number tail_payload = rem - 16
+                set_hdr_size(tail, tail_payload)
+                wr64(tail, 0, tail_payload)
+                set_next_free(tail, next_free(fb))
+                when (prev == null) {
+                    heap_free = tail
+                }
+                else {
+                    set_next_free(prev, tail)
+                }
+                set_hdr_size(fb, need)
+                return fb
+            }
+            # close fit: hand out the whole block
+            type.ptr<type.byte> nxt = next_free(fb)
+            when (prev == null) {
+                heap_free = nxt
+            }
+            else {
+                set_next_free(prev, nxt)
+            }
+            set_hdr_size(fb, size)
+            return fb
+        }
+        prev = fb
+        fb = next_free(fb)
+    }
+    heap_grow(need + 16)
+    return mem_alloc(bytes)
+}
+
+function.mem_release(ptr<byte>.data) -> number {
+    when (data == null) {
+        return 0
+    }
+    type.number size = hdr_size(data)
+    when (size == 0 or size - (size / 16) * 16 != 0) {
+        trap("release of an invalid or already-released heap pointer", 47)
+    }
+    # poison the header; the free node carries the size from here on
+    set_hdr_size(data, 1)
+    wr64(data, 0, size)
+    # address-ordered insertion
+    type.ptr<type.byte> prev = null
+    type.ptr<type.byte> cur = heap_free
+    loop (cur != null and ptr.to_number(cur) < ptr.to_number(data)) {
+        prev = cur
+        cur = next_free(cur)
+    }
+    set_next_free(data, cur)
+    when (prev == null) {
+        heap_free = data
+    }
+    else {
+        set_next_free(prev, data)
+    }
+    # coalesce forward: data + 16 + size == the next free block
+    type.ptr<type.byte> nx = next_free(data)
+    when (nx != null and ptr.to_number(data) + 16 + size == ptr.to_number(nx)) {
+        type.number merged = size + 16 + rd64(nx, 0)
+        wr64(data, 0, merged)
+        set_next_free(data, next_free(nx))
+        # the header stays poisoned (=1): double-release detection
+    }
+    # coalesce backward
+    type.ptr<type.byte> pv = null
+    type.ptr<type.byte> walk = heap_free
+    loop (walk != null and walk != data) {
+        pv = walk
+        walk = next_free(walk)
+    }
+    when (pv != null and ptr.to_number(pv) + 16 + rd64(pv, 0) == ptr.to_number(data)) {
+        type.number merged = rd64(pv, 0) + 16 + rd64(data, 0)
+        wr64(pv, 0, merged)
+        set_next_free(pv, next_free(data))
+    }
+    return 0
+}
+
+# ---- file operations (fs.*, built on the system module) ----
+
+const.O_RDONLY = 0
+const.O_WRONLY_CREAT_TRUNC = 577
+const.MODE_644 = 420
+
+function.fs_read(text.path) -> text {
+    type.number fd = sys.open(path, O_RDONLY, 0)
+    when (fd < 0) {
+        fs_trap("cannot open file: ", path, fd)
+    }
+    type.number size = sys.size(fd)
+    when (size < 0) {
+        sys.close(fd)
+        fs_trap("cannot stat file: ", path, -1)
+    }
+    type.ptr<type.byte> dst = arena_take(size)
+    type.number got = 0
+    loop (got < size) {
+        type.number n = sys.read(fd, dst + got, size - got)
+        when (n < 0) {
+            sys.close(fd)
+            fs_trap("cannot read file: ", path, n)
+        }
+        when (n == 0) {
+            break
+        }
+        got = got + n
+    }
+    sys.close(fd)
+    return text.from_bytes(dst, got)
+}
+
+function.fs_save(text.path, text.data) -> number {
+    type.number fd = sys.open(path, O_WRONLY_CREAT_TRUNC, MODE_644)
+    when (fd < 0) {
+        fs_trap("cannot create file: ", path, fd)
+    }
+    type.number wrote = 0
+    type.number total = text.length(data)
+    loop (wrote < total) {
+        type.text piece = text.slice(data, wrote, total)
+        type.number n = sys.write(fd, piece)
+        when (n < 0) {
+            sys.close(fd)
+            fs_trap("cannot write file: ", path, n)
+        }
+        wrote = wrote + n
+    }
+    sys.close(fd)
+    return wrote
+}
+
+function.fs_exists(text.path) -> number {
+    type.number fd = sys.open(path, O_RDONLY, 0)
+    when (fd >= 0) {
+        sys.close(fd)
+        return 1
+    }
+    return 0
+}
+
+function.fs_trap(text.what, text.path, number.err) -> number {
+    write_err("okular runtime error: ")
+    write_err(what)
+    write_err(path)
+    write_err(" (")
+    type.number save = out_len
+    out_ensure()
+    out_len = 0
+    write_number(err)
+    type.text et = text.from_bytes(out_buf, out_len)
+    out_len = save
+    write_err(et)
+    write_err(")\n")
+    sys.exit(77)
+    return 0
+}

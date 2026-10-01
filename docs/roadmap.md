@@ -114,9 +114,12 @@ status table.
    ways: `--selfhost-verify` (byte-identical serializations on every
    positive case), full compile+run through the bridge (identical
    program output), and `tests/cases/flags/selfhost_parse`.
-4. **Runtime shim in Okular** — rewrite `runtime/rt.c` (write/print, traps,
-   allocator, text arena) as Okular code compiled by the bootstrap
-   compiler, replacing the freestanding C shim.
+4. ~~**Runtime shim in Okular**~~ **done in 0.13**: `selfhost/runtime` —
+   output formatters, text arena, conversions, the free-list allocator,
+   and file operations, all in Okular on the `sys.*` syscall floor
+   (spec §23). Proven by `tests/cases/positive/selfhost_runtime` (25
+   subsystem checks). The C shim keeps only the raw syscall wrappers;
+   flipping generated code to call `ok_rt_*` happens with the M5 driver.
 5. **Own integrated assembler** — the last external tool dependency
    (`as`/`ld`) moves in-house (spec §15).
 6. **Sema in Okular** — the type checker (collect + check) is the largest
