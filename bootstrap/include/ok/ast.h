@@ -86,6 +86,7 @@ typedef enum {
     SYSOP_MMAP,      /* sys.mmap(len)                 -> ptr<byte> */
     SYSOP_EXIT,      /* sys.exit(code)                -> (never)  */
     SYSOP_CHMOD,     /* sys.chmod(path, mode)         -> number  */
+    SYSOP_MKDIR,     /* sys.mkdir(path, mode)         -> number  (0.14) */
 } SysOp;
 
 typedef struct Node Node;

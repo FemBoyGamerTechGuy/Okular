@@ -41,9 +41,9 @@ status table.
 | M1 | C bootstrap compiler; hello-world and small programs run natively | **done (0.1)** |
 | M2 | Language covers substantial normal programs | in progress — arrays (0.2), fixed-width integers (0.3), pointers + heap (0.4), structs (0.5), text conversions (0.6), unions (0.7), constants + type.auto (0.8), text operations (0.9), file builtins (0.10), bitwise + shifts (0.11), env builtins (0.12) |
 | M3 | Okular can compile portions of the compiler itself | **done (0.13)** — `selfhost/lexer` and now `selfhost/parser` compile real compiler components |
-| M4 | Compiler components rewritten in Okular (lexer, parser, runtime shim) | **underway (0.13)** — `--selfhost-lex` (tokenizer bridge) and `--selfhost-parse` (parser bridge, machine AST protocol) both work and are differentially verified on all positive cases; the C lexer/parser remain the default |
-| M5 | Okular compiler builds itself | not started |
-| M6 | C bootstrap no longer required | not started |
+| M4 | Compiler components rewritten in Okular (lexer, parser, runtime shim) | **done (0.13)** — lexer, parser, and runtime all written in Okular, differentially verified on every positive case |
+| M5 | Okular compiler builds itself | **done (0.14)** — `selfhost/compiler` is the complete compiler in Okular (~13.9k lines: toks, parser, sema, ir, emit, elf, rt); stage 0->1->2->3 bootstrap chain verified with a byte-identical fixed point, and the self-built compiler passes the full 187-case differential suite (`make bootstrap-chain`) |
+| M6 | C bootstrap no longer required | next — strip the C compiler out of the normal build/run path |
 | M7 | C bootstrap removed from repository | not started |
 
 ## M2 work items, in dependency order
@@ -128,11 +128,18 @@ status table.
    suite's new `exec_after` chain). No `as`, no `ld` anywhere in that
    chain. Growing this emitter into the full backend IS the M5 backend
    work; the C bootstrap keeps `as`/`ld` until it retires.
-6. **Sema in Okular** — the type checker (collect + check) is the largest
-   remaining C component; the M5 self-build needs it. Requires growing
-   the machine protocol from AST records to symbol/type records, or (the
-   planned route) running sema as Okular code against in-memory trees
-   with no bridge at all.
+6. ~~**Sema in Okular**~~ **done in 0.14**: `selfhost/compiler/src/sema.ok`
+   (~4.7k lines) — the full type checker (collect + check) running as
+   Okular code against in-memory trees, no bridge at all, plus `ir.ok`
+   (IR build + constant folding), `emit.ok` (the complete x86-64 backend:
+   every IR instruction, the stack machine, calls with the rbx alignment
+   discipline, inline syscalls with frame-resident path buffers, trap
+   sites), `elf.ok` (native ELF64 emission with ABS64/REL32 fixups), and
+   the `main.ok` driver (`okc main.ok` — project load, sema, IR, emit).
+   Verified by the M5 bootstrap chain and the 187-case differential
+   suite; one real backend defect was found and fixed this way (chmod
+   trap labels colliding with IR labels — `sys_chmod_label_trap`
+   regression).
 
 ## Deliberate non-goals
 

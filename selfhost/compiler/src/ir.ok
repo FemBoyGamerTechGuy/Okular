@@ -1,0 +1,2214 @@
+# ir.ok — typed stack IR construction + constant folding, written in Okular (M5).
+#
+# A port of bootstrap/src/ir.c: every instruction's effect on the operand
+# stack is known, so the backend never guesses. ir_fold is the first
+# optimization pass (spec §15).
+
+# ---- IR instruction kinds (ir.h IrKind) ----
+const.I_CONST_INT = 0
+const.I_CONST_DEC = 1
+const.I_CONST_BOOL = 2
+const.I_CONST_TEXT = 3
+const.I_TEXT_LEN = 4
+const.I_TEXT_BYTE = 5
+const.I_TEXT_SLICE = 6
+const.I_TEXT_FROMBYTES = 7
+const.I_FS_READ = 8
+const.I_FS_WRITE = 9
+const.I_FS_EXISTS = 10
+const.I_ENV_ARGC = 11
+const.I_ENV_ARG = 12
+const.I_SYSOP = 13
+const.I_LOAD_LOCAL = 14
+const.I_STORE_LOCAL = 15
+const.I_LOAD_GLOBAL = 16
+const.I_STORE_GLOBAL = 17
+const.I_CONV = 18
+const.I_BINOP = 19
+const.I_UNOP = 20
+const.I_LABEL = 21
+const.I_JMP = 22
+const.I_JMPF = 23
+const.I_CALL = 24
+const.I_WRITE = 25
+const.I_PRINT = 26
+const.I_RETURN = 27
+const.I_POP = 28
+const.I_ADDR_LOCAL = 29
+const.I_ADDR_GLOBAL = 30
+const.I_INDEX = 31
+const.I_LOAD_AT = 32
+const.I_STORE_AT = 33
+const.I_COPY = 34
+const.I_ALLOC = 35
+const.I_RELEASE = 36
+const.I_PTRCHK = 37
+const.I_PTR_SCALE = 38
+const.I_PTR_DIFF = 39
+const.I_ADDOFF = 40
+
+struct.IrInst = {
+    type.number kind
+    type.ptr<type.Ty> ty
+    type.ptr<type.Ty> ty2
+    type.number i
+    type.decimal d
+    type.number b
+    type.number slot
+    type.number label
+    type.number text_idx
+    type.number op
+    type.number uop
+    type.ptr<type.FuncInfo> finfo
+    type.ptr<type.Symbol> sym
+    type.number nargs
+    type.number line
+    type.number col
+}.end
+
+struct.IrSlot = {
+    type.ptr<type.Symbol> sym
+    type.ptr<type.Ty> ty
+}.end
+
+struct.IrFunc = {
+    type.ptr<type.FuncInfo> fi
+    type.ptr<type.ptr<type.IrInst>> insts
+    type.number n
+    type.number cap
+    type.ptr<type.ptr<type.IrSlot>> slots
+    type.number nslots
+    type.number slots_cap
+    type.number nlabels
+}.end
+
+struct.IrModule = {
+    type.ptr<type.Mod> mod
+    type.ptr<type.ptr<type.IrFunc>> funcs
+    type.number nfuncs
+    type.number funcs_cap
+    type.ptr<type.ptr<type.Symbol>> globals
+    type.number nglobals
+    type.number globals_cap
+    type.ptr<type.text> texts
+    type.number ntexts
+    type.number texts_cap
+}.end
+
+function.new_irfunc(type.ptr<type.FuncInfo>.fi) -> type.ptr<type.IrFunc> {
+    type.ptr<type.IrFunc> f = alloc<type.IrFunc>(1)
+    f.fi = fi
+    f.insts = null
+    f.n = 0
+    f.cap = 0
+    f.slots = null
+    f.nslots = 0
+    f.slots_cap = 0
+    f.nlabels = 0
+    return f
+}
+
+# ---- the shared module list (built by ir_build_module per module) ----
+
+type.ptr<type.ptr<type.IrModule>> ir_mods = null
+type.number n_ir_mods = 0
+type.number ir_mods_cap = 0
+
+function.push_ir_mod(type.ptr<type.IrModule>.m) -> number {
+    when (n_ir_mods == ir_mods_cap) {
+        type.number newcap = 8
+        when (ir_mods_cap > 0) {
+            newcap = ir_mods_cap * 2
+        }
+        type.ptr<type.ptr<type.IrModule>> nm = alloc<type.ptr<type.IrModule>>(newcap)
+        loop (i from 0 until n_ir_mods) {
+            nm[i] = ir_mods[i]
+        }
+        type.ptr<type.ptr<type.IrModule>> old = ir_mods
+        ir_mods = nm
+        ir_mods_cap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    ir_mods[n_ir_mods] = m
+    n_ir_mods = n_ir_mods + 1
+    return 0
+}
+
+# ---- per-function build state ----
+
+type.ptr<type.IrFunc> cf = null      # current function
+type.ptr<type.IrModule> cm = null    # current module
+
+function.emit(type.ptr<type.IrInst>.inst) -> number {
+    when (cf.n == cf.cap) {
+        type.number newcap = 64
+        when (cf.cap > 0) {
+            newcap = cf.cap * 2
+        }
+        type.ptr<type.ptr<type.IrInst>> ni = alloc<type.ptr<type.IrInst>>(newcap)
+        loop (i from 0 until cf.n) {
+            ni[i] = cf.insts[i]
+        }
+        type.ptr<type.ptr<type.IrInst>> old = cf.insts
+        cf.insts = ni
+        cf.cap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    cf.insts[cf.n] = inst
+    cf.n = cf.n + 1
+    return 0
+}
+
+function.new_label() -> number {
+    cf.nlabels = cf.nlabels + 1
+    return cf.nlabels - 1
+}
+
+function.slot_for(type.ptr<type.Symbol>.sym) -> number {
+    loop (i from 0 until cf.nslots) {
+        when (cf.slots[i].sym == sym) {
+            return i
+        }
+    }
+    when (cf.nslots == cf.slots_cap) {
+        type.number newcap = 8
+        when (cf.slots_cap > 0) {
+            newcap = cf.slots_cap * 2
+        }
+        type.ptr<type.ptr<type.IrSlot>> ns = alloc<type.ptr<type.IrSlot>>(newcap)
+        loop (i from 0 until cf.nslots) {
+            ns[i] = cf.slots[i]
+        }
+        type.ptr<type.ptr<type.IrSlot>> old = cf.slots
+        cf.slots = ns
+        cf.slots_cap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    type.ptr<type.IrSlot> sl = alloc<type.IrSlot>(1)
+    sl.sym = sym
+    sl.ty = sym.ty
+    cf.slots[cf.nslots] = sl
+    cf.nslots = cf.nslots + 1
+    return cf.nslots - 1
+}
+
+function.intern_text(text.bytes) -> number {
+    loop (i from 0 until cm.ntexts) {
+        when (cm.texts[i] == bytes) {
+            return i
+        }
+    }
+    when (cm.ntexts == cm.texts_cap) {
+        type.number newcap = 8
+        when (cm.texts_cap > 0) {
+            newcap = cm.texts_cap * 2
+        }
+        type.ptr<type.text> nt = alloc<type.text>(newcap)
+        loop (i from 0 until cm.ntexts) {
+            nt[i] = cm.texts[i]
+        }
+        type.ptr<type.text> old = cm.texts
+        cm.texts = nt
+        cm.texts_cap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    cm.texts[cm.ntexts] = bytes
+    cm.ntexts = cm.ntexts + 1
+    return cm.ntexts - 1
+}
+
+# ---- constructors ----
+
+function.mkinst(number.kind, number.line, number.col) -> type.ptr<type.IrInst> {
+    type.ptr<type.IrInst> in = alloc<type.IrInst>(1)
+    in.kind = kind
+    in.ty = null
+    in.ty2 = null
+    in.i = 0
+    in.d = 0.0
+    in.b = 0
+    in.slot = 0
+    in.label = 0
+    in.text_idx = 0
+    in.op = 0
+    in.uop = 0
+    in.finfo = null
+    in.sym = null
+    in.nargs = 0
+    in.line = line
+    in.col = col
+    return in
+}
+
+# ---------------- expression lowering ----------------
+
+# lower a rewritten member chain's ADDRESS (spec §12)
+function.build_member_addr(type.ptr<type.Node>.m) -> number {
+    build_expr(m.a)
+    when (m.autoderef == 1) {
+        type.ptr<type.IrInst> chk = mkinst(I_PTRCHK, m.line, m.col)
+        chk.ty = m.a.rtype
+        emit(chk)
+    }
+    type.ptr<type.IrInst> off = mkinst(I_ADDOFF, m.line, m.col)
+    off.i = m.offset
+    emit(off)
+    return 0
+}
+
+# build operand and convert to `want` when a conversion exists
+function.build_operand_conv(type.ptr<type.Node>.operand, type.ptr<type.Ty>.want) -> number {
+    build_expr(operand)
+    type.ptr<type.Ty> have = operand.rtype
+    when (have == null or have == want) {
+        return 0
+    }
+    when (sema.convertible(have, want) == false) {
+        return 0
+    }
+    type.ptr<type.IrInst> inst = mkinst(I_CONV, operand.line, operand.col)
+    inst.ty = have
+    inst.ty2 = want
+    emit(inst)
+    return 0
+}
+
+function.build_store(type.ptr<type.Symbol>.sym) -> number {
+    type.ptr<type.IrInst> inst = mkinst(0, sym.line, sym.col)
+    when (sym.is_global == 1) {
+        inst.kind = I_STORE_GLOBAL
+        inst.sym = sym
+        inst.ty = sym.ty
+    }
+    else {
+        inst.kind = I_STORE_LOCAL
+        inst.slot = slot_for(sym)
+        inst.ty = sym.ty
+    }
+    emit(inst)
+    return 0
+}
+
+function.build_addr(type.ptr<type.Symbol>.sym, number.offset) -> number {
+    type.ptr<type.IrInst> inst = mkinst(0, sym.line, sym.col)
+    inst.i = offset
+    when (sym.is_global == 1) {
+        inst.kind = I_ADDR_GLOBAL
+        inst.sym = sym
+        inst.ty = sym.ty
+    }
+    else {
+        inst.kind = I_ADDR_LOCAL
+        inst.slot = slot_for(sym)
+        inst.ty = sym.ty
+    }
+    emit(inst)
+    return 0
+}
+
+# initialize an array variable's storage from a literal (spec §8.4)
+function.build_arraylit(type.ptr<type.Node>.lit, type.ptr<type.Symbol>.into, number.base_off, type.ptr<type.Ty>.atype) -> number {
+    type.number lim = lit.nargs
+    when (lim > atype.count) {
+        lim = atype.count
+    }
+    loop (k from 0 until lim) {
+        type.ptr<type.Node> el = lit.args[k]
+        type.number off = base_off + k * sema.ty_bytes(atype.elem)
+        when (el.kind == parser.N_ARRAYLIT) {
+            when (atype.elem.form == sema.F_STRUCT) {
+                build_structlit(el, into, off, atype.elem)
+                continue
+            }
+            when (atype.elem.form == sema.F_UNION) {
+                build_unionlit(el, into, off, atype.elem)
+                continue
+            }
+            build_arraylit(el, into, off, atype.elem)
+            continue
+        }
+        when (atype.elem.form == sema.F_ARRAY or sema.is_record(atype.elem)) {
+            # whole array/struct value: copy its contents into the slot
+            build_addr(into, off)
+            build_expr(el)
+            type.ptr<type.IrInst> cp = mkinst(I_COPY, el.line, el.col)
+            cp.ty = atype.elem
+            cp.i = sema.ty_bytes(atype.elem)
+            emit(cp)
+            continue
+        }
+        build_addr(into, off)
+        build_operand_conv(el, atype.elem)
+        type.ptr<type.IrInst> st = mkinst(I_STORE_AT, el.line, el.col)
+        st.ty = atype.elem
+        emit(st)
+    }
+    return 0
+}
+
+# initialize a union variable's storage from a literal (spec §8.5)
+function.build_unionlit(type.ptr<type.Node>.lit, type.ptr<type.Symbol>.into, number.base_off, type.ptr<type.Ty>.ut) -> number {
+    when (lit.nargs != 1) {
+        return 0
+    }
+    type.number k = lit.offset
+    when (k >= ut.nfields) {
+        k = 0
+    }
+    type.ptr<type.Ty> ft = ut.ftypes[k]
+    type.ptr<type.Node> el = lit.args[0]
+    when (el.kind == parser.N_ARRAYLIT) {
+        when (ft.form == sema.F_ARRAY) {
+            return build_arraylit(el, into, base_off, ft)
+        }
+        when (ft.form == sema.F_STRUCT) {
+            return build_structlit(el, into, base_off, ft)
+        }
+        when (ft.form == sema.F_UNION) {
+            return build_unionlit(el, into, base_off, ft)
+        }
+        return 0
+    }
+    when (ft.form == sema.F_ARRAY or sema.is_record(ft)) {
+        build_addr(into, base_off)
+        build_expr(el)
+        type.ptr<type.IrInst> cp = mkinst(I_COPY, el.line, el.col)
+        cp.ty = ft
+        cp.i = sema.ty_bytes(ft)
+        emit(cp)
+        return 0
+    }
+    build_addr(into, base_off)
+    build_operand_conv(el, ft)
+    type.ptr<type.IrInst> st = mkinst(I_STORE_AT, el.line, el.col)
+    st.ty = ft
+    emit(st)
+    return 0
+}
+
+# initialize a struct variable's storage from a literal (spec §8.3)
+function.build_structlit(type.ptr<type.Node>.lit, type.ptr<type.Symbol>.into, number.base_off, type.ptr<type.Ty>.st) -> number {
+    when (st.form == sema.F_UNION) {
+        return build_unionlit(lit, into, base_off, st)
+    }
+    type.number lim = lit.nargs
+    when (lim > st.nfields) {
+        lim = st.nfields
+    }
+    loop (k from 0 until lim) {
+        type.ptr<type.Node> el = lit.args[k]
+        type.ptr<type.Ty> ft = st.ftypes[k]
+        type.number off = base_off + st.foffs[k]
+        when (el.kind == parser.N_ARRAYLIT) {
+            when (ft.form == sema.F_STRUCT) {
+                build_structlit(el, into, off, ft)
+                continue
+            }
+            when (ft.form == sema.F_UNION) {
+                build_unionlit(el, into, off, ft)
+                continue
+            }
+            when (ft.form == sema.F_ARRAY) {
+                build_arraylit(el, into, off, ft)
+                continue
+            }
+            continue
+        }
+        when (ft.form == sema.F_ARRAY or sema.is_record(ft)) {
+            build_addr(into, off)
+            build_expr(el)
+            type.ptr<type.IrInst> cp = mkinst(I_COPY, el.line, el.col)
+            cp.ty = ft
+            cp.i = sema.ty_bytes(ft)
+            emit(cp)
+            continue
+        }
+        build_addr(into, off)
+        build_operand_conv(el, ft)
+        type.ptr<type.IrInst> st2 = mkinst(I_STORE_AT, el.line, el.col)
+        st2.ty = ft
+        emit(st2)
+    }
+    return 0
+}
+
+function.build_expr(type.ptr<type.Node>.e) -> number {
+    when (e.kind == parser.N_INT) {
+        type.ptr<type.IrInst> inst = mkinst(I_CONST_INT, e.line, e.col)
+        inst.ty = sema.T_NUMBER
+        inst.i = e.ival
+        emit(inst)
+        return 0
+    }
+    when (e.kind == parser.N_DEC) {
+        type.ptr<type.IrInst> inst = mkinst(I_CONST_DEC, e.line, e.col)
+        inst.ty = sema.T_DECIMAL
+        inst.d = e.dval
+        emit(inst)
+        return 0
+    }
+    when (e.kind == parser.N_BOOL) {
+        type.ptr<type.IrInst> inst = mkinst(I_CONST_BOOL, e.line, e.col)
+        inst.ty = sema.T_BOOL
+        inst.b = e.bval
+        emit(inst)
+        return 0
+    }
+    when (e.kind == parser.N_TEXT) {
+        type.number idx = intern_text(e.tval)
+        type.ptr<type.IrInst> inst = mkinst(I_CONST_TEXT, e.line, e.col)
+        inst.ty = sema.T_TEXT
+        inst.text_idx = idx
+        emit(inst)
+        return 0
+    }
+    when (e.kind == parser.N_PATH) {
+        type.ptr<type.Symbol> s = e.sym
+        when (s == null) {
+            return 0
+        }
+        when (s.kind == sema.SYM_CONST) {
+            # constants inline their folded value (spec §8.1)
+            type.ptr<type.ConstVal> cv = s.cval
+            when (cv == null or cv.valid == 0) {
+                return 0
+            }
+            when (cv.ty == sema.T_TEXT) {
+                type.number idx = intern_text(cv.t)
+                type.ptr<type.IrInst> txt = mkinst(I_CONST_TEXT, e.line, e.col)
+                txt.ty = sema.T_TEXT
+                txt.text_idx = idx
+                emit(txt)
+            }
+            else when (cv.ty == sema.T_DECIMAL) {
+                type.ptr<type.IrInst> dec = mkinst(I_CONST_DEC, e.line, e.col)
+                dec.ty = sema.T_DECIMAL
+                dec.d = cv.d
+                emit(dec)
+            }
+            else when (cv.ty == sema.T_BOOL) {
+                type.ptr<type.IrInst> bo = mkinst(I_CONST_BOOL, e.line, e.col)
+                bo.ty = sema.T_BOOL
+                bo.b = cv.b
+                emit(bo)
+            }
+            else {
+                type.ptr<type.IrInst> in = mkinst(I_CONST_INT, e.line, e.col)
+                in.ty = cv.ty
+                in.i = cv.i
+                emit(in)
+            }
+            return 0
+        }
+        when (s.ty != null and s.ty.form == sema.F_ARRAY) {
+            # arrays evaluate to their storage address (spec §8.4)
+            build_addr(s, 0)
+            return 0
+        }
+        when (e.a != null) {
+            # sema rewrote a struct-field path into an A_MEMBER chain
+            build_expr(e.a)
+            return 0
+        }
+        when (sema.is_record(s.ty)) {
+            # structs and unions evaluate to their storage address
+            build_addr(s, 0)
+            return 0
+        }
+        type.ptr<type.IrInst> inst = mkinst(0, e.line, e.col)
+        when (s.is_global == 1) {
+            inst.kind = I_LOAD_GLOBAL
+            inst.sym = s
+            inst.ty = s.ty
+        }
+        else {
+            inst.kind = I_LOAD_LOCAL
+            inst.slot = slot_for(s)
+            inst.ty = s.ty
+        }
+        emit(inst)
+        return 0
+    }
+    when (e.kind == parser.N_INDEX) {
+        # base[index]: bounds-check + scale for arrays; unchecked for ptrs
+        type.ptr<type.Ty> base_ty = e.a.rtype
+        build_expr(e.a)
+        when (sema.is_ptr(base_ty)) {
+            type.ptr<type.IrInst> chk = mkinst(I_PTRCHK, e.line, e.col)
+            chk.ty = base_ty.elem
+            emit(chk)
+            build_expr(e.b)
+            type.ptr<type.IrInst> sc = mkinst(I_PTR_SCALE, e.line, e.col)
+            sc.ty = base_ty
+            emit(sc)
+        }
+        else {
+            build_expr(e.b)
+            type.ptr<type.IrInst> ix = mkinst(I_INDEX, e.line, e.col)
+            ix.ty = base_ty
+            emit(ix)
+        }
+        when (base_ty.elem.form != sema.F_ARRAY and sema.is_record(base_ty.elem) == false) {
+            type.ptr<type.IrInst> ld = mkinst(I_LOAD_AT, e.line, e.col)
+            ld.ty = base_ty.elem
+            emit(ld)
+        }
+        return 0
+    }
+    when (e.kind == parser.N_NULL) {
+        type.ptr<type.IrInst> inst = mkinst(I_CONST_INT, e.line, e.col)
+        inst.ty = sema.T_NULL
+        inst.i = 0
+        emit(inst)
+        return 0
+    }
+    when (e.kind == parser.N_ALLOC) {
+        # alloc<T>(count): count converts to number
+        build_operand_conv(e.a, sema.T_NUMBER)
+        type.ptr<type.IrInst> inst = mkinst(I_ALLOC, e.line, e.col)
+        inst.ty = e.otype.elem
+        emit(inst)
+        return 0
+    }
+    when (e.kind == parser.N_MEMBER) {
+        build_expr(e.a)
+        when (e.autoderef == 1) {
+            type.ptr<type.IrInst> chk = mkinst(I_PTRCHK, e.line, e.col)
+            chk.ty = e.a.rtype
+            emit(chk)
+        }
+        type.ptr<type.IrInst> off = mkinst(I_ADDOFF, e.line, e.col)
+        off.i = e.offset
+        emit(off)
+        when (e.rtype.form != sema.F_ARRAY and sema.is_record(e.rtype) == false) {
+            type.ptr<type.IrInst> ld = mkinst(I_LOAD_AT, e.line, e.col)
+            ld.ty = e.rtype
+            emit(ld)
+        }
+        return 0
+    }
+    when (e.kind == parser.N_TEXTOP) {
+        # text.length / byte_at / slice / from_bytes (spec §4.5)
+        when (e.fvalue == 3) {
+            loop (i from 0 until e.nargs) {
+                type.ptr<type.Node> arg = e.args[i]
+                when (i == 0) {
+                    build_expr(arg)
+                }
+                else {
+                    build_operand_conv(arg, sema.T_NUMBER)
+                }
+            }
+            type.ptr<type.IrInst> inst = mkinst(I_TEXT_FROMBYTES, e.line, e.col)
+            inst.ty = e.rtype
+            emit(inst)
+            return 0
+        }
+        loop (i from 0 until e.nargs) {
+            type.ptr<type.Node> arg = e.args[i]
+            when (i == 0) {
+                build_operand_conv(arg, sema.T_TEXT)
+            }
+            else {
+                build_operand_conv(arg, sema.T_NUMBER)
+            }
+        }
+        type.number k = I_TEXT_SLICE
+        when (e.fvalue == 0) {
+            k = I_TEXT_LEN
+        }
+        else when (e.fvalue == 1) {
+            k = I_TEXT_BYTE
+        }
+        type.ptr<type.IrInst> inst = mkinst(k, e.line, e.col)
+        inst.ty = e.rtype
+        emit(inst)
+        return 0
+    }
+    when (e.kind == parser.N_FSOP) {
+        loop (i from 0 until e.nargs) {
+            build_operand_conv(e.args[i], sema.T_TEXT)
+        }
+        type.number k = I_FS_EXISTS
+        when (e.fvalue == 0) {
+            k = I_FS_READ
+        }
+        else when (e.fvalue == 1) {
+            k = I_FS_WRITE
+        }
+        type.ptr<type.IrInst> inst = mkinst(k, e.line, e.col)
+        inst.ty = e.rtype
+        emit(inst)
+        return 0
+    }
+    when (e.kind == parser.N_ENVOP) {
+        when (e.fvalue == 1 and e.nargs > 0) {
+            build_operand_conv(e.args[0], sema.T_NUMBER)
+        }
+        type.ptr<type.IrInst> inst = mkinst(I_ENV_ARG, e.line, e.col)
+        when (e.fvalue == 0) {
+            inst.kind = I_ENV_ARGC
+        }
+        inst.ty = e.rtype
+        emit(inst)
+        return 0
+    }
+    when (e.kind == parser.N_SYSOP) {
+        loop (k from 0 until e.nargs) {
+            type.ptr<type.Node> arg = e.args[k]
+            when (arg.rtype != null and sema.is_integer(arg.rtype)) {
+                build_operand_conv(arg, sema.T_NUMBER)
+            }
+            else {
+                build_expr(arg)
+            }
+        }
+        type.ptr<type.IrInst> inst = mkinst(I_SYSOP, e.line, e.col)
+        inst.i = e.fvalue
+        inst.ty = e.rtype
+        emit(inst)
+        return 0
+    }
+    when (e.kind == parser.N_CONV) {
+        build_expr(e.a)
+        type.ptr<type.Ty> have = e.a.rtype
+        when (have != null and have != e.otype and sema.convertible(have, e.otype)) {
+            type.ptr<type.IrInst> inst = mkinst(I_CONV, e.line, e.col)
+            inst.ty = have
+            inst.ty2 = e.otype
+            emit(inst)
+        }
+        return 0
+    }
+    when (e.kind == parser.N_CALL) {
+        type.ptr<type.FuncInfo> fi = e.finfo
+        # arguments: evaluate right-to-left (ABI order)
+        type.number k = e.nargs
+        loop (k > 0) {
+            k = k - 1
+            type.ptr<type.Node> arg = e.args[k]
+            type.ptr<type.Ty> want = arg.rtype
+            when (k < fi.nparams) {
+                want = fi.ptypes[k]
+            }
+            build_operand_conv(arg, want)
+        }
+        type.ptr<type.IrInst> inst = mkinst(I_CALL, e.line, e.col)
+        inst.finfo = fi
+        inst.nargs = e.nargs
+        inst.ty = fi.ret
+        emit(inst)
+        return 0
+    }
+    when (e.kind == parser.N_WRITE) {
+        loop (k from 0 until e.nargs) {
+            build_expr(e.args[k])
+        }
+        return 0
+    }
+    when (e.kind == parser.N_BIN) {
+        # shifts lower differently: value keeps its type, count converts
+        when (e.op == parser.OP_SHL or e.op == parser.OP_SHR) {
+            type.ptr<type.Ty> vt = e.otype
+            when (vt == null or sema.is_integer(vt) == false) {
+                vt = e.a.rtype
+                when (vt == null or sema.is_integer(vt) == false) {
+                    vt = sema.T_NUMBER
+                }
+                e.otype = vt
+            }
+            build_operand_conv(e.a, vt)
+            build_operand_conv(e.b, sema.T_NUMBER)
+            type.ptr<type.IrInst> inst = mkinst(I_BINOP, e.line, e.col)
+            inst.op = e.op
+            inst.ty = vt
+            emit(inst)
+            return 0
+        }
+        # `and`/`or` short-circuit (0.13, spec §9)
+        when (e.op == parser.OP_AND or e.op == parser.OP_OR) {
+            when (e.a.kind == parser.N_BOOL and e.b.kind == parser.N_BOOL) {
+                type.number bv = 0
+                when (e.op == parser.OP_AND) {
+                    when (e.a.bval == 1 and e.b.bval == 1) {
+                        bv = 1
+                    }
+                }
+                else {
+                    when (e.a.bval == 1 or e.b.bval == 1) {
+                        bv = 1
+                    }
+                }
+                type.ptr<type.IrInst> kk = mkinst(I_CONST_BOOL, e.line, e.col)
+                kk.ty = sema.T_BOOL
+                kk.b = bv
+                emit(kk)
+                return 0
+            }
+            type.number l_end = new_label()
+            build_operand_conv(e.a, sema.T_BOOL)
+            when (e.op == parser.OP_AND) {
+                type.number l_false = new_label()
+                type.ptr<type.IrInst> jf = mkinst(I_JMPF, e.line, e.col)
+                jf.label = l_false
+                emit(jf)
+                build_operand_conv(e.b, sema.T_BOOL)
+                type.ptr<type.IrInst> j = mkinst(I_JMP, e.line, e.col)
+                j.label = l_end
+                emit(j)
+                type.ptr<type.IrInst> lf = mkinst(I_LABEL, 0, 0)
+                lf.label = l_false
+                emit(lf)
+                type.ptr<type.IrInst> z = mkinst(I_CONST_BOOL, 0, 0)
+                z.ty = sema.T_BOOL
+                z.b = 0
+                emit(z)
+            }
+            else {
+                type.number l_rhs = new_label()
+                type.ptr<type.IrInst> jf = mkinst(I_JMPF, e.line, e.col)
+                jf.label = l_rhs
+                emit(jf)
+                type.ptr<type.IrInst> t = mkinst(I_CONST_BOOL, 0, 0)
+                t.ty = sema.T_BOOL
+                t.b = 1
+                emit(t)
+                type.ptr<type.IrInst> j = mkinst(I_JMP, e.line, e.col)
+                j.label = l_end
+                emit(j)
+                type.ptr<type.IrInst> lr = mkinst(I_LABEL, 0, 0)
+                lr.label = l_rhs
+                emit(lr)
+                build_operand_conv(e.b, sema.T_BOOL)
+            }
+            type.ptr<type.IrInst> le = mkinst(I_LABEL, 0, 0)
+            le.label = l_end
+            emit(le)
+            return 0
+        }
+        # common operand type (sema stashed it on the node)
+        type.ptr<type.Ty> ot = e.otype
+        when (ot == null) {
+            ot = sema.ty_common(e.a.rtype, e.b.rtype)
+        }
+        when (ot == null) {
+            ot = sema.T_NUMBER
+            when (e.a.rtype != null) {
+                ot = e.a.rtype
+            }
+        }
+        when (sema.is_ptr(ot)) {
+            type.number ap = 0
+            type.number bp = 0
+            when (sema.is_ptr(e.a.rtype)) { ap = 1 }
+            when (sema.is_ptr(e.b.rtype)) { bp = 1 }
+            when (ap == 1 and bp == 1 and e.op == parser.OP_SUB) {
+                build_operand_conv(e.a, ot)
+                build_operand_conv(e.b, ot)
+                type.ptr<type.IrInst> pd = mkinst(I_PTR_DIFF, e.line, e.col)
+                pd.ty = ot
+                emit(pd)
+                return 0
+            }
+            when (ap == 1 and bp == 0) {
+                # p +/- n: pointer first
+                build_operand_conv(e.a, ot)
+                build_operand_conv(e.b, sema.T_NUMBER)
+            }
+            else when (bp == 1 and ap == 0 and e.op == parser.OP_ADD) {
+                # n + p commutes: push the pointer first
+                build_operand_conv(e.b, ot)
+                build_operand_conv(e.a, sema.T_NUMBER)
+            }
+            else {
+                build_operand_conv(e.a, ot)
+                build_operand_conv(e.b, ot)
+            }
+            type.ptr<type.IrInst> inst = mkinst(I_BINOP, e.line, e.col)
+            inst.op = e.op
+            inst.ty = ot
+            emit(inst)
+            return 0
+        }
+        build_operand_conv(e.a, ot)
+        build_operand_conv(e.b, ot)
+        type.ptr<type.IrInst> inst = mkinst(I_BINOP, e.line, e.col)
+        inst.op = e.op
+        inst.ty = ot
+        emit(inst)
+        return 0
+    }
+    when (e.kind == parser.N_UN) {
+        when (e.uop == parser.UN_ADDR) {
+            # &x — address-of (spec §12)
+            when (e.a.kind == parser.N_PATH and e.a.sym != null) {
+                when (e.a.a != null) {
+                    # rewritten field path `&var.f1.f2`
+                    build_member_addr(e.a.a)
+                }
+                else {
+                    build_addr(e.a.sym, 0)
+                }
+                return 0
+            }
+            when (e.a.kind == parser.N_INDEX) {
+                type.ptr<type.Ty> base_ty = e.a.a.rtype
+                when (sema.is_ptr(base_ty)) {
+                    # &p[i]: null-check, scale, keep the address
+                    build_expr(e.a.a)
+                    type.ptr<type.IrInst> chk = mkinst(I_PTRCHK, e.line, e.col)
+                    chk.ty = base_ty.elem
+                    emit(chk)
+                    build_expr(e.a.b)
+                    type.ptr<type.IrInst> sc = mkinst(I_PTR_SCALE, e.line, e.col)
+                    sc.ty = base_ty
+                    emit(sc)
+                }
+                else {
+                    # &xs[i]: bounds-checked element address
+                    build_expr(e.a.a)
+                    build_expr(e.a.b)
+                    type.ptr<type.IrInst> ix = mkinst(I_INDEX, e.line, e.col)
+                    ix.ty = base_ty
+                    emit(ix)
+                }
+                return 0
+            }
+            when (e.a.kind == parser.N_UN and e.a.uop == parser.UN_DEREF) {
+                build_expr(e.a.a)
+                return 0
+            }
+            return 0
+        }
+        when (e.uop == parser.UN_DEREF) {
+            # *p — dereference: null-check then load
+            type.ptr<type.Ty> pt = e.a.rtype
+            build_expr(e.a)
+            type.ptr<type.IrInst> chk = mkinst(I_PTRCHK, e.line, e.col)
+            chk.ty = pt.elem
+            emit(chk)
+            when (pt.elem.form != sema.F_ARRAY) {
+                type.ptr<type.IrInst> ld = mkinst(I_LOAD_AT, e.line, e.col)
+                ld.ty = pt.elem
+                emit(ld)
+            }
+            return 0
+        }
+        build_expr(e.a)
+        type.ptr<type.IrInst> inst = mkinst(I_UNOP, e.line, e.col)
+        inst.uop = e.uop
+        inst.ty = e.a.rtype
+        emit(inst)
+        return 0
+    }
+    return 0
+}
+
+# ---------------- statement lowering ----------------
+
+# loop context stack
+type.ptr<type.number> loop_stack = null
+type.number loop_n = 0
+type.number loop_cap = 0
+type.ptr<type.number> loop_break = null
+type.ptr<type.number> loop_cont = null
+
+function.push_loop(number.lbl_break, number.lbl_cont) -> number {
+    when (loop_n == loop_cap) {
+        type.number newcap = 8
+        when (loop_cap > 0) {
+            newcap = loop_cap * 2
+        }
+        type.ptr<type.number> nb = alloc<type.number>(newcap)
+        type.ptr<type.number> nc = alloc<type.number>(newcap)
+        loop (i from 0 until loop_n) {
+            nb[i] = loop_break[i]
+            nc[i] = loop_cont[i]
+        }
+        type.ptr<type.number> ob = loop_break
+        type.ptr<type.number> oc = loop_cont
+        loop_break = nb
+        loop_cont = nc
+        loop_cap = newcap
+        when (ob != null) {
+            release(ob)
+            release(oc)
+        }
+    }
+    loop_break[loop_n] = lbl_break
+    loop_cont[loop_n] = lbl_cont
+    loop_n = loop_n + 1
+    return 0
+}
+
+function.pop_loop() -> number {
+    when (loop_n > 0) {
+        loop_n = loop_n - 1
+    }
+    return 0
+}
+
+type.ptr<type.FuncInfo> stmt_fi = null
+
+function.build_stmt_list(type.ptr<type.ptr<type.Node>>.body, number.n) -> number {
+    loop (i from 0 until n) {
+        build_stmt(body[i])
+    }
+    return 0
+}
+
+function.build_stmt(type.ptr<type.Node>.s) -> number {
+    when (s.kind == parser.N_VARDECL) {
+        # local declaration: literals stored in place; aggregates copy
+        type.ptr<type.Symbol> sym = s.sym
+        when (sym == null) {
+            return 0
+        }
+        when (sym.ty.form == sema.F_ARRAY and s.a.kind == parser.N_ARRAYLIT) {
+            build_arraylit(s.a, sym, 0, sym.ty)
+            return 0
+        }
+        when (sema.is_record(sym.ty) and s.a.kind == parser.N_ARRAYLIT) {
+            build_structlit(s.a, sym, 0, sym.ty)
+            return 0
+        }
+        when (sym.ty.form == sema.F_ARRAY or sema.is_record(sym.ty)) {
+            build_addr(sym, 0)
+            build_expr(s.a)
+            type.ptr<type.IrInst> cp = mkinst(I_COPY, s.line, s.col)
+            cp.ty = sym.ty
+            cp.i = sema.ty_bytes(sym.ty)
+            emit(cp)
+            return 0
+        }
+        build_operand_conv(s.a, sym.ty)
+        build_store(sym)
+        return 0
+    }
+    when (s.kind == parser.N_ASSIGN) {
+        type.ptr<type.Symbol> sym = s.sym
+        when (sym == null) {
+            return 0
+        }
+        when (sym.ty.form == sema.F_ARRAY or sema.is_record(sym.ty)) {
+            build_addr(sym, 0)
+            build_expr(s.a)
+            type.ptr<type.IrInst> cp = mkinst(I_COPY, s.line, s.col)
+            cp.ty = sym.ty
+            cp.i = sema.ty_bytes(sym.ty)
+            emit(cp)
+            return 0
+        }
+        build_operand_conv(s.a, sym.ty)
+        build_store(sym)
+        return 0
+    }
+    when (s.kind == parser.N_INDEXASSIGN) {
+        # base[index] = value; base may be array (checked) or pointer
+        type.ptr<type.Ty> base_ty = s.a.rtype
+        type.ptr<type.Ty> elem = base_ty.elem
+        build_expr(s.a)
+        when (sema.is_ptr(base_ty)) {
+            type.ptr<type.IrInst> chk = mkinst(I_PTRCHK, s.line, s.col)
+            chk.ty = elem
+            emit(chk)
+            build_expr(s.b)
+            type.ptr<type.IrInst> sc = mkinst(I_PTR_SCALE, s.line, s.col)
+            sc.ty = base_ty
+            emit(sc)
+        }
+        else {
+            build_expr(s.b)
+            type.ptr<type.IrInst> ix = mkinst(I_INDEX, s.line, s.col)
+            ix.ty = base_ty
+            emit(ix)
+        }
+        when (elem.form == sema.F_ARRAY or sema.is_record(elem)) {
+            # element is an array or a record: copy the bytes
+            build_expr(s.c)
+            type.ptr<type.IrInst> cp = mkinst(I_COPY, s.line, s.col)
+            cp.ty = elem
+            cp.i = sema.ty_bytes(elem)
+            emit(cp)
+        }
+        else {
+            build_operand_conv(s.c, elem)
+            type.ptr<type.IrInst> st = mkinst(I_STORE_AT, s.line, s.col)
+            st.ty = elem
+            emit(st)
+        }
+        return 0
+    }
+    when (s.kind == parser.N_DEREFASSIGN) {
+        # *p = value: null-check, then store (or copy an array)
+        type.ptr<type.Ty> pt = s.a.rtype
+        type.ptr<type.Ty> elem = pt.elem
+        build_expr(s.a)
+        type.ptr<type.IrInst> chk = mkinst(I_PTRCHK, s.line, s.col)
+        chk.ty = elem
+        emit(chk)
+        when (elem.form == sema.F_ARRAY or sema.is_record(elem)) {
+            build_expr(s.c)
+            type.ptr<type.IrInst> cp = mkinst(I_COPY, s.line, s.col)
+            cp.ty = elem
+            cp.i = sema.ty_bytes(elem)
+            emit(cp)
+        }
+        else {
+            build_operand_conv(s.c, elem)
+            type.ptr<type.IrInst> st = mkinst(I_STORE_AT, s.line, s.col)
+            st.ty = elem
+            emit(st)
+        }
+        return 0
+    }
+    when (s.kind == parser.N_FIELDASSIGN) {
+        # base.field = value: address (+ deref), offset, store
+        build_expr(s.a)
+        when (s.autoderef == 1) {
+            type.ptr<type.IrInst> chk = mkinst(I_PTRCHK, s.line, s.col)
+            chk.ty = s.a.rtype
+            emit(chk)
+        }
+        type.ptr<type.IrInst> off = mkinst(I_ADDOFF, s.line, s.col)
+        off.i = s.offset
+        emit(off)
+        type.ptr<type.Ty> ft = s.otype
+        when (ft.form == sema.F_ARRAY or sema.is_record(ft)) {
+            build_expr(s.c)
+            type.ptr<type.IrInst> cp = mkinst(I_COPY, s.line, s.col)
+            cp.ty = ft
+            cp.i = sema.ty_bytes(ft)
+            emit(cp)
+        }
+        else {
+            build_operand_conv(s.c, ft)
+            type.ptr<type.IrInst> st = mkinst(I_STORE_AT, s.line, s.col)
+            st.ty = ft
+            emit(st)
+        }
+        return 0
+    }
+    when (s.kind == parser.N_RELEASE) {
+        build_expr(s.a)
+        type.ptr<type.IrInst> rel = mkinst(I_RELEASE, s.line, s.col)
+        rel.ty = s.a.rtype
+        emit(rel)
+        return 0
+    }
+    when (s.kind == parser.N_EXPRSTMT) {
+        type.ptr<type.Node> e = s.a
+        when (e.kind == parser.N_WRITE) {
+            type.ptr<type.Node> arg = null
+            when (e.nargs > 0) {
+                arg = e.args[0]
+            }
+            when (arg != null) {
+                build_expr(arg)
+            }
+            type.ptr<type.IrInst> w = mkinst(I_WRITE, s.line, s.col)
+            w.ty = sema.T_VOID
+            when (arg != null) {
+                w.ty = arg.rtype
+            }
+            emit(w)
+        }
+        else {
+            build_expr(e)
+            when (e.kind == parser.N_CALL and e.finfo != null and e.finfo.ret != sema.T_VOID) {
+                type.ptr<type.IrInst> p = mkinst(I_POP, s.line, s.col)
+                p.ty = e.finfo.ret
+                emit(p)
+            }
+        }
+        return 0
+    }
+    when (s.kind == parser.N_WRITE) {
+        type.ptr<type.Node> arg = null
+        when (s.nargs > 0) {
+            arg = s.args[0]
+        }
+        when (arg != null) {
+            build_expr(arg)
+        }
+        type.ptr<type.IrInst> w = mkinst(I_WRITE, s.line, s.col)
+        w.ty = sema.T_VOID
+        when (arg != null) {
+            w.ty = arg.rtype
+        }
+        emit(w)
+        return 0
+    }
+    when (s.kind == parser.N_WHEN) {
+        type.number l_else = new_label()
+        type.number l_end = new_label()
+        build_expr(s.a)
+        type.ptr<type.IrInst> jf = mkinst(I_JMPF, s.line, s.col)
+        jf.label = l_else
+        emit(jf)
+        build_stmt_list(s.body, s.nbody)
+        when (s.nbody_else > 0) {
+            type.ptr<type.IrInst> j = mkinst(I_JMP, s.line, s.col)
+            j.label = l_end
+            emit(j)
+            type.ptr<type.IrInst> le = mkinst(I_LABEL, 0, 0)
+            le.label = l_else
+            emit(le)
+            build_stmt_list(s.body_else, s.nbody_else)
+            type.ptr<type.IrInst> lend = mkinst(I_LABEL, 0, 0)
+            lend.label = l_end
+            emit(lend)
+        }
+        else {
+            type.ptr<type.IrInst> le = mkinst(I_LABEL, 0, 0)
+            le.label = l_else
+            emit(le)
+        }
+        return 0
+    }
+    when (s.kind == parser.N_LOOP_COUNT) {
+        # loop (i from A to B) — inclusive; `until` exclusive (spec §10)
+        type.ptr<type.Symbol> ivar = s.sym
+        when (ivar == null) {
+            return 0
+        }
+        # hidden bound slot, evaluated once
+        type.ptr<type.Symbol> bs = sema.new_symbol(ivar.name + "$bound", sema.SYM_VAR)
+        bs.ty = sema.T_NUMBER
+
+        # init: i = from; bound = to
+        build_expr(s.a)
+        build_store(ivar)
+        build_expr(s.b)
+        build_store(bs)
+
+        type.number l_check = new_label()
+        type.number l_cont = new_label()
+        type.number l_exit = new_label()
+
+        type.ptr<type.IrInst> lab = mkinst(I_LABEL, 0, 0)
+        lab.label = l_check
+        emit(lab)
+        type.ptr<type.IrInst> l1 = mkinst(I_LOAD_LOCAL, 0, 0)
+        l1.slot = slot_for(ivar)
+        l1.ty = sema.T_NUMBER
+        emit(l1)
+        type.ptr<type.IrInst> l2 = mkinst(I_LOAD_LOCAL, 0, 0)
+        l2.slot = slot_for(bs)
+        l2.ty = sema.T_NUMBER
+        emit(l2)
+        type.ptr<type.IrInst> cmp = mkinst(I_BINOP, s.line, s.col)
+        cmp.op = parser.OP_LT
+        when (s.inclusive == 1) {
+            cmp.op = parser.OP_LE
+        }
+        cmp.ty = sema.T_NUMBER
+        emit(cmp)
+        type.ptr<type.IrInst> jf2 = mkinst(I_JMPF, 0, 0)
+        jf2.label = l_exit
+        emit(jf2)
+
+        push_loop(l_exit, l_cont)
+        build_stmt_list(s.body, s.nbody)
+        pop_loop()
+
+        type.ptr<type.IrInst> lcont = mkinst(I_LABEL, 0, 0)
+        lcont.label = l_cont
+        emit(lcont)
+        # i = i + 1
+        type.ptr<type.IrInst> li = mkinst(I_LOAD_LOCAL, 0, 0)
+        li.slot = slot_for(ivar)
+        li.ty = sema.T_NUMBER
+        emit(li)
+        type.ptr<type.IrInst> one = mkinst(I_CONST_INT, 0, 0)
+        one.ty = sema.T_NUMBER
+        one.i = 1
+        emit(one)
+        type.ptr<type.IrInst> inc = mkinst(I_BINOP, 0, 0)
+        inc.op = parser.OP_ADD
+        inc.ty = sema.T_NUMBER
+        emit(inc)
+        build_store(ivar)
+        type.ptr<type.IrInst> back = mkinst(I_JMP, 0, 0)
+        back.label = l_check
+        emit(back)
+        type.ptr<type.IrInst> lexit = mkinst(I_LABEL, 0, 0)
+        lexit.label = l_exit
+        emit(lexit)
+        return 0
+    }
+    when (s.kind == parser.N_LOOP_COND) {
+        type.number l_start = new_label()
+        type.number l_cont = new_label()
+        type.number l_exit = new_label()
+        type.ptr<type.IrInst> lab = mkinst(I_LABEL, 0, 0)
+        lab.label = l_start
+        emit(lab)
+        build_expr(s.a)
+        type.ptr<type.IrInst> jf = mkinst(I_JMPF, 0, 0)
+        jf.label = l_exit
+        emit(jf)
+        push_loop(l_exit, l_cont)
+        build_stmt_list(s.body, s.nbody)
+        pop_loop()
+        type.ptr<type.IrInst> lc2 = mkinst(I_LABEL, 0, 0)
+        lc2.label = l_cont
+        emit(lc2)
+        type.ptr<type.IrInst> back = mkinst(I_JMP, 0, 0)
+        back.label = l_start
+        emit(back)
+        type.ptr<type.IrInst> lex = mkinst(I_LABEL, 0, 0)
+        lex.label = l_exit
+        emit(lex)
+        return 0
+    }
+    when (s.kind == parser.N_BREAK) {
+        when (loop_n > 0) {
+            type.ptr<type.IrInst> j = mkinst(I_JMP, s.line, s.col)
+            j.label = loop_break[loop_n - 1]
+            emit(j)
+        }
+        return 0
+    }
+    when (s.kind == parser.N_CONTINUE) {
+        when (loop_n > 0) {
+            type.ptr<type.IrInst> j = mkinst(I_JMP, s.line, s.col)
+            j.label = loop_cont[loop_n - 1]
+            emit(j)
+        }
+        return 0
+    }
+    when (s.kind == parser.N_PRINT) {
+        type.ptr<type.IrInst> p = mkinst(I_PRINT, s.line, s.col)
+        emit(p)
+        return 0
+    }
+    when (s.kind == parser.N_RETURN) {
+        when (s.a != null) {
+            build_operand_conv(s.a, stmt_fi.ret)
+        }
+        else when (stmt_fi.is_entry == 1) {
+            # top-level bare return exits with code 0 (spec §7)
+            type.ptr<type.IrInst> z = mkinst(I_CONST_INT, 0, 0)
+            z.ty = sema.T_NUMBER
+            z.i = 0
+            emit(z)
+        }
+        type.ptr<type.IrInst> r = mkinst(I_RETURN, s.line, s.col)
+        r.ty = sema.T_VOID
+        when (s.a != null) {
+            r.ty = s.a.rtype
+        }
+        emit(r)
+        return 0
+    }
+    return 0
+}
+
+# ---------------- module build ----------------
+
+function.build_function(type.ptr<type.IrModule>.im, type.ptr<type.Node>.fn, type.ptr<type.FuncInfo>.fi) -> number {
+    type.ptr<type.IrFunc> f = new_irfunc(fi)
+    cf = f
+    cm = im
+    # parameters get the first slots
+    loop (i from 0 until fi.nparams) {
+        slot_for(fi.psyms[i])
+    }
+    stmt_fi = fi
+    build_stmt_list(fn.body, fn.nbody)
+    ir_fold(f)
+    when (im.nfuncs == im.funcs_cap) {
+        type.number newcap = 16
+        when (im.funcs_cap > 0) {
+            newcap = im.funcs_cap * 2
+        }
+        type.ptr<type.ptr<type.IrFunc>> nf = alloc<type.ptr<type.IrFunc>>(newcap)
+        loop (i from 0 until im.nfuncs) {
+            nf[i] = im.funcs[i]
+        }
+        type.ptr<type.ptr<type.IrFunc>> old = im.funcs
+        im.funcs = nf
+        im.funcs_cap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    im.funcs[im.nfuncs] = f
+    im.nfuncs = im.nfuncs + 1
+    return 0
+}
+
+function.push_global(type.ptr<type.IrModule>.im, type.ptr<type.Symbol>.sym) -> number {
+    when (im.nglobals == im.globals_cap) {
+        type.number newcap = 16
+        when (im.globals_cap > 0) {
+            newcap = im.globals_cap * 2
+        }
+        type.ptr<type.ptr<type.Symbol>> ng = alloc<type.ptr<type.Symbol>>(newcap)
+        loop (i from 0 until im.nglobals) {
+            ng[i] = im.globals[i]
+        }
+        type.ptr<type.ptr<type.Symbol>> old = im.globals
+        im.globals = ng
+        im.globals_cap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    im.globals[im.nglobals] = sym
+    im.nglobals = im.nglobals + 1
+    return 0
+}
+
+function.build_column(type.ptr<type.IrModule>.im, type.ptr<type.Node>.col) -> number {
+    loop (i from 0 until col.nbody) {
+        type.ptr<type.Node> mem = col.body[i]
+        when (mem.kind == parser.N_FUNC and mem.finfo != null) {
+            build_function(im, mem, mem.finfo)
+        }
+        else when (mem.kind == parser.N_VARDECL and mem.sym != null) {
+            push_global(im, mem.sym)
+        }
+        else when (mem.kind == parser.N_DEVCOL) {
+            build_column(im, mem)
+        }
+    }
+    return 0
+}
+
+function.ir_build_module(type.ptr<type.Mod>.m) -> type.ptr<type.IrModule> {
+    when (m.state != 1) {
+        return null
+    }
+    type.ptr<type.IrModule> im = alloc<type.IrModule>(1)
+    im.mod = m
+    im.funcs = null
+    im.nfuncs = 0
+    im.funcs_cap = 0
+    im.globals = null
+    im.nglobals = 0
+    im.globals_cap = 0
+    im.texts = null
+    im.ntexts = 0
+    im.texts_cap = 0
+
+    loop (i from 0 until m.ast.nbody) {
+        type.ptr<type.Node> n = m.ast.body[i]
+        when (n.kind == parser.N_FUNC) {
+            when (n.finfo != null) {
+                build_function(im, n, n.finfo)
+            }
+        }
+        else when (n.kind == parser.N_VARDECL) {
+            when (n.sym != null) {
+                push_global(im, n.sym)
+            }
+        }
+        else when (n.kind == parser.N_DEVCOL) {
+            build_column(im, n)
+        }
+    }
+
+    # entry function from main.ok top-level statements
+    when (m.entry != null and m.name == "main") {
+        type.ptr<type.IrFunc> f = new_irfunc(m.entry)
+        cf = f
+        cm = im
+        stmt_fi = m.entry
+        loop (i from 0 until m.ast.nbody) {
+            type.ptr<type.Node> n = m.ast.body[i]
+            when (n.kind == parser.N_DIRECTIVE or n.kind == parser.N_LANGCOL or n.kind == parser.N_FUNC or n.kind == parser.N_VARDECL or n.kind == parser.N_DEVCOL or n.kind == parser.N_STRUCTDECL or n.kind == parser.N_UNIONDECL or n.kind == parser.N_CONSTDECL) {
+                continue
+            }
+            build_stmt(n)
+        }
+        ir_fold(f)
+        when (im.nfuncs == im.funcs_cap) {
+            type.number newcap = 16
+            when (im.funcs_cap > 0) {
+                newcap = im.funcs_cap * 2
+            }
+            type.ptr<type.ptr<type.IrFunc>> nf = alloc<type.ptr<type.IrFunc>>(newcap)
+            loop (k from 0 until im.nfuncs) {
+                nf[k] = im.funcs[k]
+            }
+            type.ptr<type.ptr<type.IrFunc>> old = im.funcs
+            im.funcs = nf
+            im.funcs_cap = newcap
+            when (old != null) {
+                release(old)
+            }
+        }
+        im.funcs[im.nfuncs] = f
+        im.nfuncs = im.nfuncs + 1
+    }
+
+    when (im.nfuncs == 0 and im.nglobals == 0) {
+        return null
+    }
+    return im
+}
+
+# ---------------- constant folding (spec §15) ----------------
+
+struct.FoldVal = {
+    type.number known
+    type.ptr<type.Ty> ty
+    type.number i
+    type.decimal d
+    type.number b
+    type.number text
+}.end
+
+function.new_fv() -> type.ptr<type.FoldVal> {
+    type.ptr<type.FoldVal> v = alloc<type.FoldVal>(1)
+    v.known = 0
+    v.ty = null
+    v.i = 0
+    v.d = 0.0
+    v.b = 0
+    v.text = 0
+    return v
+}
+
+function.fv_copy(type.ptr<type.FoldVal>.src) -> type.ptr<type.FoldVal> {
+    type.ptr<type.FoldVal> v = new_fv()
+    v.known = src.known
+    v.ty = src.ty
+    v.i = src.i
+    v.d = src.d
+    v.b = src.b
+    v.text = src.text
+    return v
+}
+
+function.ir_fold(type.ptr<type.IrFunc>.f) -> number {
+    type.ptr<type.ptr<type.FoldVal>> stack = alloc<type.ptr<type.FoldVal>>(f.n + 8)
+    type.number sp = 0
+    type.ptr<type.ptr<type.IrInst>> out = alloc<type.ptr<type.IrInst>>(f.n + 1)
+    type.number on = 0
+
+    loop (pc from 0 until f.n) {
+        type.ptr<type.IrInst> in = f.insts[pc]
+
+        # I_CONV folding
+        when (in.kind == I_CONV and sp >= 1 and stack[sp - 1].known == 1) {
+            type.ptr<type.FoldVal> a = stack[sp - 1]
+            type.ptr<type.Ty> src = in.ty
+            type.ptr<type.Ty> dst = in.ty2
+            when (a.ty == src and sema.convertible(src, dst)) {
+                type.ptr<type.FoldVal> res = new_fv()
+                res.known = 1
+                type.number handled = 1
+                when (src == dst) {
+                    res = fv_copy(a)
+                }
+                else when (src == sema.T_DECIMAL and dst != null and sema.is_integer(dst)) {
+                    res.ty = dst
+                    res.i = sema.dec_to_int(a.d, dst)
+                }
+                else when (src == sema.T_DECIMAL and dst == sema.T_DECIMAL) {
+                    res = fv_copy(a)
+                }
+                else when (src != null and sema.is_integer(src) and dst == sema.T_DECIMAL) {
+                    res.ty = sema.T_DECIMAL
+                    res.d = sema.int_to_dec(a.i, src)
+                }
+                else when (src != null and sema.is_integer(src) and dst != null and sema.is_integer(dst)) {
+                    res.ty = dst
+                    res.i = sema.reencode(a.i, dst)
+                }
+                else when (src == sema.T_BOOL and dst != null and sema.is_integer(dst)) {
+                    res.ty = dst
+                    res.i = a.b
+                }
+                else when (src == sema.T_BOOL and dst == sema.T_DECIMAL) {
+                    res.ty = sema.T_DECIMAL
+                    res.d = number.to_decimal(a.b)
+                }
+                else {
+                    handled = 0
+                }
+                when (handled == 1) {
+                    sp = sp - 1
+                    stack[sp] = res
+                    sp = sp + 1
+                    when (on > 0) {
+                        on = on - 1
+                    }
+                    type.ptr<type.IrInst> ci = mkinst(0, in.line, in.col)
+                    when (res.ty == sema.T_DECIMAL) {
+                        ci.kind = I_CONST_DEC
+                        ci.d = res.d
+                        ci.ty = sema.T_DECIMAL
+                    }
+                    else {
+                        ci.kind = I_CONST_INT
+                        ci.i = res.i
+                        ci.ty = res.ty
+                    }
+                    out[on] = ci
+                    on = on + 1
+                    continue
+                }
+            }
+        }
+
+        # I_BINOP folding
+        when (in.kind == I_BINOP and sp >= 2 and stack[sp - 1].known == 1 and stack[sp - 2].known == 1) {
+            type.ptr<type.FoldVal> r = stack[sp - 1]
+            type.ptr<type.FoldVal> l = stack[sp - 2]
+            type.ptr<type.FoldVal> res = new_fv()
+            res.known = 1
+            type.number ok = 1
+            type.number is_cmp = 0
+            when (in.op >= parser.OP_EQ and in.op <= parser.OP_GE) {
+                is_cmp = 1
+            }
+            # shift folding: value type in in.ty, count is number
+            when ((in.op == parser.OP_SHL or in.op == parser.OP_SHR) and in.ty != null and sema.is_integer(in.ty) and l.ty == in.ty and r.ty == sema.T_NUMBER) {
+                type.number cnt = r.i
+                when (cnt >= 0 and cnt < sema.ty_bits(in.ty)) {
+                    type.number v = 0
+                    when (in.op == parser.OP_SHL) {
+                        v = l.i << cnt
+                    }
+                    else when (sema.ty_signed(in.ty)) {
+                        v = l.i >> cnt
+                    }
+                    else {
+                        # logical shift through a uint64-typed local
+                        type.uint64 uv = number.to_uint64(l.i)
+                        type.uint64 sv = uv >> cnt
+                        v = uint64.to_number(sv)
+                    }
+                    res.ty = in.ty
+                    res.i = sema.reencode(v, in.ty)
+                    ok = 1
+                }
+                else {
+                    ok = 0
+                }
+            }
+            else when (in.ty == sema.T_DECIMAL and l.ty == sema.T_DECIMAL and r.ty == sema.T_DECIMAL) {
+                res.ty = sema.T_DECIMAL
+                when (in.op == parser.OP_ADD) {
+                    res.d = l.d + r.d
+                }
+                else when (in.op == parser.OP_SUB) {
+                    res.d = l.d - r.d
+                }
+                else when (in.op == parser.OP_MUL) {
+                    res.d = l.d * r.d
+                }
+                else when (in.op == parser.OP_DIV) {
+                    res.d = l.d / r.d
+                }
+                else {
+                    ok = 0
+                }
+            }
+            else when (in.ty != null and sema.is_integer(in.ty) and l.ty == in.ty and r.ty == in.ty) {
+                # integer arithmetic folded with the type's signedness
+                when (is_cmp == 1) {
+                    res.ty = sema.T_BOOL
+                }
+                else {
+                    res.ty = in.ty
+                }
+                type.number a = l.i
+                type.number b = r.i
+                when (sema.ty_signed(in.ty)) {
+                    type.number sa = a
+                    type.number sb = b
+                    when (in.op == parser.OP_ADD) { res.i = a + b }
+                    else when (in.op == parser.OP_SUB) { res.i = a - b }
+                    else when (in.op == parser.OP_MUL) { res.i = a * b }
+                    else when (in.op == parser.OP_BAND) { res.i = a & b }
+                    else when (in.op == parser.OP_BOR) { res.i = a | b }
+                    else when (in.op == parser.OP_XOR) { res.i = a ^ b }
+                    else when (in.op == parser.OP_DIV) {
+                        when (b == 0) {
+                            ok = 0
+                        }
+                        else {
+                            res.i = sa / sb
+                            when (sa == 0 - 9223372036854775807 - 1 and sb == -1) {
+                                res.i = sa
+                            }
+                        }
+                    }
+                    else when (in.op == parser.OP_MOD) {
+                        when (b == 0) {
+                            ok = 0
+                        }
+                        else {
+                            res.i = sa % sb
+                            when (sa == 0 - 9223372036854775807 - 1 and sb == -1) {
+                                res.i = 0
+                            }
+                        }
+                    }
+                    else {
+                        type.number bv = 0
+                        when (in.op == parser.OP_EQ) { when (sa == sb) { bv = 1 } }
+                        else when (in.op == parser.OP_NEQ) { when (sa != sb) { bv = 1 } }
+                        else when (in.op == parser.OP_LT) { when (sa < sb) { bv = 1 } }
+                        else when (in.op == parser.OP_LE) { when (sa <= sb) { bv = 1 } }
+                        else when (in.op == parser.OP_GT) { when (sa > sb) { bv = 1 } }
+                        else when (in.op == parser.OP_GE) { when (sa >= sb) { bv = 1 } }
+                        else { ok = 0 }
+                        res.b = bv
+                        when (in.op >= parser.OP_EQ and in.op <= parser.OP_GE) {
+                            res.ty = sema.T_BOOL
+                        }
+                    }
+                }
+                else {
+                    when (in.op == parser.OP_ADD) { res.i = a + b }
+                    else when (in.op == parser.OP_SUB) { res.i = a - b }
+                    else when (in.op == parser.OP_MUL) { res.i = a * b }
+                    else when (in.op == parser.OP_BAND) { res.i = a & b }
+                    else when (in.op == parser.OP_BOR) { res.i = a | b }
+                    else when (in.op == parser.OP_XOR) { res.i = a ^ b }
+                    else when (in.op == parser.OP_DIV) {
+                        when (b == 0) {
+                            ok = 0
+                        }
+                        else {
+                            # unsigned division: ride through uint64
+                            type.uint64 ua = number.to_uint64(a)
+                            type.uint64 ub = number.to_uint64(b)
+                            type.uint64 uq = ua / ub
+                            res.i = uint64.to_number(uq)
+                        }
+                    }
+                    else when (in.op == parser.OP_MOD) {
+                        when (b == 0) {
+                            ok = 0
+                        }
+                        else {
+                            type.uint64 ua = number.to_uint64(a)
+                            type.uint64 ub = number.to_uint64(b)
+                            type.uint64 um = ua % ub
+                            res.i = uint64.to_number(um)
+                        }
+                    }
+                    else {
+                        type.number bv = 0
+                        when (in.op == parser.OP_EQ) { when (a == b) { bv = 1 } }
+                        else when (in.op == parser.OP_NEQ) { when (a != b) { bv = 1 } }
+                        else when (in.op == parser.OP_LT) { when (sema.ult(a, b)) { bv = 1 } }
+                        else when (in.op == parser.OP_LE) { when (sema.ult(a, b) or a == b) { bv = 1 } }
+                        else when (in.op == parser.OP_GT) { when (sema.ult(b, a)) { bv = 1 } }
+                        else when (in.op == parser.OP_GE) { when (sema.ult(b, a) or a == b) { bv = 1 } }
+                        else { ok = 0 }
+                        res.b = bv
+                        when (in.op >= parser.OP_EQ and in.op <= parser.OP_GE) {
+                            res.ty = sema.T_BOOL
+                        }
+                    }
+                }
+                when (ok == 1 and is_cmp == 0 and in.ty != null and sema.ty_bits(in.ty) < 64) {
+                    res.i = sema.reencode(res.i, in.ty)
+                }
+            }
+            else when (in.ty == sema.T_BOOL and l.ty == sema.T_BOOL and r.ty == sema.T_BOOL) {
+                res.ty = sema.T_BOOL
+                when (in.op == parser.OP_AND) {
+                    type.number bv = 0
+                    when (l.b == 1 and r.b == 1) { bv = 1 }
+                    res.b = bv
+                }
+                else when (in.op == parser.OP_OR) {
+                    type.number bv = 0
+                    when (l.b == 1 or r.b == 1) { bv = 1 }
+                    res.b = bv
+                }
+                else when (in.op == parser.OP_EQ) {
+                    type.number bv = 0
+                    when (l.b == r.b) { bv = 1 }
+                    res.b = bv
+                }
+                else when (in.op == parser.OP_NEQ) {
+                    type.number bv = 0
+                    when (l.b != r.b) { bv = 1 }
+                    res.b = bv
+                }
+                else {
+                    ok = 0
+                }
+            }
+            else when (l.ty == sema.T_TEXT and r.ty == sema.T_TEXT and in.op == parser.OP_EQ) {
+                res.ty = sema.T_BOOL
+                type.number bv = 0
+                when (l.text == r.text) { bv = 1 }
+                res.b = bv
+            }
+            else when (l.ty == sema.T_TEXT and r.ty == sema.T_TEXT and in.op == parser.OP_NEQ) {
+                res.ty = sema.T_BOOL
+                type.number bv = 0
+                when (l.text != r.text) { bv = 1 }
+                res.b = bv
+            }
+            else {
+                ok = 0
+            }
+
+            when (ok == 1) {
+                sp = sp - 2
+                stack[sp] = res
+                sp = sp + 1
+                # drop the two source constants from the output
+                when (on >= 2) {
+                    on = on - 2
+                }
+                type.ptr<type.IrInst> ci = mkinst(0, in.line, in.col)
+                when (res.ty == sema.T_DECIMAL) {
+                    ci.kind = I_CONST_DEC
+                    ci.d = res.d
+                    ci.ty = sema.T_DECIMAL
+                }
+                else when (res.ty == sema.T_BOOL) {
+                    ci.kind = I_CONST_BOOL
+                    ci.b = res.b
+                    ci.ty = sema.T_BOOL
+                }
+                else when (res.ty == sema.T_TEXT) {
+                    ci.kind = I_CONST_TEXT
+                    ci.text_idx = res.text
+                    ci.ty = sema.T_TEXT
+                }
+                else {
+                    ci.kind = I_CONST_INT
+                    ci.i = res.i
+                    ci.ty = res.ty
+                }
+                out[on] = ci
+                on = on + 1
+                continue
+            }
+        }
+
+        # I_UNOP folding
+        when (in.kind == I_UNOP and sp >= 1 and stack[sp - 1].known == 1) {
+            type.ptr<type.FoldVal> a = stack[sp - 1]
+            when (in.uop == parser.UN_NEG and a.ty == sema.T_DECIMAL) {
+                sp = sp - 1
+                type.ptr<type.FoldVal> res = new_fv()
+                res.known = 1
+                res.ty = sema.T_DECIMAL
+                res.d = 0.0 - a.d
+                stack[sp] = res
+                sp = sp + 1
+                when (on > 0) {
+                    on = on - 1
+                }
+                type.ptr<type.IrInst> ci = mkinst(I_CONST_DEC, in.line, in.col)
+                ci.ty = sema.T_DECIMAL
+                ci.d = res.d
+                out[on] = ci
+                on = on + 1
+                continue
+            }
+            when (in.uop == parser.UN_NEG and a.ty != null and sema.is_integer(a.ty)) {
+                sp = sp - 1
+                type.number neg = 0 - a.i
+                type.ptr<type.FoldVal> res = new_fv()
+                res.known = 1
+                res.ty = a.ty
+                res.i = sema.reencode(neg, a.ty)
+                stack[sp] = res
+                sp = sp + 1
+                when (on > 0) {
+                    on = on - 1
+                }
+                type.ptr<type.IrInst> ci = mkinst(I_CONST_INT, in.line, in.col)
+                ci.ty = a.ty
+                ci.i = res.i
+                out[on] = ci
+                on = on + 1
+                continue
+            }
+            when (in.uop == parser.UN_NOT and a.ty == sema.T_BOOL) {
+                sp = sp - 1
+                type.ptr<type.FoldVal> res = new_fv()
+                res.known = 1
+                res.ty = sema.T_BOOL
+                res.b = 1 - a.b
+                stack[sp] = res
+                sp = sp + 1
+                when (on > 0) {
+                    on = on - 1
+                }
+                type.ptr<type.IrInst> ci = mkinst(I_CONST_BOOL, in.line, in.col)
+                ci.ty = sema.T_BOOL
+                ci.b = res.b
+                out[on] = ci
+                on = on + 1
+                continue
+            }
+        }
+
+        # pass the instruction through and update the abstract stack
+        out[on] = in
+        on = on + 1
+
+        when (in.kind == I_CONST_INT or in.kind == I_CONST_DEC or in.kind == I_CONST_BOOL or in.kind == I_CONST_TEXT) {
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 1
+            v.i = in.i
+            v.d = in.d
+            v.b = in.b
+            v.text = in.text_idx
+            when (in.kind == I_CONST_INT) {
+                v.ty = sema.T_NUMBER
+                # a fixed-width constant rides with its own type: the fold
+                # stack compares against operand types
+                when (in.ty != null and in.ty != sema.T_TEXT and in.ty != sema.T_BOOL and in.ty != sema.T_DECIMAL and in.ty != sema.T_NULL) {
+                    v.ty = in.ty
+                }
+            }
+            else when (in.kind == I_CONST_DEC) {
+                v.ty = sema.T_DECIMAL
+            }
+            else when (in.kind == I_CONST_BOOL) {
+                v.ty = sema.T_BOOL
+            }
+            else {
+                v.ty = sema.T_TEXT
+            }
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_LOAD_LOCAL or in.kind == I_LOAD_GLOBAL or in.kind == I_ADDR_LOCAL or in.kind == I_ADDR_GLOBAL) {
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = in.ty
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_CONV) {
+            when (sp > 0) {
+                stack[sp - 1].ty = in.ty2
+                when (stack[sp - 1].ty != in.ty2) {
+                    stack[sp - 1].known = 0
+                }
+                when (in.ty != in.ty2) {
+                    stack[sp - 1].known = 0
+                }
+            }
+        }
+        else when (in.kind == I_BINOP) {
+            when (sp >= 2) {
+                sp = sp - 2
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = in.ty
+            when (in.op >= parser.OP_EQ and in.op <= parser.OP_GE) {
+                v.ty = sema.T_BOOL
+            }
+            else when (in.op == parser.OP_AND or in.op == parser.OP_OR) {
+                v.ty = sema.T_BOOL
+            }
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_UNOP) {
+            when (sp >= 1) {
+                sp = sp - 1
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = in.ty
+            when (in.uop == parser.UN_NOT) {
+                v.ty = sema.T_BOOL
+            }
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_TEXT_LEN) {
+            when (sp >= 1) {
+                sp = sp - 1
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = sema.T_NUMBER
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_TEXT_BYTE) {
+            when (sp >= 2) {
+                sp = sp - 2
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = sema.T_UINT8
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_TEXT_SLICE or in.kind == I_TEXT_FROMBYTES) {
+            when (sp >= 3) {
+                sp = sp - 3
+            }
+            else when (sp >= 2) {
+                sp = sp - 2
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = sema.T_TEXT
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_FS_READ) {
+            when (sp >= 1) {
+                sp = sp - 1
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = sema.T_TEXT
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_FS_WRITE) {
+            when (sp >= 2) {
+                sp = sp - 2
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = sema.T_NUMBER
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_FS_EXISTS) {
+            when (sp >= 1) {
+                sp = sp - 1
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = sema.T_BOOL
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_ENV_ARGC) {
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = sema.T_NUMBER
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_ENV_ARG) {
+            when (sp >= 1) {
+                sp = sp - 1
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = sema.T_TEXT
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_SYSOP) {
+            when (in.i == 0 or in.i == 7 or in.i == 8) {
+                when (sp >= 2) { sp = sp - 2 }
+            }
+            else when (in.i == 1 or in.i == 2) {
+                when (sp >= 3) { sp = sp - 3 }
+            }
+            else when (in.i == 3 or in.i == 4 or in.i == 5) {
+                when (sp >= 1) { sp = sp - 1 }
+            }
+            when (in.i != 6) {
+                type.ptr<type.FoldVal> v = new_fv()
+                v.known = 0
+                v.ty = in.ty
+                stack[sp] = v
+                sp = sp + 1
+            }
+        }
+        else when (in.kind == I_STORE_LOCAL or in.kind == I_STORE_GLOBAL or in.kind == I_POP or in.kind == I_JMPF or in.kind == I_WRITE) {
+            when (sp > 0) {
+                sp = sp - 1
+            }
+        }
+        else when (in.kind == I_INDEX) {
+            when (sp >= 2) {
+                sp = sp - 2
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            when (in.ty != null) {
+                v.ty = in.ty.elem
+            }
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_LOAD_AT) {
+            when (sp > 0) {
+                sp = sp - 1
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = in.ty
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_STORE_AT or in.kind == I_COPY) {
+            when (sp >= 2) {
+                sp = sp - 2
+            }
+        }
+        else when (in.kind == I_ALLOC) {
+            when (sp > 0) {
+                sp = sp - 1
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = in.ty
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_RELEASE) {
+            when (sp > 0) {
+                sp = sp - 1
+            }
+        }
+        else when (in.kind == I_PTRCHK) {
+            when (sp > 0) {
+                stack[sp - 1].known = 0
+            }
+        }
+        else when (in.kind == I_PTR_SCALE) {
+            when (sp >= 2) {
+                sp = sp - 2
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = in.ty
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_PTR_DIFF) {
+            when (sp >= 2) {
+                sp = sp - 2
+            }
+            type.ptr<type.FoldVal> v = new_fv()
+            v.known = 0
+            v.ty = sema.T_NUMBER
+            stack[sp] = v
+            sp = sp + 1
+        }
+        else when (in.kind == I_ADDOFF) {
+            when (sp > 0) {
+                stack[sp - 1].known = 0
+            }
+        }
+        else when (in.kind == I_CALL) {
+            when (in.nargs <= sp) {
+                sp = sp - in.nargs
+            }
+            when (in.ty != sema.T_VOID) {
+                type.ptr<type.FoldVal> v = new_fv()
+                v.known = 0
+                v.ty = in.ty
+                stack[sp] = v
+                sp = sp + 1
+            }
+        }
+        else when (in.kind == I_RETURN) {
+            when (in.ty != sema.T_VOID and sp > 0) {
+                sp = sp - 1
+            }
+        }
+        else when (in.kind == I_LABEL or in.kind == I_JMP or in.kind == I_PRINT) {
+            # control joins: forget everything known
+            sp = 0
+        }
+    }
+
+    f.insts = out
+    f.n = on
+    f.cap = on
+    return 0
+}
+
+# ---- IR dump (debug flag) ----
+
+function.kind_name(number.k) -> text {
+    when (k == I_CONST_INT) { return "CONST_INT" }
+    else when (k == I_CONST_DEC) { return "CONST_DEC" }
+    else when (k == I_CONST_BOOL) { return "CONST_BOOL" }
+    else when (k == I_CONST_TEXT) { return "CONST_TEXT" }
+    else when (k == I_LOAD_LOCAL) { return "LOAD_LOCAL" }
+    else when (k == I_STORE_LOCAL) { return "STORE_LOCAL" }
+    else when (k == I_LOAD_GLOBAL) { return "LOAD_GLOBAL" }
+    else when (k == I_STORE_GLOBAL) { return "STORE_GLOBAL" }
+    else when (k == I_CONV) { return "CONV" }
+    else when (k == I_BINOP) { return "BINOP" }
+    else when (k == I_UNOP) { return "UNOP" }
+    else when (k == I_LABEL) { return "LABEL" }
+    else when (k == I_JMP) { return "JMP" }
+    else when (k == I_JMPF) { return "JMPF" }
+    else when (k == I_CALL) { return "CALL" }
+    else when (k == I_WRITE) { return "WRITE" }
+    else when (k == I_PRINT) { return "PRINT" }
+    else when (k == I_RETURN) { return "RETURN" }
+    else when (k == I_POP) { return "POP" }
+    else when (k == I_ADDR_LOCAL) { return "ADDR_LOCAL" }
+    else when (k == I_ADDR_GLOBAL) { return "ADDR_GLOBAL" }
+    else when (k == I_INDEX) { return "INDEX" }
+    else when (k == I_LOAD_AT) { return "LOAD_AT" }
+    else when (k == I_STORE_AT) { return "STORE_AT" }
+    else when (k == I_COPY) { return "COPY" }
+    else when (k == I_ALLOC) { return "ALLOC" }
+    else when (k == I_RELEASE) { return "RELEASE" }
+    else when (k == I_PTRCHK) { return "PTRCHK" }
+    else when (k == I_PTR_SCALE) { return "PTR_SCALE" }
+    else when (k == I_PTR_DIFF) { return "PTR_DIFF" }
+    else when (k == I_ADDOFF) { return "ADDOFF" }
+    else when (k == I_TEXT_LEN) { return "TEXT_LEN" }
+    else when (k == I_TEXT_BYTE) { return "TEXT_BYTE" }
+    else when (k == I_TEXT_SLICE) { return "TEXT_SLICE" }
+    else when (k == I_SYSOP) { return "SYSOP" }
+    else when (k == I_TEXT_FROMBYTES) { return "TEXT_FROMBYTES" }
+    else when (k == I_FS_READ) { return "FS_READ" }
+    else when (k == I_FS_WRITE) { return "FS_WRITE" }
+    else when (k == I_FS_EXISTS) { return "FS_EXISTS" }
+    else when (k == I_ENV_ARGC) { return "ENV_ARGC" }
+    else when (k == I_ENV_ARG) { return "ENV_ARG" }
+    return "?"
+}
+
+function.dump_func(type.ptr<type.IrFunc>.f) -> number {
+    sys.write(2, "func " + f.fi.mangled + " labels=" + number.to_text(f.nlabels) + " slots=" + number.to_text(f.nslots) + " insts=" + number.to_text(f.n) + "\n")
+    loop (i from 0 until f.n) {
+        type.ptr<type.IrInst> in = f.insts[i]
+        type.text line = "  " + number.to_text(i) + " " + kind_name(in.kind)
+        when (in.kind == I_LABEL or in.kind == I_JMP or in.kind == I_JMPF) {
+            line = line + " L" + number.to_text(in.label)
+        }
+        when (in.kind == I_LOAD_LOCAL or in.kind == I_STORE_LOCAL or in.kind == I_ADDR_LOCAL) {
+            line = line + " slot=" + number.to_text(in.slot)
+        }
+        when (in.kind == I_BINOP) {
+            line = line + " op" + number.to_text(in.op)
+        }
+        when (in.kind == I_CALL) {
+            line = line + " " + in.finfo.mangled + " n" + number.to_text(in.nargs)
+        }
+        when (in.kind == I_SYSOP) {
+            line = line + " sysop" + number.to_text(in.i)
+        }
+        sys.write(2, line + "\n")
+    }
+    return 0
+}

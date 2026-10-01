@@ -1,0 +1,411 @@
+# main.ok — the Okular compiler driver, written in Okular (M5).
+#
+# Usage: okc <main.ok> [--out <path>]
+#
+# The complete pipeline in one native binary: project load (lexer +
+# parser modules), semantic analysis, IR construction and folding, and
+# direct x86-64 machine-code emission into a native ELF64 executable —
+# no C compiler, no `as`, no `ld` anywhere in the chain.
+#
+# The runtime module (src/rt.ok) is compiled into every emitted program;
+# it is located relative to this executable (build/output/ -> ../../src/).
+
+type.text=1
+
+[source.files.use] = {
+    "toks",
+    "parser",
+    "sema",
+    "ir",
+    "emit",
+    "elf",
+    "rt"
+}.end
+
+# ---- small path helpers ----
+
+function.dirname(text.path) -> text {
+    type.number n = text.length(path)
+    loop (i from 0 until n) {
+        when (text.byte_at(path, n - 1 - i) == 47) {
+            when (i == n - 1) {
+                return "/"
+            }
+            return text.slice(path, 0, n - 1 - i)
+        }
+    }
+    return "."
+}
+
+function.basename(text.path) -> text {
+    type.number n = text.length(path)
+    loop (i from 0 until n) {
+        when (text.byte_at(path, n - 1 - i) == 47) {
+            return text.slice(path, n - i, n)
+        }
+    }
+    return path
+}
+
+function.path_join(text.a, text.b) -> text {
+    when (text.length(a) == 0) {
+        return b
+    }
+    when (text.byte_at(a, text.length(a) - 1) == 47) {
+        return a + b
+    }
+    return a + "/" + b
+}
+
+function.strip_quotes(text.sp) -> text {
+    type.number n = text.length(sp)
+    when (n >= 2) {
+        return text.slice(sp, 1, n - 1)
+    }
+    return sp
+}
+
+# ---- flags ----
+
+type.number dump_ir_flag = 0
+
+# ---- the used-module collection (prescan over the token buffer) ----
+
+type.ptr<type.text> uses = null
+type.number n_uses = 0
+type.number uses_cap = 0
+
+function.uses_reset() -> number {
+    n_uses = 0
+    return 0
+}
+
+function.push_use(text.name) -> number {
+    when (n_uses == uses_cap) {
+        type.number newcap = 8
+        when (uses_cap > 0) {
+            newcap = uses_cap * 2
+        }
+        type.ptr<type.text> nu = alloc<type.text>(newcap)
+        loop (i from 0 until n_uses) {
+            nu[i] = uses[i]
+        }
+        type.ptr<type.text> old = uses
+        uses = nu
+        uses_cap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    uses[n_uses] = name
+    n_uses = n_uses + 1
+    return 0
+}
+
+function.prescan_uses() -> number {
+    # extract `[source.files.use]` items from the loaded token buffer (a
+    # light, tolerant scan — the real parser reports malformed columns)
+    type.number n = toks.count()
+    type.number i = 0
+    loop (i < n) {
+        when (toks.kind(i) != toks.K_LBRACKET) {
+            i = i + 1
+            continue
+        }
+        type.number j = i + 1
+        when (j >= n or toks.kind(j) != toks.K_IDENT) {
+            i = i + 1
+            continue
+        }
+        type.text colpath = toks.spelling(j)
+        j = j + 1
+        loop (j + 1 < n and toks.kind(j) == toks.K_DOT and toks.kind(j + 1) == toks.K_IDENT) {
+            colpath = colpath + "." + toks.spelling(j + 1)
+            j = j + 2
+        }
+        when (j >= n or toks.kind(j) != toks.K_RBRACKET) {
+            i = i + 1
+            continue
+        }
+        j = j + 1
+        when (j >= n or toks.kind(j) != toks.K_EQ) {
+            i = i + 1
+            continue
+        }
+        j = j + 1
+        when (j >= n or toks.kind(j) != toks.K_LBRACE) {
+            i = i + 1
+            continue
+        }
+        j = j + 1
+        when (colpath == "source.files.use") {
+            loop (j < n) {
+                type.number k = toks.kind(j)
+                when (k == toks.K_TEXT) {
+                    push_use(strip_quotes(toks.spelling(j)))
+                }
+                else when (k == toks.K_COMMA or k == toks.K_NL) {
+                    # separators
+                }
+                else {
+                    break
+                }
+                j = j + 1
+            }
+        }
+        i = j
+    }
+    return 0
+}
+
+# ---- project loading ----
+
+type.text proj_root = "."
+
+type.number load_errors = 0
+
+function.report_load_error(text.display, text.msg) -> number {
+    # load-time errors carry no position; they fail the build
+    sys.write(2, display + ": error: " + msg + "\n")
+    load_errors = 1
+    return 0
+}
+
+function.load_module(text.name, text.path, text.display, number.required) -> number {
+    type.ptr<type.Mod> m = sema.new_mod(name, path, display, required)
+    sema.push_mod(m)
+    m.state = 2
+
+    toks.load(path)
+    when (toks.get_err_kind() != toks.ERR_NONE) {
+        report_load_error(display, "unexpected byte in source.")
+        m.state = 0
+        m.broken = 1
+        return 0
+    }
+
+    uses_reset()
+    prescan_uses()
+    parser.register_struct_names()
+
+    loop (k from 0 until n_uses) {
+        type.text dep = uses[k]
+        type.ptr<type.Mod> ex = sema.find_mod(dep)
+        when (ex != null) {
+            when (ex.state == 2) {
+                report_load_error(display, "cyclic source dependency: `" + dep + "` is being loaded (directly or indirectly).")
+            }
+            continue
+        }
+        type.text dep_path = path_join(proj_root, "src/" + dep + ".ok")
+        when (fs.exists(dep_path) == false) {
+            report_load_error(display, "source file `" + dep + "` was not found in `src/`.")
+            continue
+        }
+        load_module(dep, dep_path, "src/" + dep + ".ok", required)
+    }
+    m.state = 1
+    return 0
+}
+
+function.load_project(text.main_path) -> number {
+    proj_root = dirname(main_path)
+    when (basename(main_path) != "main.ok") {
+        sys.write(2, "okc: the entry point must be `main.ok`.\n")
+        return 1
+    }
+    load_module("main", main_path, "main.ok", 1)
+    return 0
+}
+
+# the runtime module: compiled into every emitted program; resolved
+# relative to this executable (build/output/ -> ../../src/rt.ok)
+function.inject_runtime(text.exe_path) -> number {
+    when (sema.find_mod("rt") != null) {
+        return 0
+    }
+    type.text dir = dirname(exe_path)
+    type.text cand1 = path_join(dir, "../../src/rt.ok")
+    type.text cand2 = path_join(dir, "../src/rt.ok")
+    type.text rt_path = ""
+    when (fs.exists(cand1) == true) {
+        rt_path = cand1
+    }
+    else when (fs.exists(cand2) == true) {
+        rt_path = cand2
+    }
+    when (rt_path == "") {
+        sys.write(2, "okc: cannot locate the runtime module `src/rt.ok` next to the compiler.\n")
+        return 1
+    }
+    load_module("rt", rt_path, "src/rt.ok", 1)
+    return 0
+}
+
+# ---- phase B: parse every module ----
+
+function.parse_all() -> number {
+    loop (i from 0 until sema.mod_count()) {
+        type.ptr<type.Mod> m = sema.mod_at(i)
+        when (m.state != 1) {
+            continue
+        }
+        toks.load(m.path)
+        parser.begin()
+        sema.set_cur_mod(m)
+        type.ptr<type.Node> file = parser.parse_file()
+        m.ast = file
+        type.number nerr = parser.error_count()
+        when (nerr > 0) {
+            loop (k from 0 until nerr) {
+                sema.serr_line(parser.err_line_at(k), parser.err_col_at(k), parser.err_msg_at(k))
+            }
+            m.state = 0
+            m.broken = 1
+            continue
+        }
+        sema.canon_node(file)
+    }
+    return 0
+}
+
+# ---- IR + emission ----
+
+type.ptr<type.ptr<type.IrModule>> irmods = null
+type.number n_irmods = 0
+type.number irmods_cap = 0
+
+function.push_irmod(type.ptr<type.IrModule>.im) -> number {
+    when (n_irmods == irmods_cap) {
+        type.number newcap = 8
+        when (irmods_cap > 0) {
+            newcap = irmods_cap * 2
+        }
+        type.ptr<type.ptr<type.IrModule>> nm = alloc<type.ptr<type.IrModule>>(newcap)
+        loop (i from 0 until n_irmods) {
+            nm[i] = irmods[i]
+        }
+        type.ptr<type.ptr<type.IrModule>> old = irmods
+        irmods = nm
+        irmods_cap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    irmods[n_irmods] = im
+    n_irmods = n_irmods + 1
+    return 0
+}
+
+function.build_ir() -> number {
+    loop (i from 0 until sema.mod_count()) {
+        type.ptr<type.Mod> m = sema.mod_at(i)
+        when (m.state != 1) {
+            continue
+        }
+        type.ptr<type.IrModule> im = ir.ir_build_module(m)
+        when (im != null) {
+            push_irmod(im)
+        }
+    }
+    return 0
+}
+
+function.ensure_dir(text.path) -> number {
+    # best-effort mkdir -p via sys.mkdir (EEXIST is fine)
+    sys.mkdir(path, 493)
+    return 0
+}
+
+function.mkdir_p(text.path) -> number {
+    type.number n = text.length(path)
+    loop (i from 0 until n) {
+        when (text.byte_at(path, i) == 47 and i > 0) {
+            ensure_dir(text.slice(path, 0, i))
+        }
+    }
+    ensure_dir(path)
+    return 0
+}
+
+# ---- the driver ----
+
+function.main() -> number {
+    type.number argc = env.arg_count()
+    when (argc < 2) {
+        sys.write(2, "usage: okc <main.ok> [--out <path>]\n")
+        return 2
+    }
+    type.text main_path = env.arg(1)
+    type.text out_path = ""
+    when (argc >= 3 and env.arg(2) == "--dump-ir") {
+        dump_ir_flag = 1
+    }
+    when (argc >= 4 and env.arg(2) == "--out") {
+        out_path = env.arg(3)
+    }
+
+    sema.init_types()
+    sema.diag_reset()
+    elf.sym_reset()
+
+    when (load_project(main_path) != 0) {
+        return 2
+    }
+    when (inject_runtime(env.arg(0)) != 0) {
+        return 1
+    }
+
+    parse_all()
+
+    type.number pre_errors = sema.error_count()
+    when (sema.sema_run() == 0 or pre_errors > 0 or load_errors == 1) {
+        sema.render_all()
+        sys.write(2, "okular: compilation failed; no executable was produced.\n")
+        return 1
+    }
+
+    build_ir()
+
+    when (dump_ir_flag == 1) {
+        loop (i from 0 until n_irmods) {
+            type.ptr<type.IrModule> im = irmods[i]
+            loop (k from 0 until im.nfuncs) {
+                ir.dump_func(im.funcs[k])
+            }
+        }
+    }
+
+    # pre-pass: symbols for every function and global (calls may precede
+    # definitions); then the entry stub (main.ok's top-level statements)
+    loop (i from 0 until n_irmods) {
+        emit.prepass_module(irmods[i])
+    }
+    type.number entry_sym = emit.sym_by_name("__ok_entry")
+    when (entry_sym < 0) {
+        sys.write(2, "okular: main.ok has no entry point — add top-level statements.\n")
+        return 1
+    }
+    emit.emit_start(entry_sym)
+    loop (i from 0 until n_irmods) {
+        emit.emit_module(irmods[i])
+    }
+
+    when (out_path == "") {
+        out_path = path_join(proj_root, "build/output/main")
+        mkdir_p(path_join(proj_root, "build"))
+        mkdir_p(path_join(proj_root, "build/output"))
+    }
+
+    when (elf.emit_elf(out_path) != 0) {
+        sys.write(2, "okc: cannot write `" + out_path + "`.\n")
+        return 1
+    }
+    sys.chmod(out_path, 493)
+
+    sema.render_all()
+    sys.write(2, "okular: wrote " + out_path + "\n")
+    return 0
+}
+
+return main()

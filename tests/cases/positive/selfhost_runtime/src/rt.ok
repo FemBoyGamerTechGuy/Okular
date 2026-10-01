@@ -74,7 +74,7 @@ function.out_ensure() -> number {
 
 function.out_reserve(number.need) -> number {
     when (out_len + need > OUT_CAP) {
-        trap("output buffer overflow (65536 bytes per line) — flush with `print` more often", 75)
+        trap("output buffer overflow (65536 bytes per line) — flush with `print` more often", 70)
     }
     return 0
 }
@@ -126,7 +126,22 @@ function.write_number(number.v) -> number {
 function.write_uint(number.v) -> number {
     out_ensure()
     out_reserve(20)
-    put_dec_digits(v)
+    # unsigned digit extraction: v rides as uint64 bits (v may be "negative"
+    # as int64 when the top bit is set)
+    type.uint64 uv = number.to_uint64(v)
+    type.array<type.number, 20> tmp = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    type.number n = 0
+    loop (uv > 0) {
+        tmp[n] = uint64.to_number(uv - uv / 10 * 10)
+        uv = uv / 10
+        n = n + 1
+    }
+    when (n == 0) {
+        put_byte(48)
+    }
+    loop (i from 0 until n) {
+        put_byte(48 + tmp[n - 1 - i])
+    }
     return 0
 }
 
@@ -192,14 +207,14 @@ function.write_decimal(decimal.d) -> number {
 }
 
 function.print_flush() -> number {
+    # rt_print parity: ALWAYS a newline plus the buffered bytes — an empty
+    # buffer still writes the bare newline
     out_ensure()
-    when (out_len > 0) {
-        out_reserve(1)
-        put_byte(10)
-        type.text t = text.from_bytes(out_buf, out_len)
-        sys.write(1, t)
-        out_len = 0
-    }
+    out_reserve(1)
+    put_byte(10)
+    type.text t = text.from_bytes(out_buf, out_len)
+    sys.write(1, t)
+    out_len = 0
     return 0
 }
 
@@ -207,7 +222,7 @@ function.print_flush() -> number {
 
 type.ptr<type.byte> arena = null
 type.number arena_used = 0
-const.ARENA_CAP = 1048576
+const.ARENA_CAP = 16777216   # 16 MiB: the compiler itself is the heaviest Okular program
 
 function.arena_ensure() -> number {
     when (arena == null) {
@@ -222,7 +237,7 @@ function.arena_ensure() -> number {
 function.arena_take(number.len) -> type.ptr<type.byte> {
     arena_ensure()
     when (arena_used + len > ARENA_CAP) {
-        trap("text arena exhausted (1 MiB of text per run)", 62)
+        trap("text arena exhausted (16 MiB of text per run)", 71)
     }
     type.ptr<type.byte> p = arena + arena_used
     arena_used = arena_used + len
@@ -232,14 +247,18 @@ function.arena_take(number.len) -> type.ptr<type.byte> {
 # ---- to_text family (text results live in the arena) ----
 
 function.number_to_text(number.v) -> text {
-    # format into a scratch region of the arena, then view it
+    # format through the output buffer, then copy into the arena (owned)
     type.number save = out_len
     out_ensure()
     out_len = 0
     write_number(v)
-    type.text t = text.from_bytes(out_buf, out_len)
+    type.number n = out_len
+    type.ptr<type.byte> p = arena_take(n)
+    loop (i from 0 until n) {
+        p[i] = out_buf[i]
+    }
     out_len = save
-    return t
+    return text.from_bytes(p, n)
 }
 
 function.uint_to_text(number.v) -> text {
@@ -247,9 +266,13 @@ function.uint_to_text(number.v) -> text {
     out_ensure()
     out_len = 0
     write_uint(v)
-    type.text t = text.from_bytes(out_buf, out_len)
+    type.number n = out_len
+    type.ptr<type.byte> p = arena_take(n)
+    loop (i from 0 until n) {
+        p[i] = out_buf[i]
+    }
     out_len = save
-    return t
+    return text.from_bytes(p, n)
 }
 
 function.decimal_to_text(decimal.d) -> text {
@@ -257,9 +280,13 @@ function.decimal_to_text(decimal.d) -> text {
     out_ensure()
     out_len = 0
     write_decimal(d)
-    type.text t = text.from_bytes(out_buf, out_len)
+    type.number n = out_len
+    type.ptr<type.byte> p = arena_take(n)
+    loop (i from 0 until n) {
+        p[i] = out_buf[i]
+    }
     out_len = save
-    return t
+    return text.from_bytes(p, n)
 }
 
 function.bool_to_text(number.b) -> text {
@@ -487,7 +514,7 @@ function.heap_grow(number.need) -> number {
     len = (len / CHUNK) * CHUNK
     type.ptr<type.byte> base = sys.mmap(len)
     when (base == null) {
-        trap("heap exhausted (mmap failed)", 29)
+        trap("heap exhausted (mmap failed)", 74)
     }
     type.number payload = len - 16
     type.ptr<type.byte> data = base + 16
@@ -511,7 +538,7 @@ function.heap_grow(number.need) -> number {
 
 function.mem_alloc(number.bytes) -> type.ptr<type.byte> {
     when (bytes == 0) {
-        trap("allocation of zero bytes", 25)
+        trap("allocation of zero bytes", 74)
     }
     type.number need = round16(bytes)
     type.ptr<type.byte> prev = null
@@ -562,7 +589,7 @@ function.mem_release(ptr<byte>.data) -> number {
     }
     type.number size = hdr_size(data)
     when (size == 0 or size - (size / 16) * 16 != 0) {
-        trap("release of an invalid or already-released heap pointer", 47)
+        trap("release of an invalid or already-released heap pointer", 74)
     }
     # poison the header; the free node carries the size from here on
     set_hdr_size(data, 1)
@@ -681,4 +708,96 @@ function.fs_trap(text.what, text.path, number.err) -> number {
     write_err(")\n")
     sys.exit(77)
     return 0
+}
+
+# ---- process entry support (M5): argv forwarding + exit + env builtins ----
+# rt_start (emitted by the backend as machine code) hands argc/argv here.
+
+type.number rt_argc_v = 0
+type.ptr<type.byte> rt_argv_v = null
+
+function.rt_init(number.argc, ptr<byte>.argv) -> number {
+    rt_argc_v = argc
+    rt_argv_v = argv
+    return 0
+}
+
+function.rt_exit(number.code) -> number {
+    sys.exit(code)
+    return 0
+}
+
+function.env_arg_count() -> number {
+    return rt_argc_v
+}
+
+# rt_env_arg(i) -> text (0.12, spec §6.5); out-of-range traps (exit 70)
+function.env_arg(number.i) -> text {
+    when (i < 0 or i >= rt_argc_v) {
+        trap("argument index " + number.to_text(i) + " is out of bounds (the program was given " + number.to_text(rt_argc_v) + " argument(s))", 70)
+    }
+    # argv[i]: the pointer array element, then the NUL-terminated bytes
+    type.number addr = ptr.to_number(rt_argv_v) + i * 8
+    type.ptr<type.byte> elem = number.to_ptr(addr)
+    type.ptr<type.byte> strp = number.to_ptr(rd64(elem, 0))
+    type.number n = 0
+    loop (strp[n] != 0) {
+        n = n + 1
+        when (n > 1048576) {
+            break
+        }
+    }
+    return text.from_bytes(strp, n)
+}
+
+# ---- the trap family (exact rt.c messages and exit codes) ----
+
+function.div_trap() -> number {
+    write_err("okular runtime error: ")
+    write_err("integer division by zero\n")
+    sys.exit(71)
+    return 0
+}
+
+function.null_trap() -> number {
+    write_err("okular runtime error: ")
+    write_err("dereference of null pointer\n")
+    sys.exit(73)
+    return 0
+}
+
+function.shift_trap(number.count) -> number {
+    write_err("okular runtime error: ")
+    write_err("shift count ")
+    when (count < 0) {
+        write_err("-")
+        count = 0 - count
+    }
+    write_err(number.to_text(count))
+    write_err(" is out of range for the value's width\n")
+    sys.exit(72)
+    return 0
+}
+
+function.bounds_trap_named(text.pre, number.index, number.length) -> number {
+    write_err("okular runtime error: ")
+    write_err(pre)
+    when (index < 0) {
+        write_err("-")
+        index = 0 - index
+    }
+    write_err(number.to_text(index))
+    write_err(" is out of bounds (length ")
+    write_err(number.to_text(length))
+    write_err(")\n")
+    sys.exit(70)
+    return 0
+}
+
+function.bounds_trap(number.index, number.length) -> number {
+    return bounds_trap_named("array index ", index, length)
+}
+
+function.text_bounds_trap(number.index, number.length) -> number {
+    return bounds_trap_named("text position ", index, length)
 }

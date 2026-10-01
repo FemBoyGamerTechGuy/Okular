@@ -1,0 +1,528 @@
+# toks.ok — in-memory tokenizer (self-hosting, M4).
+#
+# Scans one .ok file into a heap token buffer: kind, line, col, and the
+# byte span (off, len) of every token. Spellings are cut on demand with
+# text.slice — the source text is kept once. The scanning rules are the
+# token set of spec §1, exactly as bootstrap/src/lexer.c (and the
+# machine-mode selfhost/lexer): keywords, identifiers, hex/underscore
+# number literals, decimal literals, text literals (raw spelling, escapes
+# intact — the bridge unescapes), all operators including << and >>,
+# newline separators suppressed inside ( ) and [ ] groups, # comments.
+#
+# The buffer is a growable heap array: capacity doubles when full; blocks
+# are copied and the old one released.
+
+type.text=1
+
+# ---- token kinds (numbered to match bootstrap/src/lexer.c TokKind) ----
+
+const.K_EOF = 0
+const.K_NL = 1
+const.K_IDENT = 2
+const.K_INT = 3
+const.K_DEC = 4
+const.K_TEXT = 5
+const.K_PLUS = 6
+const.K_MINUS = 7
+const.K_STAR = 8
+const.K_SLASH = 9
+const.K_PERCENT = 10
+const.K_EQ = 11
+const.K_EQEQ = 12
+const.K_BANGEQ = 13
+const.K_LT = 14
+const.K_LE = 15
+const.K_GT = 16
+const.K_GE = 17
+const.K_ARROW = 18
+const.K_DOT = 19
+const.K_COMMA = 20
+const.K_AMP = 21
+const.K_PIPE = 22
+const.K_CARET = 23
+const.K_TILDE = 24
+const.K_SHL = 25
+const.K_SHR = 26
+const.K_LPAREN = 27
+const.K_RPAREN = 28
+const.K_LBRACE = 29
+const.K_RBRACE = 30
+const.K_LBRACKET = 31
+const.K_RBRACKET = 32
+const.K_TYPE = 33
+const.K_FUNCTION = 34
+const.K_STRUCT = 35
+const.K_WHEN = 36
+const.K_ELSE = 37
+const.K_LOOP = 38
+const.K_FROM = 39
+const.K_TO = 40
+const.K_UNTIL = 41
+const.K_BREAK = 42
+const.K_CONTINUE = 43
+const.K_RETURN = 44
+const.K_PRINT = 45
+const.K_WRITE = 46
+const.K_TRUE = 47
+const.K_FALSE = 48
+const.K_AND = 49
+const.K_OR = 50
+const.K_NOT = 51
+const.K_END = 52
+const.K_ALLOC = 53
+const.K_RELEASE = 54
+const.K_NULL = 55
+const.K_UNION = 56
+const.K_CONST = 57
+const.K_RESERVED = 58
+
+# ---- keyword table (spelling -> kind) ----
+
+type.array<type.text, 25> KEYWORDS = {
+    "type", "function", "struct", "when", "else", "loop",
+    "from", "to", "until", "break", "continue", "return",
+    "print", "write", "true", "false", "and", "or", "not", "end",
+    "alloc", "release", "null", "union", "const"
+}
+
+type.array<type.number, 25> KEYWORD_KINDS = {
+    33, 34, 35, 36, 37, 38,
+    39, 40, 41, 42, 43, 44,
+    45, 46, 47, 48, 49, 50, 51, 52,
+    53, 54, 55, 56, 57
+}
+
+type.array<type.text, 8> RESERVED_WORDS = {
+    "pointer", "guard", "fail", "with", "priv", "pub", "match", "case"
+}
+
+# ---- the token record ----
+
+struct.Tok = {
+    type.number kind
+    type.number line
+    type.number col
+    type.number off
+    type.number len
+}.end
+
+# ---- token buffer (growable) ----
+
+type.text src = ""
+type.number len = 0
+type.ptr<type.Tok> buf = null
+type.number ntok = 0
+type.number cap = 0
+
+# scanner state (line/col/depth live only during a scan)
+type.number s_line = 1
+type.number s_col = 1
+type.number s_pos = 0
+type.number s_depth = 0
+
+# first lexical error (unexpected byte): the loader reports it and the
+# module is marked broken before parsing, like the C lexer's diagnostic
+const.ERR_NONE = 0
+const.ERR_BYTE = 1
+type.number err_kind = 0
+type.number err_line = 0
+type.number err_col = 0
+type.number err_byte = 0
+
+function.count() -> number {
+    return ntok
+}
+
+function.get_err_kind() -> number {
+    return err_kind
+}
+
+function.get_err_line() -> number {
+    return err_line
+}
+
+function.get_err_col() -> number {
+    return err_col
+}
+
+function.get_err_byte() -> number {
+    return err_byte
+}
+
+# ---- accessors (index is expected in range; EOF token pads the end) ----
+
+function.kind(number.i) -> number {
+    return buf[i].kind
+}
+
+function.tline(number.i) -> number {
+    return buf[i].line
+}
+
+function.tcol(number.i) -> number {
+    return buf[i].col
+}
+
+function.spelling(number.i) -> text {
+    return text.slice(src, buf[i].off, buf[i].off + buf[i].len)
+}
+
+# the `>>` split (spec §9): a type-argument close consumes one `>` of an
+# SHR token and leaves the other as a plain GT, current and unconsumed.
+# Mirrors expect() in bootstrap/src/parser.c.
+function.split_gt(number.i) -> number {
+    buf[i].kind = K_GT
+    buf[i].off = buf[i].off + 1
+    buf[i].col = buf[i].col + 1
+    buf[i].len = 1
+    return 0
+}
+
+# ---- buffer growth ----
+
+function.push_tok(number.k, number.l, number.c, number.off, number.slen) -> number {
+    when (ntok == cap) {
+        type.number newcap = 256
+        when (cap > 0) {
+            newcap = cap * 2
+        }
+        type.ptr<type.Tok> nb = alloc<type.Tok>(newcap)
+        loop (i from 0 until ntok) {
+            nb[i] = buf[i]
+        }
+        type.ptr<type.Tok> old = buf
+        buf = nb
+        cap = newcap
+        release(old)
+    }
+    buf[ntok].kind = k
+    buf[ntok].line = l
+    buf[ntok].col = c
+    buf[ntok].off = off
+    buf[ntok].len = slen
+    ntok = ntok + 1
+    return 0
+}
+
+# ---- byte helpers ----
+
+function.cur() -> number {
+    when (s_pos < len) {
+        return text.byte_at(src, s_pos)
+    }
+    return 0
+}
+
+function.look() -> number {
+    when (s_pos + 1 < len) {
+        return text.byte_at(src, s_pos + 1)
+    }
+    return 0
+}
+
+function.advance() -> number {
+    when (cur() == 10) {
+        s_line = s_line + 1
+        s_col = 1
+    }
+    else {
+        s_col = s_col + 1
+    }
+    s_pos = s_pos + 1
+    return 0
+}
+
+function.is_digit(number.b) -> bool {
+    return b >= 48 and b <= 57
+}
+
+function.is_alpha(number.b) -> bool {
+    return (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 95
+}
+
+function.is_alnum(number.b) -> bool {
+    return is_alpha(b) or is_digit(b)
+}
+
+function.is_hex(number.b) -> bool {
+    return (b >= 48 and b <= 57) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102) or b == 95
+}
+
+function.keyword_kind(text.spelling) -> number {
+    loop (i from 0 until 25) {
+        when (spelling == KEYWORDS[i]) {
+            return KEYWORD_KINDS[i]
+        }
+    }
+    loop (i from 0 until 8) {
+        when (spelling == RESERVED_WORDS[i]) {
+            return K_RESERVED
+        }
+    }
+    return -1
+}
+
+# ---- literal scanners ----
+
+function.scan_text_lit() -> number {
+    type.number s_off = s_pos
+    type.number s_line0 = s_line
+    type.number s_col0 = s_col
+    advance()
+    # the literal ends at the closing quote; a newline or EOF leaves it
+    # unterminated (an error the consumer reports — bootstrap/src/lexer.c)
+    loop (s_pos < len and cur() != 34 and cur() != 10) {
+        when (cur() == 92 and s_pos + 1 < len) {
+            advance()
+        }
+        advance()
+    }
+    when (s_pos < len and cur() == 34) {
+        advance()
+    }
+    return push_tok(K_TEXT, s_line0, s_col0, s_off, s_pos - s_off)
+}
+
+function.scan_number() -> number {
+    type.number s_off = s_pos
+    type.number s_line0 = s_line
+    type.number s_col0 = s_col
+    type.number is_decimal = 0
+    when (cur() == 48 and (look() == 120 or look() == 88)) {
+        advance()
+        advance()
+        loop (s_pos < len and is_hex(cur())) {
+            advance()
+        }
+    }
+    else {
+        # digit runs group with `_` (1_000_000), like bootstrap/src/lexer.c
+        loop (s_pos < len and (is_digit(cur()) or cur() == 95)) {
+            advance()
+        }
+        when (cur() == 46 and is_digit(look())) {
+            is_decimal = 1
+            advance()
+            loop (s_pos < len and (is_digit(cur()) or cur() == 95)) {
+                advance()
+            }
+        }
+    }
+    when (is_decimal == 1) {
+        return push_tok(K_DEC, s_line0, s_col0, s_off, s_pos - s_off)
+    }
+    return push_tok(K_INT, s_line0, s_col0, s_off, s_pos - s_off)
+}
+
+function.scan_ident() -> number {
+    type.number s_off = s_pos
+    type.number s_line0 = s_line
+    type.number s_col0 = s_col
+    loop (s_pos < len and is_alnum(cur())) {
+        advance()
+    }
+    type.text sp = text.slice(src, s_off, s_pos)
+    type.number kw = keyword_kind(sp)
+    when (kw == -1) {
+        return push_tok(K_IDENT, s_line0, s_col0, s_off, s_pos - s_off)
+    }
+    return push_tok(kw, s_line0, s_col0, s_off, s_pos - s_off)
+}
+
+# ---- operators and punctuation ----
+
+function.scan_punct(number.c) -> number {
+    type.number l = s_line
+    type.number cl = s_col
+
+    when (c == 43) {
+        advance()
+        return push_tok(K_PLUS, l, cl, 0, 0)
+    }
+    else when (c == 42) {
+        advance()
+        return push_tok(K_STAR, l, cl, 0, 0)
+    }
+    else when (c == 47) {
+        advance()
+        return push_tok(K_SLASH, l, cl, 0, 0)
+    }
+    else when (c == 37) {
+        advance()
+        return push_tok(K_PERCENT, l, cl, 0, 0)
+    }
+    else when (c == 45) {
+        advance()
+        when (cur() == 62) {
+            advance()
+            return push_tok(K_ARROW, l, cl, 0, 0)
+        }
+        return push_tok(K_MINUS, l, cl, 0, 0)
+    }
+    else when (c == 61) {
+        advance()
+        when (cur() == 61) {
+            advance()
+            return push_tok(K_EQEQ, l, cl, 0, 0)
+        }
+        return push_tok(K_EQ, l, cl, 0, 0)
+    }
+    else when (c == 33) {
+        advance()
+        when (cur() == 61) {
+            advance()
+            return push_tok(K_BANGEQ, l, cl, 0, 0)
+        }
+        return push_tok(K_NOT, l, cl, 0, 0)
+    }
+    else when (c == 60) {
+        advance()
+        when (cur() == 61) {
+            advance()
+            return push_tok(K_LE, l, cl, 0, 0)
+        }
+        when (cur() == 60) {
+            advance()
+            return push_tok(K_SHL, l, cl, 0, 0)
+        }
+        return push_tok(K_LT, l, cl, 0, 0)
+    }
+    else when (c == 62) {
+        advance()
+        when (cur() == 61) {
+            advance()
+            return push_tok(K_GE, l, cl, 0, 0)
+        }
+        when (cur() == 62) {
+            advance()
+            return push_tok(K_SHR, l, cl, 0, 0)
+        }
+        return push_tok(K_GT, l, cl, 0, 0)
+    }
+    else when (c == 124) {
+        advance()
+        return push_tok(K_PIPE, l, cl, 0, 0)
+    }
+    else when (c == 94) {
+        advance()
+        return push_tok(K_CARET, l, cl, 0, 0)
+    }
+    else when (c == 126) {
+        advance()
+        return push_tok(K_TILDE, l, cl, 0, 0)
+    }
+    else when (c == 46) {
+        advance()
+        return push_tok(K_DOT, l, cl, 0, 0)
+    }
+    else when (c == 44) {
+        advance()
+        return push_tok(K_COMMA, l, cl, 0, 0)
+    }
+    else when (c == 38) {
+        advance()
+        return push_tok(K_AMP, l, cl, 0, 0)
+    }
+    else when (c == 40) {
+        advance()
+        s_depth = s_depth + 1
+        return push_tok(K_LPAREN, l, cl, 0, 0)
+    }
+    else when (c == 41) {
+        advance()
+        when (s_depth > 0) {
+            s_depth = s_depth - 1
+        }
+        return push_tok(K_RPAREN, l, cl, 0, 0)
+    }
+    else when (c == 123) {
+        advance()
+        return push_tok(K_LBRACE, l, cl, 0, 0)
+    }
+    else when (c == 125) {
+        advance()
+        return push_tok(K_RBRACE, l, cl, 0, 0)
+    }
+    else when (c == 91) {
+        advance()
+        s_depth = s_depth + 1
+        return push_tok(K_LBRACKET, l, cl, 0, 0)
+    }
+    else when (c == 93) {
+        advance()
+        when (s_depth > 0) {
+            s_depth = s_depth - 1
+        }
+        return push_tok(K_RBRACKET, l, cl, 0, 0)
+    }
+
+    # an unexpected byte: record the lexical error (reported by the
+    # loader; the module is broken and never parsed), then skip it
+    when (err_kind == ERR_NONE) {
+        err_kind = ERR_BYTE
+        err_line = l
+        err_col = cl
+        err_byte = c
+    }
+    advance()
+    return 0
+}
+
+# ---- one scan step ----
+
+function.scan_step() -> number {
+    type.number c = cur()
+
+    when (c == 32 or c == 9 or c == 13) {
+        advance()
+        return 0
+    }
+    else when (c == 10) {
+        type.number l = s_line
+        type.number cl = s_col
+        advance()
+        when (s_depth == 0) {
+            return push_tok(K_NL, l, cl, 0, 0)
+        }
+        return 0
+    }
+    else when (c == 35) {
+        loop (s_pos < len and cur() != 10) {
+            advance()
+        }
+        return 0
+    }
+    else when (c == 34) {
+        return scan_text_lit()
+    }
+    else when (is_digit(c)) {
+        return scan_number()
+    }
+    else when (is_alpha(c)) {
+        return scan_ident()
+    }
+    return scan_punct(c)
+}
+
+# ---- entry: tokenize one file into the buffer; returns the token count ----
+
+function.load(text.path) -> number {
+    src = fs.read(path)
+    len = text.length(src)
+    s_pos = 0
+    s_line = 1
+    s_col = 1
+    s_depth = 0
+    ntok = 0
+    err_kind = ERR_NONE
+    when (buf != null) {
+        release(buf)
+        buf = null
+        cap = 0
+    }
+    loop (s_pos < len) {
+        scan_step()
+    }
+    push_tok(K_EOF, s_line, s_col, 0, 0)
+    return ntok
+}

@@ -1371,6 +1371,7 @@ void ir_fold(IrFunc *f) {
             case SYSOP_CLOSE:   if (sp >= 1) sp -= 1; break;
             case SYSOP_SIZE:    if (sp >= 1) sp -= 1; break;
             case SYSOP_CHMOD:   if (sp >= 2) sp -= 2; break;   /* path, mode */
+            case SYSOP_MKDIR:   if (sp >= 2) sp -= 2; break;   /* path, mode */
             case SYSOP_MMAP:    if (sp >= 1) sp -= 1; break;
             case SYSOP_EXIT:    break;      /* never returns */
             }

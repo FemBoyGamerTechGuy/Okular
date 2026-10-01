@@ -1729,6 +1729,8 @@ static OkType check_call(SemaCtx *c, Node *n) {
             op = SYSOP_EXIT; want_args = 1; sig = "sys.exit(number.code)"; rty = ty_void;
         } else if (strcmp(n->parts[1], "chmod") == 0) {
             op = SYSOP_CHMOD; want_args = 2; sig = "sys.chmod(text.path, number.mode) -> number"; rty = ty_number;
+        } else if (strcmp(n->parts[1], "mkdir") == 0) {
+            op = SYSOP_MKDIR; want_args = 2; sig = "sys.mkdir(text.path, number.mode) -> number"; rty = ty_number;
         } else {
             op = -1; want_args = 0; sig = NULL; rty = ty_void;
         }
@@ -1802,6 +1804,14 @@ static OkType check_call(SemaCtx *c, Node *n) {
                                  ok_type_name(at));
                     else if (i == 1 && !ty_is_integer(at))
                         d = serr(c, arg, "the mode of `sys.chmod` must be an integer, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    break;
+                case SYSOP_MKDIR:
+                    if (i == 0 && at != ty_text)
+                        d = serr(c, arg, "the path of `sys.mkdir` must be `text`, but a `%s` value was given.",
+                                 ok_type_name(at));
+                    else if (i == 1 && !ty_is_integer(at))
+                        d = serr(c, arg, "the mode of `sys.mkdir` must be an integer, but a `%s` value was given.",
                                  ok_type_name(at));
                     break;
                 }

@@ -1,0 +1,34 @@
+# sys_chmod_label_trap — regression: sys.chmod's emitter-side trap labels
+# once used the RAW per-function trap_seq counter instead of trap_lbl()
+# (TRAP_BASE + n), colliding with IR control-flow label numbers. The
+# patch_jumps pass then rewrote a live JMPF to jump into the middle of the
+# chmod syscall sequence (found via the M5 self-build differential: the
+# self-compiled compiler wrote its output to an empty path / crashed).
+# This shape — when-chains whose labels 0/1.. are defined before a
+# sys.chmod in the same function — must compile and run correctly.
+type.text=1
+
+type.number flag = 0
+
+function.main() -> number {
+    type.number argc = env.arg_count()
+    type.text out_path = ""
+    when (argc >= 3 and env.arg(2) == "--x") {
+        flag = 1
+    }
+    when (argc >= 4 and env.arg(2) == "--y") {
+        out_path = env.arg(3)
+    }
+    sys.write(1, "A\n")
+    type.number q = 100 / 7
+    when (out_path == "") {
+        out_path = "default"
+    }
+    sys.write(1, "B " + out_path + "\n")
+    sys.chmod("definitely_missing_file_xyz", 493)
+    sys.write(1, "C\n")
+    sys.write(1, number.to_text(q) + "\n")
+    return 0
+}
+
+return main()

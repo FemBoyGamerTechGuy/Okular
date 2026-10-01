@@ -1,0 +1,2526 @@
+# emit.ok — the x86-64 native backend, written in Okular (M5).
+#
+# A direct machine-code port of bootstrap/src/codegen_x64.c: the same
+# Okular Internal ABI v1 (args in rdi..r9, decimal as raw bits, text as a
+# (ptr,len) pair behind one register, arrays caller-copied, 16-byte stack
+# alignment across calls), the same frame layout, the same instruction
+# selection — but emitting bytes into elf.ok's code buffer instead of
+# assembly text. No `as`, no `ld`.
+
+# ---- register numbers ----
+const.R_RAX = 0
+const.R_RCX = 1
+const.R_RDX = 2
+const.R_RBX = 3
+const.R_RSP = 4
+const.R_RBP = 5
+const.R_RSI = 6
+const.R_RDI = 7
+const.R_R8 = 8
+const.R_R9 = 9
+const.R_R10 = 10
+const.R_R11 = 11
+
+# ---- byte emission into the code buffer ----
+
+function.put(number.b) -> number {
+    elf.buf_put(elf.code, b & 255)
+    return 0
+}
+
+function.put32(number.v) -> number {
+    elf.buf_put32(elf.code, v & 4294967295)
+    return 0
+}
+
+function.put64(number.v) -> number {
+    elf.buf_put64(elf.code, v)
+    return 0
+}
+
+function.code_len() -> number {
+    return elf.code_len()
+}
+
+# ---- the low-level encoder ----
+
+# REX prefix: W always (64-bit), R when reg field >= 8, B when rm/base >= 8
+function.rex(number.reg, number.rm) -> number {
+    type.number r = 0x40 | 8
+    when (reg >= 8) {
+        r = r | 4
+    }
+    when (rm >= 8) {
+        r = r | 1
+    }
+    return r
+}
+
+function.push_reg(number.reg) -> number {
+    when (reg >= 8) {
+        put(0x41)
+        put(0x50 + reg - 8)
+        return 0
+    }
+    put(0x50 + reg)
+    return 0
+}
+
+function.pop_reg(number.reg) -> number {
+    when (reg >= 8) {
+        put(0x41)
+        put(0x58 + reg - 8)
+        return 0
+    }
+    put(0x58 + reg)
+    return 0
+}
+
+# mov r64, r64: REX.W 89 /r (src in reg field, dst in rm)
+function.mov_rr(number.dst, number.src) -> number {
+    put(rex(src, dst))
+    put(0x89)
+    put(0xC0 | ((src & 7) << 3) | (dst & 7))
+    return 0
+}
+
+# mov r64, imm (zero-extending 32-bit form when it fits)
+function.mov_r_imm(number.dst, number.v) -> number {
+    when (v == 0) {
+        # xor r32, r32
+        when (dst >= 8) {
+            put(0x45)
+        }
+        put(0x31)
+        put(0xC0 | ((dst & 7) << 3) | (dst & 7))
+        return 0
+    }
+    when (v > 0 and v <= 2147483647) {
+        when (dst >= 8) {
+            put(0x41)
+        }
+        put(0xB8 + (dst & 7))
+        put32(v)
+        return 0
+    }
+    when (dst >= 8) {
+        put(0x49)
+    }
+    else {
+        put(0x48)
+    }
+    put(0xB8 + (dst & 7))
+    put64(v)
+    return 0
+}
+
+# mov r64, absolute address of a symbol (+ addend): REX.W B8+rd, fixup later
+function.mov_r_sym(number.dst, number.sym, number.addend) -> number {
+    when (dst >= 8) {
+        put(0x49)
+    }
+    else {
+        put(0x48)
+    }
+    put(0xB8 + (dst & 7))
+    type.number at = code_len()
+    loop (i from 0 until 8) {
+        put(0)
+    }
+    elf.fx_abs64(0, at, sym, addend)
+    return 0
+}
+
+# [rbp + disp] with disp SIGNED (negative = locals, toward lower addresses):
+# load reg <- [rbp+disp]
+function.load_rbp(number.reg, number.disp) -> number {
+    put(rex(reg, 0))
+    put(0x8B)
+    when (disp >= -128 and disp <= 127) {
+        put(0x45 | ((reg & 7) << 3))
+        put(disp & 255)
+    }
+    else {
+        put(0x85 | ((reg & 7) << 3))
+        put32(disp)
+    }
+    return 0
+}
+
+# store reg -> [rbp+disp]
+function.store_rbp(number.reg, number.disp) -> number {
+    put(rex(reg, 0))
+    put(0x89)
+    when (disp >= -128 and disp <= 127) {
+        put(0x45 | ((reg & 7) << 3))
+        put(disp & 255)
+    }
+    else {
+        put(0x85 | ((reg & 7) << 3))
+        put32(disp)
+    }
+    return 0
+}
+
+# lea reg, [rbp+disp]
+function.lea_rbp(number.reg, number.disp) -> number {
+    put(rex(reg, 0))
+    put(0x8D)
+    when (disp >= -128 and disp <= 127) {
+        put(0x45 | ((reg & 7) << 3))
+        put(disp & 255)
+    }
+    else {
+        put(0x85 | ((reg & 7) << 3))
+        put32(disp)
+    }
+    return 0
+}
+
+# lea reg, [rbp + disp] via mov r, rbp when disp == 0 (mirrors lea_rbp)
+function.lea_rbp0(number.reg) -> number {
+    mov_rr(reg, R_RBP)
+    return 0
+}
+
+# reg <- [rsp + d] (d unsigned small)
+function.load_rsp(number.reg, number.d) -> number {
+    put(rex(reg, 0))
+    put(0x8B)
+    when (d <= 127) {
+        put(0x44 | ((reg & 7) << 3))
+        put(0x24)
+        put(d)
+    }
+    else {
+        put(0x84 | ((reg & 7) << 3))
+        put(0x24)
+        put32(d)
+    }
+    return 0
+}
+
+# reg <- [reg2] (indirect)
+function.load_ind(number.reg, number.rm) -> number {
+    put(rex(reg, rm))
+    put(0x8B)
+    put((reg & 7) << 3 | (rm & 7))
+    return 0
+}
+
+# reg <- [rm + disp8]
+function.load_ind8(number.reg, number.rm, number.d) -> number {
+    put(rex(reg, rm))
+    put(0x8B)
+    put(0x40 | ((reg & 7) << 3) | (rm & 7))
+    put(d & 255)
+    return 0
+}
+
+# [rm] <- reg
+function.store_ind(number.rm, number.reg) -> number {
+    put(rex(reg, rm))
+    put(0x89)
+    put((reg & 7) << 3 | (rm & 7))
+    return 0
+}
+
+# [rm + disp8] <- reg
+function.store_ind8(number.rm, number.d, number.reg) -> number {
+    put(rex(reg, rm))
+    put(0x89)
+    put(0x40 | ((reg & 7) << 3) | (rm & 7))
+    put(d & 255)
+    return 0
+}
+
+# ---- scalar-width loads/stores through rax (natural width) ----
+
+# load [rax] at type t's width into rax (emit_load_at_rax)
+function.load_at_rax(type.ptr<type.Ty>.t) -> number {
+    type.number k = 0
+    when (t != null and t.form == sema.F_SCALAR) {
+        k = t.scalar
+    }
+    # bool/uint8: movzx rax, byte [rax]
+    when (t == sema.T_BOOL or k == sema.S_UINT8) {
+        put(0x48)
+        put(0x0F)
+        put(0xB6)
+        put(0x00)
+        return 0
+    }
+    when (k == sema.S_INT8) {
+        # movsx rax, byte [rax]
+        put(0x48)
+        put(0x0F)
+        put(0xBE)
+        put(0x00)
+        return 0
+    }
+    when (k == sema.S_UINT16) {
+        put(0x48)
+        put(0x0F)
+        put(0xB7)
+        put(0x00)
+        return 0
+    }
+    when (k == sema.S_INT16) {
+        put(0x48)
+        put(0x0F)
+        put(0xBF)
+        put(0x00)
+        return 0
+    }
+    when (k == sema.S_UINT32) {
+        # mov eax, [rax] (zero-extends)
+        put(0x8B)
+        put(0x00)
+        return 0
+    }
+    when (k == sema.S_INT32) {
+        # movsxd rax, dword [rax]
+        put(0x48)
+        put(0x63)
+        put(0x00)
+        return 0
+    }
+    # default: mov rax, [rax]
+    put(0x48)
+    put(0x8B)
+    put(0x00)
+    return 0
+}
+
+# store rax into [rcx] at type t's width (emit_store_rax_at with rcx)
+function.store_rax_rcx(type.ptr<type.Ty>.t) -> number {
+    type.number k = 0
+    when (t != null and t.form == sema.F_SCALAR) {
+        k = t.scalar
+    }
+    when (t == sema.T_BOOL or k == sema.S_UINT8 or k == sema.S_INT8) {
+        # mov [rcx], al
+        put(0x88)
+        put(0x01)
+        return 0
+    }
+    when (k == sema.S_UINT16 or k == sema.S_INT16) {
+        # mov [rcx], ax
+        put(0x66)
+        put(0x89)
+        put(0x01)
+        return 0
+    }
+    when (k == sema.S_UINT32 or k == sema.S_INT32) {
+        # mov [rcx], eax
+        put(0x89)
+        put(0x01)
+        return 0
+    }
+    # mov [rcx], rax
+    put(0x48)
+    put(0x89)
+    put(0x01)
+    return 0
+}
+
+# ---- control flow: local labels with backpatching ----
+
+type.ptr<type.number> lbl_pos = null      # label -> code offset (0 = unset)
+type.number lbl_n = 0
+type.number lbl_cap = 0
+type.ptr<type.number> jsite_lbl = null    # jump sites awaiting patch
+type.ptr<type.number> jsite_at = null
+type.number n_jsite = 0
+type.number jsite_cap = 0
+
+function.label_reserve(number.n) -> number {
+    when (n > lbl_cap) {
+        type.number newcap = 16
+        when (lbl_cap > 0) {
+            newcap = lbl_cap * 2
+        }
+        loop (n > newcap) {
+            newcap = newcap * 2
+        }
+        type.ptr<type.number> np = alloc<type.number>(newcap)
+        loop (i from 0 until lbl_n) {
+            np[i] = lbl_pos[i]
+        }
+        type.ptr<type.number> old = lbl_pos
+        lbl_pos = np
+        lbl_cap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    loop (i from lbl_n until n) {
+        lbl_pos[i] = -1
+    }
+    when (n > lbl_n) {
+        lbl_n = n
+    }
+    return 0
+}
+
+# codegen-local (trap) labels live in a separate region of the label
+# namespace — IR control-flow labels occupy 0..999999
+const.TRAP_BASE = 1000000
+
+function.trap_lbl(number.n) -> number {
+    return TRAP_BASE + n
+}
+
+function.label_here(number.lbl) -> number {
+    label_reserve(lbl + 1)
+    lbl_pos[lbl] = code_len()
+    return 0
+}
+
+# record a jump site at a KNOWN offset (the rel32 field position)
+function.jmp_site_at(number.lbl, number.at) -> number {
+    when (n_jsite == jsite_cap) {
+        type.number newcap = 32
+        when (jsite_cap > 0) {
+            newcap = jsite_cap * 2
+        }
+        type.ptr<type.number> nl = alloc<type.number>(newcap)
+        type.ptr<type.number> na = alloc<type.number>(newcap)
+        loop (i from 0 until n_jsite) {
+            nl[i] = jsite_lbl[i]
+            na[i] = jsite_at[i]
+        }
+        type.ptr<type.number> ol = jsite_lbl
+        type.ptr<type.number> oa = jsite_at
+        jsite_lbl = nl
+        jsite_at = na
+        jsite_cap = newcap
+        when (ol != null) {
+            release(ol)
+            release(oa)
+        }
+    }
+    jsite_lbl[n_jsite] = lbl
+    jsite_at[n_jsite] = at
+    n_jsite = n_jsite + 1
+    return 0
+}
+
+# patch every recorded jump site: rel32 = label_pos - (site + 4)
+function.patch_jumps() -> number {
+    loop (i from 0 until n_jsite) {
+        type.number lbl = jsite_lbl[i]
+        type.number site = jsite_at[i]
+        type.number target = lbl_pos[lbl]
+        type.number rel = target - (site + 4)
+        elf.buf_wr32_at(elf.code, site, rel & 4294967295)
+    }
+    n_jsite = 0
+    return 0
+}
+
+# jmp label
+function.jmp_lbl(number.lbl) -> number {
+    put(0xE9)
+    type.number at = code_len()
+    put32(0)
+    jmp_site_at(lbl, at)
+    return 0
+}
+
+# jcc label: 0F 8x rel32 (cc = low 4 bits of the condition opcode)
+function.jcc_lbl(number.cc, number.lbl) -> number {
+    put(0x0F)
+    put(0x80 | (cc & 15))
+    type.number at = code_len()
+    put32(0)
+    jmp_site_at(lbl, at)
+    return 0
+}
+
+# ---- calls ----
+
+# call a symbol (rel32 + fixup)
+function.call_sym(number.sym) -> number {
+    put(0xE8)
+    type.number at = code_len()
+    put32(0)
+    elf.fx_rel32(0, at, sym)
+    return 0
+}
+
+# call_aligned: rbx saved, rsp 16-aligned across the call
+function.call_aligned_sym(number.sym) -> number {
+    put(0x53)                    # push rbx
+    put(0x48)
+    put(0x89)
+    put(0xE3)                    # mov rbx, rsp
+    put(0x48)
+    put(0x83)
+    put(0xE4)
+    put(0xF0)                    # and rsp, -16
+    call_sym(sym)
+    put(0x48)
+    put(0x89)
+    put(0xDC)                    # mov rsp, rbx
+    put(0x5B)                    # pop rbx
+    return 0
+}
+
+# raw call (traps that never return): no alignment needed
+function.call_raw(number.sym) -> number {
+    return call_sym(sym)
+}
+
+# ---- symbol lookup by name ----
+
+function.sym_by_name(text.name) -> number {
+    loop (i from 0 until elf.sym_count()) {
+        when (elf.sym_name_at(i) == name) {
+            return i
+        }
+    }
+    return -1
+}
+
+function.sym_set_off(number.id, number.off) -> number {
+    elf.sym_offset_set(id, off)
+    return 0
+}
+
+# rt function symbol ids (resolved lazily after all modules registered)
+function.rt_sym(text.fn) -> number {
+    type.number id = sym_by_name("ok_rt_" + fn)
+    return id
+}
+
+# ---- per-function layout state ----
+
+type.ptr<type.IrFunc> curf = null
+type.ptr<type.number> foffs = null        # slot -> rbp-relative offset (positive below rbp)
+type.number locals_bytes = 0
+type.number oa_base = 0
+type.number scratch_base = 0
+type.number func_seq = 0
+type.number trap_seq = 0
+type.number frame_size = 0
+
+# current module's text table: text_idx -> (rodata symbol, len)
+type.ptr<type.number> txt_sym = null
+type.ptr<type.number> txt_len = null
+type.number txt_n = 0
+
+function.slot_bytes(type.ptr<type.IrSlot>.s) -> number {
+    # every slot is 8-byte granular: sub-word scalars are padded
+    type.number b = sema.ty_bytes(s.ty)
+    return (b + 7) & -8
+}
+
+function.fn_offset(number.slot) -> number {
+    return foffs[slot]
+}
+
+# argument registers (index 0..5)
+const.ARG0 = 7    # rdi
+const.ARG1 = 6    # rsi
+const.ARG2 = 2    # rdx
+const.ARG3 = 1    # rcx
+const.ARG4 = 8    # r8
+const.ARG5 = 9    # r9
+
+function.arg_reg(number.k) -> number {
+    when (k == 0) { return ARG0 }
+    else when (k == 1) { return ARG1 }
+    else when (k == 2) { return ARG2 }
+    else when (k == 3) { return ARG3 }
+    else when (k == 4) { return ARG4 }
+    return ARG5
+}
+
+# ---- value push/pop on the operand (machine) stack ----
+
+function.push_rax() -> number {
+    put(0x50)
+    return 0
+}
+
+function.push_rdx() -> number {
+    put(0x52)
+    return 0
+}
+
+function.push_pair() -> number {
+    # push rdx; push rax (rax on top = the pointer half)
+    put(0x52)
+    put(0x50)
+    return 0
+}
+
+function.pop_rax() -> number {
+    put(0x58)
+    return 0
+}
+
+function.pop_rcx() -> number {
+    put(0x59)
+    return 0
+}
+
+function.pop_rdx() -> number {
+    put(0x5A)
+    return 0
+}
+
+function.pop_r11() -> number {
+    put(0x41)
+    put(0x5B)
+    return 0
+}
+
+function.pop_r10() -> number {
+    put(0x41)
+    put(0x5A)
+    return 0
+}
+
+function.pop_pair_rax_rdx() -> number {
+    # pop rax (ptr); pop rdx (len)
+    put(0x58)
+    put(0x5A)
+    return 0
+}
+
+function.push_xmm0() -> number {
+    # sub rsp, 8; movsd [rsp], xmm0
+    put(0x48)
+    put(0x83)
+    put(0xEC)
+    put(0x08)
+    put(0xF2)
+    put(0x0F)
+    put(0x11)
+    put(0x04)
+    put(0x24)
+    return 0
+}
+
+function.pop_xmm0() -> number {
+    # movsd xmm0, [rsp]; add rsp, 8
+    put(0xF2)
+    put(0x0F)
+    put(0x10)
+    put(0x04)
+    put(0x24)
+    put(0x48)
+    put(0x83)
+    put(0xC4)
+    put(0x08)
+    return 0
+}
+
+# ---- fixed instruction helpers ----
+
+function.movq_xmm0_rax() -> number {
+    # movq xmm0, rax
+    put(0x66)
+    put(0x48)
+    put(0x0F)
+    put(0x6E)
+    put(0xC0)
+    return 0
+}
+
+function.movq_rax_xmm0() -> number {
+    # movq rax, xmm0
+    put(0x66)
+    put(0x48)
+    put(0x0F)
+    put(0x7E)
+    put(0xC0)
+    return 0
+}
+
+function.emit_reencode(type.ptr<type.Ty>.t) -> number {
+    # wrap rax to the type's width: shl then sar/shr
+    when (t == null) {
+        return 0
+    }
+    when (sema.is_integer(t) == false) {
+        return 0
+    }
+    type.number bits = sema.ty_bits(t)
+    when (bits >= 64) {
+        return 0
+    }
+    type.number sh = 64 - bits
+    # shl rax, sh
+    put(0x48)
+    put(0xC1)
+    put(0xE0)
+    put(sh)
+    when (sema.ty_signed(t)) {
+        # sar rax, sh
+        put(0x48)
+        put(0xC1)
+        put(0xF8)
+        put(sh)
+    }
+    else {
+        # shr rax, sh
+        put(0x48)
+        put(0xC1)
+        put(0xE8)
+        put(sh)
+    }
+    return 0
+}
+
+function.rep_movsb() -> number {
+    put(0xF3)
+    put(0xA4)
+    return 0
+}
+
+function.mov_rcx_imm(number.v) -> number {
+    # mov rcx, imm32 (sign-extended)
+    put(0x48)
+    put(0xC7)
+    put(0xC1)
+    put32(v)
+    return 0
+}
+
+# lea rax, [rax + rcx * scale] for scale 2/4/8
+function.lea_rax_rcx_scaled(number.esz) -> number {
+    put(0x48)
+    put(0x8D)
+    put(0x04)
+    type.number sib = 0x08
+    when (esz == 2) {
+        sib = 0x48
+    }
+    else when (esz == 4) {
+        sib = 0x88
+    }
+    else {
+        sib = 0xC8
+    }
+    put(sib)
+    return 0
+}
+
+# imul reg, reg, imm32 (three-operand)
+function.imul_r_imm(number.reg, number.v) -> number {
+    put(rex(reg, reg))
+    put(0x69)
+    put(0xC0 | ((reg & 7) << 3) | (reg & 7))
+    put32(v)
+    return 0
+}
+
+# imul rax, rcx (two-operand)
+function.imul_rax_rcx() -> number {
+    put(0x48)
+    put(0x0F)
+    put(0xAF)
+    put(0xC1)
+    return 0
+}
+
+# ---- text literal plumbing: module texts -> rodata symbols ----
+
+function.load_texts(type.ptr<type.IrModule>.im) -> number {
+    txt_n = im.ntexts
+    type.ptr<type.number> ts = alloc<type.number>(im.ntexts + 1)
+    type.ptr<type.number> tl = alloc<type.number>(im.ntexts + 1)
+    txt_sym = ts
+    txt_len = tl
+    loop (i from 0 until im.ntexts) {
+        type.text t = im.texts[i]
+        type.number off = elf.rodata_append(t)
+        type.number sid = elf.sym_def(".Lstr" + number.to_text(i), 1, off)
+        ts[i] = sid
+        tl[i] = text.length(t)
+    }
+    return 0
+}
+
+# ---- function generation ----
+
+function.sym_for_fi(type.ptr<type.FuncInfo>.fi) -> number {
+    # pre-registered in the pre-pass; find by mangled name
+    return sym_by_name(fi.mangled)
+}
+
+function.gen_function(type.ptr<type.IrModule>.im, type.ptr<type.IrFunc>.f, number.seq) -> number {
+    curf = f
+    trap_seq = 0
+
+    # slot offsets: locals occupy [rbp-locals_bytes, rbp)
+    type.ptr<type.number> offs = alloc<type.number>(f.nslots + 1)
+    foffs = offs
+    type.number off = 0
+    loop (i from 0 until f.nslots) {
+        off = off + slot_bytes(f.slots[i])
+        offs[i] = off
+    }
+    locals_bytes = off
+    oa_base = off + 96
+    scratch_base = oa_base + 96
+
+    # array-arg scratch: the largest total of array bytes any single call passes
+    type.number scratch = 0
+    loop (i from 0 until f.n) {
+        type.ptr<type.IrInst> inst = f.insts[i]
+        when (inst.kind != ir.I_CALL) {
+            continue
+        }
+        type.ptr<type.FuncInfo> cfi = inst.finfo
+        type.number need = 0
+        type.number lim = inst.nargs
+        when (lim > cfi.nparams) {
+            lim = cfi.nparams
+        }
+        loop (k from 0 until lim) {
+            type.ptr<type.Ty> pt = cfi.ptypes[k]
+            when (pt.form == sema.F_ARRAY or sema.is_record(pt)) {
+                need = need + sema.ty_bytes(pt)
+            }
+        }
+        when (need > scratch) {
+            scratch = need
+        }
+    }
+
+    # syscall scratch (open/chmod path buffer + fstat struct)
+    type.number sys_extra = 0
+    loop (i from 0 until f.n) {
+        type.ptr<type.IrInst> inst = f.insts[i]
+        when (inst.kind == ir.I_SYSOP and (inst.i == 2 or inst.i == 4 or inst.i == 7)) {
+            sys_extra = SYS_EXTRA
+        }
+    }
+
+    cur_scratch = scratch
+    type.number frame = scratch_base + scratch + sys_extra
+    frame = (frame + 15) & -16
+    frame_size = frame
+
+    # the function's symbol position was registered in the pre-pass; update it
+    sym_set_off(sym_for_fi(f.fi), code_len())
+
+    # prologue
+    put(0x55)                    # push rbp
+    put(0x48)
+    put(0x89)
+    put(0xE5)                    # mov rbp, rsp
+    put(0x48)
+    put(0x81)
+    put(0xEC)
+    put32(frame)                 # sub rsp, frame
+
+    # store parameters into their slots (regs saved first: adoption may
+    # clobber rsi/rdi/rcx that later parameters still need)
+    type.number nparams = f.fi.nparams
+    when (nparams > 0) {
+        push_reg(ARG0)
+        push_reg(ARG1)
+        push_reg(ARG2)
+        push_reg(ARG3)
+        push_reg(ARG4)
+        push_reg(ARG5)
+    }
+    loop (k from 0 until nparams) {
+        when (k >= 6) {
+            break
+        }
+        type.number o = offs[k]
+        type.number so = (5 - k) * 8
+        type.ptr<type.Ty> pt = f.fi.ptypes[k]
+        when (pt.form == sema.F_ARRAY or sema.is_record(pt)) {
+            # the saved register holds the caller's copy: adopt it by value
+            load_rsp(R_R11, so)          # mov r11, [rsp+so]
+            mov_rr(R_RSI, R_R11)         # mov rsi, r11
+            lea_rbp(R_RDI, -o)           # lea rdi, [rbp-o]
+            mov_rcx_imm(sema.ty_bytes(pt))
+            rep_movsb()
+        }
+        else when (pt == sema.T_TEXT) {
+            # the saved register holds the address of a (ptr,len) pair
+            load_rsp(R_R11, so)          # mov r11, [rsp+so]
+            load_ind(R_RAX, R_R11)       # mov rax, [r11]
+            load_ind8(R_RDX, R_R11, 8)   # mov rdx, [r11+8]
+            store_rbp(R_RAX, -o)         # mov [rbp-o], rax
+            store_rbp(R_RDX, -o + 8)     # mov [rbp-o+8], rdx
+        }
+        else {
+            load_rsp(R_R11, so)          # mov r11, [rsp+so]
+            store_rbp(R_R11, -o)         # mov [rbp-o], r11
+        }
+    }
+    when (nparams > 0) {
+        # add rsp, 48
+        put(0x48)
+        put(0x83)
+        put(0xC4)
+        put(0x30)
+    }
+
+    # body
+    loop (i from 0 until f.n) {
+        emit_inst(f.insts[i])
+    }
+
+    # implicit fall-off return: deterministic rax
+    put(0x31)
+    put(0xC0)                    # xor eax, eax
+    put(0xC9)                    # leave
+    put(0xC3)                    # ret
+
+    patch_jumps()
+    return 0
+}
+
+# ---- ALU helpers (intel-style operand order) ----
+
+# add dst, src
+function.add_rr(number.dst, number.src) -> number {
+    put(rex(src, dst))
+    put(0x01)
+    put(0xC0 | ((src & 7) << 3) | (dst & 7))
+    return 0
+}
+
+function.sub_rr(number.dst, number.src) -> number {
+    put(rex(src, dst))
+    put(0x29)
+    put(0xC0 | ((src & 7) << 3) | (dst & 7))
+    return 0
+}
+
+function.and_rr(number.dst, number.src) -> number {
+    put(rex(src, dst))
+    put(0x21)
+    put(0xC0 | ((src & 7) << 3) | (dst & 7))
+    return 0
+}
+
+function.or_rr(number.dst, number.src) -> number {
+    put(rex(src, dst))
+    put(0x09)
+    put(0xC0 | ((src & 7) << 3) | (dst & 7))
+    return 0
+}
+
+function.xor_rr(number.dst, number.src) -> number {
+    put(rex(src, dst))
+    put(0x31)
+    put(0xC0 | ((src & 7) << 3) | (dst & 7))
+    return 0
+}
+
+# cmp a, b (flags from a - b): opcode 39 /r, reg=b, rm=a
+function.cmp_rr(number.a, number.b) -> number {
+    put(rex(b, a))
+    put(0x39)
+    put(0xC0 | ((b & 7) << 3) | (a & 7))
+    return 0
+}
+
+# test a, b (flags from a AND b): opcode 85 /r, reg=b, rm=a
+function.test_rr(number.a, number.b) -> number {
+    put(rex(b, a))
+    put(0x85)
+    put(0xC0 | ((b & 7) << 3) | (a & 7))
+    return 0
+}
+
+# cmp rcx, imm8
+function.cmp_rcx_imm8(number.v) -> number {
+    put(0x48)
+    put(0x83)
+    put(0xF9)
+    put(v & 255)
+    return 0
+}
+
+# cmp rcx, imm32
+function.cmp_rcx_imm32(number.v) -> number {
+    put(0x48)
+    put(0x81)
+    put(0xF9)
+    put32(v)
+    return 0
+}
+
+# cmp reg, imm32 (sign-extended)
+function.cmp_r_imm32(number.reg, number.v) -> number {
+    put(rex(reg, reg))
+    put(0x81)
+    put(0xF8 | (reg & 7))
+    put32(v)
+    return 0
+}
+
+# cmp reg, imm8
+function.cmp_r_imm8(number.reg, number.v) -> number {
+    put(rex(reg, reg))
+    put(0x83)
+    put(0xF8 | (reg & 7))
+    put(v & 255)
+    return 0
+}
+
+# setcc al (cc in the low 4 bits)
+function.setcc_al(number.cc) -> number {
+    put(0x0F)
+    put(0x90 | (cc & 15))
+    put(0xC0)
+    return 0
+}
+
+function.movzx_rax_al() -> number {
+    put(0x48)
+    put(0x0F)
+    put(0xB6)
+    put(0xC0)
+    return 0
+}
+
+# jcc condition codes
+const.CC_B = 2
+const.CC_AE = 3
+const.CC_E = 4
+const.CC_NE = 5
+const.CC_BE = 6
+const.CC_A = 7
+const.CC_LE = 14
+
+# ---- calls ----
+
+# emit a call with the outgoing-arg area marshaling (emit_call)
+function.emit_call(type.ptr<type.IrInst>.in) -> number {
+    type.ptr<type.FuncInfo> fi = in.finfo
+    type.number n = in.nargs
+
+    # args sit on the machine stack: arg1 on top (right-to-left evaluation)
+    type.number stack_off = 0
+    type.number scratch_off = 0
+    type.array<type.number, 16> arr_off = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    loop (k from 0 until n) {
+        when (k >= 16) {
+            break
+        }
+        arr_off[k] = 0
+    }
+    loop (k from 0 until n) {
+        type.ptr<type.Ty> t = sema.T_NUMBER
+        when (k < fi.nparams) {
+            t = fi.ptypes[k]
+        }
+        when (t.form == sema.F_ARRAY or sema.is_record(t)) {
+            # array arg: an 8-byte SOURCE ADDRESS on the machine stack;
+            # copy into this frame's scratch, pass the copy's address
+            type.number bytes = sema.ty_bytes(t)
+            load_rsp(R_RAX, stack_off)              # mov rax, [rsp+off]
+            mov_rr(R_RSI, R_RAX)                    # mov rsi, rax
+            lea_rbp(R_RDI, -(scratch_base - scratch_off))
+            mov_rcx_imm(bytes)
+            rep_movsb()
+            when (k < 16) {
+                arr_off[k] = scratch_off
+            }
+            scratch_off = scratch_off + bytes
+            stack_off = stack_off + 8
+            continue
+        }
+        type.number w = 8
+        when (t == sema.T_TEXT) {
+            w = 16
+        }
+        type.number oa = oa_base - k * 16
+        load_rsp(R_RAX, stack_off)                  # mov rax, [rsp+off]
+        store_rbp(R_RAX, -oa)                       # mov [rbp-oa], rax
+        when (t == sema.T_TEXT) {
+            load_rsp(R_RDX, stack_off + 8)          # mov rdx, [rsp+off+8]
+            store_rbp(R_RDX, -oa + 8)               # mov [rbp-oa+8], rdx
+        }
+        stack_off = stack_off + w
+    }
+    when (stack_off > 0) {
+        # add rsp, stack_off
+        put(0x48)
+        when (stack_off <= 127) {
+            put(0x83)
+            put(0xC4)
+            put(stack_off)
+        }
+        else {
+            put(0x81)
+            put(0xC4)
+            put32(stack_off)
+        }
+    }
+
+    # load argument registers from the outgoing area / scratch
+    loop (k from 0 until n) {
+        when (k >= 6) {
+            break
+        }
+        type.ptr<type.Ty> t = sema.T_NUMBER
+        when (k < fi.nparams) {
+            t = fi.ptypes[k]
+        }
+        type.number oa = oa_base - k * 16
+        type.number areg = arg_reg(k)
+        when (t.form == sema.F_ARRAY or sema.is_record(t)) {
+            lea_rbp(areg, -(scratch_base - arr_off[k]))
+        }
+        else when (t == sema.T_TEXT) {
+            lea_rbp(areg, -oa)
+        }
+        else {
+            load_rbp(areg, -oa)
+        }
+    }
+
+    # aligned call to the function's symbol
+    call_aligned_sym(sym_by_name(fi.mangled))
+
+    # result: integers/pointers extended in rax; decimal bits; text pair
+    type.ptr<type.Ty> ret = fi.ret
+    when (ret != null and (sema.is_integer(ret) or ret == sema.T_BOOL or sema.is_ptr(ret) or ret == sema.T_NULL)) {
+        push_rax()
+    }
+    else when (ret == sema.T_DECIMAL) {
+        movq_xmm0_rax()
+        push_xmm0()
+    }
+    else when (ret == sema.T_TEXT) {
+        push_pair()
+    }
+    return 0
+}
+
+# ---- binary operator emission ----
+
+function.emit_binop(type.ptr<type.IrInst>.in) -> number {
+    # pointer arithmetic: rax = pointer, rcx = integer scaled by size(T)
+    when (in.ty != null and sema.is_ptr(in.ty) and (in.op == parser.OP_ADD or in.op == parser.OP_SUB)) {
+        type.number esz = sema.ty_bytes(in.ty.elem)
+        pop_rcx()
+        pop_rax()
+        imul_r_imm(R_RCX, esz)
+        when (in.op == parser.OP_ADD) {
+            add_rr(R_RAX, R_RCX)
+        }
+        else {
+            sub_rr(R_RAX, R_RCX)
+        }
+        push_rax()
+        return 0
+    }
+
+    when (in.ty == sema.T_TEXT) {
+        when (in.op == parser.OP_ADD) {
+            # concat: rt-style call with both pairs in the outgoing area
+            pop_pair_rax_rdx()                 # right: rax=ptr, rdx=len
+            mov_rr(R_R9, R_RAX)
+            mov_rr(R_R10, R_RDX)
+            pop_pair_rax_rdx()                 # left: rax=ptr, rdx=len
+            store_rbp(R_RAX, -oa_base)         # [rbp-oa_base] = l.ptr
+            store_rbp(R_RDX, -oa_base + 8)     # [rbp-oa_base+8] = l.len
+            lea_rbp(R_RDI, -oa_base)
+            # right pair into outgoing slot 1
+            store_rbp(R_R9, -(oa_base - 16))
+            store_rbp(R_R10, -(oa_base - 16) + 8)
+            lea_rbp(R_RSI, -(oa_base - 16))
+            call_aligned_sym(rt_sym("concat"))
+            # the result text is returned per the Okular ABI: rax=ptr, rdx=len
+            push_pair()
+            return 0
+        }
+        # text equality
+        pop_pair_rax_rdx()                     # right
+        mov_rr(R_R9, R_RAX)
+        mov_rr(R_R10, R_RDX)
+        pop_pair_rax_rdx()                     # left
+        store_rbp(R_RAX, -oa_base)
+        store_rbp(R_RDX, -oa_base + 8)
+        lea_rbp(R_RDI, -oa_base)
+        store_rbp(R_R9, -(oa_base - 16))
+        store_rbp(R_R10, -(oa_base - 16) + 8)
+        lea_rbp(R_RSI, -(oa_base - 16))
+        call_aligned_sym(rt_sym("text_eq"))
+        when (in.op == parser.OP_NEQ) {
+            # xor eax, 1
+            put(0x83)
+            put(0xF0)
+            put(0x01)
+        }
+        movzx_rax_al()
+        push_rax()
+        return 0
+    }
+
+    when (in.ty == sema.T_DECIMAL) {
+        pop_xmm0()                             # right -> xmm0
+        # movsd xmm1, xmm0
+        put(0xF2)
+        put(0x0F)
+        put(0x10)
+        put(0xC8)
+        pop_xmm0()                             # left -> xmm0
+        when (in.op == parser.OP_ADD) {
+            # addsd xmm0, xmm1
+            put(0xF2)
+            put(0x0F)
+            put(0x58)
+            put(0xC1)
+        }
+        else when (in.op == parser.OP_SUB) {
+            put(0xF2)
+            put(0x0F)
+            put(0x5C)
+            put(0xC1)
+        }
+        else when (in.op == parser.OP_MUL) {
+            put(0xF2)
+            put(0x0F)
+            put(0x59)
+            put(0xC1)
+        }
+        else when (in.op == parser.OP_DIV) {
+            put(0xF2)
+            put(0x0F)
+            put(0x5E)
+            put(0xC1)
+        }
+        else {
+            # comparisons through ucomisd
+            when (in.op == parser.OP_EQ) {
+                # ucomisd xmm0, xmm1; sete al; setnp cl; and al, cl
+                put(0x66)
+                put(0x0F)
+                put(0x2E)
+                put(0xC1)
+                setcc_al(0x4)
+                put(0x0F)
+                put(0x9B)
+                put(0xC1)
+                put(0x20)
+                put(0xC1)
+            }
+            else when (in.op == parser.OP_NEQ) {
+                put(0x66)
+                put(0x0F)
+                put(0x2E)
+                put(0xC1)
+                setcc_al(0x5)
+                put(0x0F)
+                put(0x9A)
+                put(0xC1)
+                put(0x08)
+                put(0xC8)
+            }
+            else when (in.op == parser.OP_LT) {
+                # a < b <=> b > a: ucomisd xmm1, xmm0; seta al
+                put(0x66)
+                put(0x0F)
+                put(0x2E)
+                put(0xC8)
+                setcc_al(0x7)
+            }
+            else when (in.op == parser.OP_LE) {
+                put(0x66)
+                put(0x0F)
+                put(0x2E)
+                put(0xC8)
+                setcc_al(0x3)
+            }
+            else when (in.op == parser.OP_GT) {
+                put(0x66)
+                put(0x0F)
+                put(0x2E)
+                put(0xC1)
+                setcc_al(0x7)
+            }
+            else when (in.op == parser.OP_GE) {
+                put(0x66)
+                put(0x0F)
+                put(0x2E)
+                put(0xC1)
+                setcc_al(0x3)
+            }
+        }
+        when (in.op <= parser.OP_MOD) {
+            push_xmm0()
+        }
+        else {
+            movzx_rax_al()
+            push_rax()
+        }
+        return 0
+    }
+
+    # integer / bool
+    type.number is_bool = 0
+    when (in.ty == sema.T_BOOL) {
+        is_bool = 1
+    }
+    type.number is_unsigned = 0
+    when (in.ty != null and sema.is_integer(in.ty) and sema.ty_signed(in.ty) == false) {
+        is_unsigned = 1
+    }
+    type.number is_intop = 0
+    when (in.op <= parser.OP_MOD or in.op >= parser.OP_BAND) {
+        is_intop = 1
+    }
+    pop_rcx()
+    pop_rax()
+    when (in.op == parser.OP_ADD) {
+        add_rr(R_RAX, R_RCX)
+    }
+    else when (in.op == parser.OP_SUB) {
+        sub_rr(R_RAX, R_RCX)
+    }
+    else when (in.op == parser.OP_MUL) {
+        imul_rax_rcx()
+    }
+    else when (in.op == parser.OP_BAND) {
+        and_rr(R_RAX, R_RCX)
+    }
+    else when (in.op == parser.OP_BOR) {
+        or_rr(R_RAX, R_RCX)
+    }
+    else when (in.op == parser.OP_XOR) {
+        xor_rr(R_RAX, R_RCX)
+    }
+    else when (in.op == parser.OP_SHL or in.op == parser.OP_SHR) {
+        # rcx = count, rax = value; out-of-range counts trap (exit 72)
+        type.number lsv = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        type.number bits = 64
+        when (in.ty != null) {
+            bits = sema.ty_bits(in.ty)
+        }
+        cmp_rcx_imm32(bits)
+        jcc_lbl(CC_B, lsv)
+        mov_rr(R_RDI, R_RCX)
+        call_raw(rt_sym("shift_trap"))
+        label_here(lsv)
+        when (in.op == parser.OP_SHL) {
+            # shl rax, cl
+            put(0x48)
+            put(0xD3)
+            put(0xE0)
+        }
+        else when (in.ty != null and sema.ty_signed(in.ty)) {
+            # sar rax, cl
+            put(0x48)
+            put(0xD3)
+            put(0xF8)
+        }
+        else {
+            # shr rax, cl
+            put(0x48)
+            put(0xD3)
+            put(0xE8)
+        }
+    }
+    else when (in.op == parser.OP_DIV or in.op == parser.OP_MOD) {
+        # division by zero traps (exit 71); INT64_MIN / -1 wraps
+        type.number dv = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        test_rr(R_RCX, R_RCX)
+        jcc_lbl(CC_NE, dv)
+        call_raw(rt_sym("div_trap"))
+        label_here(dv)
+        when (is_unsigned == 0) {
+            type.number dvo = trap_lbl(trap_seq)
+            trap_seq = trap_seq + 1
+            cmp_rcx_imm8(255)             # cmp rcx, -1
+            jcc_lbl(CC_NE, dvo)
+            when (in.op == parser.OP_DIV) {
+                # neg rax
+                put(0x48)
+                put(0xF7)
+                put(0xD8)
+            }
+            else {
+                # xor eax, eax
+                put(0x31)
+                put(0xC0)
+            }
+            type.number dvd = trap_lbl(trap_seq)
+            trap_seq = trap_seq + 1
+            jmp_lbl(dvd)
+            label_here(dvo)
+            # cqo; idiv rcx
+            put(0x48)
+            put(0x99)
+            put(0x48)
+            put(0xF7)
+            put(0xF9)
+            when (in.op == parser.OP_MOD) {
+                # mov rax, rdx
+                mov_rr(R_RAX, R_RDX)
+            }
+            label_here(dvd)
+        }
+        else {
+            # xor edx, edx; div rcx
+            put(0x31)
+            put(0xD2)
+            put(0x48)
+            put(0xF7)
+            put(0xF1)
+            when (in.op == parser.OP_MOD) {
+                mov_rr(R_RAX, R_RDX)
+            }
+        }
+    }
+    else when (in.op == parser.OP_AND) {
+        and_rr(R_RAX, R_RCX)
+    }
+    else when (in.op == parser.OP_OR) {
+        or_rr(R_RAX, R_RCX)
+    }
+    else when (in.op == parser.OP_EQ) {
+        cmp_rr(R_RAX, R_RCX)
+        setcc_al(0x4)
+        movzx_rax_al()
+    }
+    else when (in.op == parser.OP_NEQ) {
+        cmp_rr(R_RAX, R_RCX)
+        setcc_al(0x5)
+        movzx_rax_al()
+    }
+    else when (in.op == parser.OP_LT) {
+        cmp_rr(R_RAX, R_RCX)
+        when (is_unsigned == 1) {
+            setcc_al(0x2)
+        }
+        else {
+            setcc_al(0xC)
+        }
+        movzx_rax_al()
+    }
+    else when (in.op == parser.OP_LE) {
+        cmp_rr(R_RAX, R_RCX)
+        when (is_unsigned == 1) {
+            setcc_al(0x6)
+        }
+        else {
+            setcc_al(0xE)
+        }
+        movzx_rax_al()
+    }
+    else when (in.op == parser.OP_GT) {
+        cmp_rr(R_RAX, R_RCX)
+        when (is_unsigned == 1) {
+            setcc_al(0x7)
+        }
+        else {
+            setcc_al(0xF)
+        }
+        movzx_rax_al()
+    }
+    else when (in.op == parser.OP_GE) {
+        cmp_rr(R_RAX, R_RCX)
+        when (is_unsigned == 1) {
+            setcc_al(0x3)
+        }
+        else {
+            setcc_al(0xD)
+        }
+        movzx_rax_al()
+    }
+    when (is_intop == 1 and is_bool == 0) {
+        emit_reencode(in.ty)
+    }
+    push_rax()
+    return 0
+}
+
+# ---- the instruction switch ----
+
+function.emit_inst(type.ptr<type.IrInst>.in) -> number {
+    when (in.kind == ir.I_CONST_INT) {
+        mov_r_imm(R_RAX, in.i)
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_CONST_DEC) {
+        # mov rax, bits; movq xmm0, rax; push
+        mov_r_imm(R_RAX, elf.dec_bits(in.d))
+        movq_xmm0_rax()
+        push_xmm0()
+        return 0
+    }
+    when (in.kind == ir.I_CONST_BOOL) {
+        mov_r_imm(R_RAX, in.b)
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_CONST_TEXT) {
+        # mov rax, <rodata addr>; mov rdx, len; push pair
+        mov_r_sym(R_RAX, txt_sym[in.text_idx], 0)
+        mov_r_imm(R_RDX, txt_len[in.text_idx])
+        push_pair()
+        return 0
+    }
+    when (in.kind == ir.I_LOAD_LOCAL) {
+        type.number off = fn_offset(in.slot)
+        when (in.ty == sema.T_TEXT) {
+            load_rbp(R_RAX, -off)
+            load_rbp(R_RDX, -off + 8)
+            push_pair()
+        }
+        else {
+            load_rbp(R_RAX, -off)
+            push_rax()
+        }
+        return 0
+    }
+    when (in.kind == ir.I_STORE_LOCAL) {
+        type.number off = fn_offset(in.slot)
+        when (in.ty == sema.T_TEXT) {
+            pop_pair_rax_rdx()
+            store_rbp(R_RAX, -off)
+            store_rbp(R_RDX, -off + 8)
+        }
+        else {
+            pop_rax()
+            store_rbp(R_RAX, -off)
+        }
+        return 0
+    }
+    when (in.kind == ir.I_LOAD_GLOBAL) {
+        type.ptr<type.Symbol> s = in.sym
+        when (in.ty == sema.T_TEXT) {
+            # the pair lives at the global's storage: load through its address
+            mov_r_sym(R_RCX, sym_by_name(s.mangled), 0)
+            load_ind(R_RAX, R_RCX)
+            load_ind8(R_RDX, R_RCX, 8)
+            push_pair()
+        }
+        else {
+            mov_r_sym(R_RAX, sym_by_name(s.mangled), 0)
+            load_at_rax(in.ty)
+            push_rax()
+        }
+        return 0
+    }
+    when (in.kind == ir.I_STORE_GLOBAL) {
+        type.ptr<type.Symbol> s = in.sym
+        when (in.ty == sema.T_TEXT) {
+            pop_pair_rax_rdx()
+            # store the pair through a pointer to the global's storage
+            mov_r_sym(R_RCX, sym_by_name(s.mangled), 0)
+            store_ind(R_RCX, R_RAX)
+            store_ind8(R_RCX, 8, R_RDX)
+        }
+        else {
+            pop_rax()
+            mov_r_sym(R_RCX, sym_by_name(s.mangled), 0)
+            store_rax_rcx(in.ty)
+        }
+        return 0
+    }
+    when (in.kind == ir.I_CONV) {
+        type.ptr<type.Ty> src = in.ty
+        type.ptr<type.Ty> dst = in.ty2
+        when (src == dst) {
+            return 0
+        }
+        when (dst == sema.T_TEXT) {
+            # T.to_text(v): the Okular runtime RETURNS a text pair (rax, rdx)
+            when (src == sema.T_DECIMAL) {
+                pop_xmm0()
+                movq_rax_xmm0()
+                mov_rr(R_RDI, R_RAX)
+                call_aligned_sym(rt_sym("decimal_to_text"))
+            }
+            else when (src == sema.T_BOOL) {
+                pop_rax()
+                mov_rr(R_RDI, R_RAX)
+                call_aligned_sym(rt_sym("bool_to_text"))
+            }
+            else when (src == sema.T_UINT64) {
+                pop_rax()
+                mov_rr(R_RDI, R_RAX)
+                call_aligned_sym(rt_sym("uint_to_text"))
+            }
+            else {
+                pop_rax()
+                mov_rr(R_RDI, R_RAX)
+                call_aligned_sym(rt_sym("number_to_text"))
+            }
+            push_pair()
+            return 0
+        }
+        when (src == sema.T_TEXT) {
+            # text.to_number / text.to_decimal: one text param (pair ptr)
+            pop_pair_rax_rdx()
+            store_rbp(R_RAX, -oa_base)
+            store_rbp(R_RDX, -oa_base + 8)
+            lea_rbp(R_RDI, -oa_base)
+            when (dst == sema.T_DECIMAL) {
+                call_aligned_sym(rt_sym("text_to_decimal"))
+                movq_xmm0_rax()
+                push_xmm0()
+            }
+            else {
+                call_aligned_sym(rt_sym("text_to_number"))
+                emit_reencode(dst)
+                push_rax()
+            }
+            return 0
+        }
+        when (src == sema.T_DECIMAL) {
+            pop_xmm0()
+            # cvttsd2si rax, xmm0 (NaN/overflow -> INT64_MIN sentinel)
+            put(0xF2)
+            put(0x48)
+            put(0x0F)
+            put(0x2C)
+            put(0xC0)
+            emit_reencode(dst)
+            push_rax()
+        }
+        else when (dst == sema.T_DECIMAL) {
+            pop_rax()
+            when (src == sema.T_BOOL) {
+                # cvtsi2sd xmm0, rax
+                put(0xF2)
+                put(0x48)
+                put(0x0F)
+                put(0x2A)
+                put(0xC0)
+            }
+            else when (src == sema.T_UINT64) {
+                # exact uint64 -> double: x/2*2 + x&1
+                mov_rr(R_RCX, R_RAX)
+                # and rcx, 1; shr rax, 1
+                mov_r_imm(R_RDX, 1)
+                and_rr(R_RCX, R_RDX)
+                put(0x48)
+                put(0xD1)
+                put(0xE8)                    # shr rax, 1
+                # cvtsi2sd xmm0, rax; addsd xmm0, xmm0
+                put(0xF2)
+                put(0x48)
+                put(0x0F)
+                put(0x2A)
+                put(0xC0)
+                put(0xF2)
+                put(0x0F)
+                put(0x58)
+                put(0xC0)
+                # cvtsi2sd xmm1, rcx; addsd xmm0, xmm1
+                put(0xF2)
+                put(0x48)
+                put(0x0F)
+                put(0x2A)
+                put(0xC9)
+                put(0xF2)
+                put(0x0F)
+                put(0x58)
+                put(0xC1)
+            }
+            else {
+                put(0xF2)
+                put(0x48)
+                put(0x0F)
+                put(0x2A)
+                put(0xC0)
+            }
+            push_xmm0()
+        }
+        else {
+            # integer -> integer: truncating wrap
+            pop_rax()
+            emit_reencode(dst)
+            push_rax()
+        }
+        return 0
+    }
+    when (in.kind == ir.I_BINOP) {
+        return emit_binop(in)
+    }
+    when (in.kind == ir.I_UNOP) {
+        when (in.uop == parser.UN_NEG and in.ty == sema.T_DECIMAL) {
+            pop_xmm0()
+            movq_rax_xmm0()
+            # xor the sign bit: mov rcx, 0x8000...; xor rax, rcx
+            mov_r_imm(R_RCX, 0x8000000000000000)
+            xor_rr(R_RAX, R_RCX)
+            movq_xmm0_rax()
+            push_xmm0()
+        }
+        else when (in.uop == parser.UN_NEG) {
+            pop_rax()
+            # neg rax
+            put(0x48)
+            put(0xF7)
+            put(0xD8)
+            emit_reencode(in.ty)
+            push_rax()
+        }
+        else when (in.uop == parser.UN_BNOT) {
+            # not rax (48 F7 D0)
+            pop_rax()
+            put(0x48)
+            put(0xF7)
+            put(0xD0)
+            emit_reencode(in.ty)
+            push_rax()
+        }
+        else {
+            pop_rax()
+            # xor eax, 1
+            put(0x83)
+            put(0xF0)
+            put(0x01)
+            push_rax()
+        }
+        return 0
+    }
+    when (in.kind == ir.I_LABEL) {
+        label_here(in.label)
+        return 0
+    }
+    when (in.kind == ir.I_JMP) {
+        jmp_lbl(in.label)
+        return 0
+    }
+    when (in.kind == ir.I_JMPF) {
+        pop_rax()
+        test_rr(R_RAX, R_RAX)
+        jcc_lbl(CC_E, in.label)
+        return 0
+    }
+    when (in.kind == ir.I_CALL) {
+        return emit_call(in)
+    }
+    when (in.kind == ir.I_WRITE) {
+        type.number k = 0
+        when (in.ty != null and in.ty.form == sema.F_SCALAR) {
+            k = in.ty.scalar
+        }
+        when (k == sema.S_UINT64) {
+            pop_rax()
+            mov_rr(R_RDI, R_RAX)
+            call_aligned_sym(rt_sym("write_uint"))
+        }
+        else when (in.ty == sema.T_BOOL) {
+            pop_rax()
+            mov_rr(R_RDI, R_RAX)
+            call_aligned_sym(rt_sym("write_bool"))
+        }
+        else when (sema.is_integer(in.ty)) {
+            pop_rax()
+            mov_rr(R_RDI, R_RAX)
+            call_aligned_sym(rt_sym("write_number"))
+        }
+        else when (in.ty == sema.T_DECIMAL) {
+            pop_xmm0()
+            # rt.write_decimal takes the decimal as raw bits: movq rdi, xmm0
+            # (66 48 0F 7E C7: reg=xmm0, rm=rdi)
+            put(0x66)
+            put(0x48)
+            put(0x0F)
+            put(0x7E)
+            put(0xC7)
+            call_aligned_sym(rt_sym("write_decimal"))
+        }
+        else when (in.ty == sema.T_TEXT) {
+            # one text param: pair from the stack into the outgoing area
+            pop_pair_rax_rdx()
+            store_rbp(R_RAX, -oa_base)
+            store_rbp(R_RDX, -oa_base + 8)
+            lea_rbp(R_RDI, -oa_base)
+            call_aligned_sym(rt_sym("write_text"))
+        }
+        return 0
+    }
+    when (in.kind == ir.I_PRINT) {
+        call_aligned_sym(rt_sym("print_flush"))
+        return 0
+    }
+    when (in.kind == ir.I_RETURN) {
+        when (in.ty != null and (sema.is_integer(in.ty) or in.ty == sema.T_BOOL or sema.is_ptr(in.ty) or in.ty == sema.T_NULL)) {
+            pop_rax()
+        }
+        else when (in.ty == sema.T_DECIMAL) {
+            pop_xmm0()
+            movq_rax_xmm0()
+        }
+        else when (in.ty == sema.T_TEXT) {
+            pop_pair_rax_rdx()
+        }
+        else {
+            # xor eax, eax
+            put(0x31)
+            put(0xC0)
+        }
+        put(0xC9)                    # leave
+        put(0xC3)                    # ret
+        return 0
+    }
+    when (in.kind == ir.I_POP) {
+        type.number w = 8
+        when (in.ty == sema.T_TEXT) {
+            w = 16
+        }
+        # add rsp, w
+        put(0x48)
+        put(0x83)
+        put(0xC4)
+        put(w)
+        return 0
+    }
+    when (in.kind == ir.I_ADDR_LOCAL) {
+        type.number base = fn_offset(in.slot)
+        type.number disp = in.i - base
+        when (disp == 0) {
+            lea_rbp0(R_RAX)
+        }
+        else {
+            lea_rbp(R_RAX, disp)
+        }
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_ADDR_GLOBAL) {
+        type.ptr<type.Symbol> sym = in.sym
+        mov_r_sym(R_RAX, sym_by_name(sym.mangled), in.i)
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_INDEX) {
+        # pop index (rcx), pop base (rax); unsigned bounds check; scale
+        type.number count = 0
+        type.number esz = 8
+        when (in.ty != null) {
+            count = in.ty.count
+            esz = sema.ty_bytes(in.ty.elem)
+        }
+        pop_rcx()
+        pop_rax()
+        type.number lbok = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        cmp_rcx_imm32(count)
+        jcc_lbl(CC_B, lbok)
+        mov_rr(R_RDI, R_RCX)
+        mov_r_imm(R_RSI, count)
+        call_aligned_sym(rt_sym("bounds_trap"))
+        label_here(lbok)
+        when (esz == 1) {
+            add_rr(R_RAX, R_RCX)
+        }
+        else when (esz == 2 or esz == 4 or esz == 8) {
+            lea_rax_rcx_scaled(esz)
+        }
+        else {
+            imul_r_imm(R_RCX, esz)
+            add_rr(R_RAX, R_RCX)
+        }
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_TEXT_LEN) {
+        pop_pair_rax_rdx()
+        mov_rr(R_RAX, R_RDX)
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_TEXT_BYTE) {
+        pop_r11()
+        pop_pair_rax_rdx()
+        type.number lbok = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        cmp_rr(R_R11, R_RDX)
+        jcc_lbl(CC_B, lbok)
+        mov_rr(R_RDI, R_R11)
+        mov_rr(R_RSI, R_RDX)
+        call_aligned_sym(rt_sym("text_bounds_trap"))
+        label_here(lbok)
+        # movzx rax, byte [rax + r11]: REX = W + X(index=r11) = 0x4A
+        put(0x4A)
+        put(0x0F)
+        put(0xB6)
+        put(0x04)
+        put(0x18)
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_TEXT_FROMBYTES) {
+        pop_rdx()
+        pop_rax()
+        push_pair()
+        return 0
+    }
+    when (in.kind == ir.I_TEXT_SLICE) {
+        pop_r10()
+        pop_r11()
+        pop_pair_rax_rdx()
+        type.number l1 = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        cmp_rr(R_R11, R_R10)
+        jcc_lbl(CC_BE, l1)
+        mov_rr(R_RDI, R_R11)
+        mov_rr(R_RSI, R_R10)
+        call_aligned_sym(rt_sym("text_bounds_trap"))
+        label_here(l1)
+        type.number l2 = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        cmp_rr(R_R10, R_RDX)
+        jcc_lbl(CC_BE, l2)
+        mov_rr(R_RDI, R_R10)
+        mov_rr(R_RSI, R_RDX)
+        call_aligned_sym(rt_sym("text_bounds_trap"))
+        label_here(l2)
+        add_rr(R_RAX, R_R11)
+        sub_rr(R_R10, R_R11)
+        mov_rr(R_RDX, R_R10)
+        push_pair()
+        return 0
+    }
+    when (in.kind == ir.I_FS_READ) {
+        pop_pair_rax_rdx()
+        store_rbp(R_RAX, -oa_base)
+        store_rbp(R_RDX, -oa_base + 8)
+        lea_rbp(R_RDI, -oa_base)
+        call_aligned_sym(rt_sym("fs_read"))
+        push_pair()
+        return 0
+    }
+    when (in.kind == ir.I_FS_WRITE) {
+        pop_pair_rax_rdx()
+        mov_rr(R_R9, R_RAX)
+        mov_rr(R_R10, R_RDX)
+        pop_pair_rax_rdx()
+        store_rbp(R_RAX, -oa_base)
+        store_rbp(R_RDX, -oa_base + 8)
+        lea_rbp(R_RDI, -oa_base)
+        store_rbp(R_R9, -(oa_base - 16))
+        store_rbp(R_R10, -(oa_base - 16) + 8)
+        lea_rbp(R_RSI, -(oa_base - 16))
+        call_aligned_sym(rt_sym("fs_save"))
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_FS_EXISTS) {
+        pop_pair_rax_rdx()
+        store_rbp(R_RAX, -oa_base)
+        store_rbp(R_RDX, -oa_base + 8)
+        lea_rbp(R_RDI, -oa_base)
+        call_aligned_sym(rt_sym("fs_exists"))
+        movzx_rax_al()
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_ENV_ARGC) {
+        call_aligned_sym(rt_sym("env_arg_count"))
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_ENV_ARG) {
+        pop_rax()
+        mov_rr(R_RDI, R_RAX)
+        call_aligned_sym(rt_sym("env_arg"))
+        push_pair()
+        return 0
+    }
+    when (in.kind == ir.I_SYSOP) {
+        return emit_sysop(in)
+    }
+    when (in.kind == ir.I_LOAD_AT) {
+        pop_rax()
+        when (in.ty == sema.T_TEXT) {
+            # mov rdx, [rax+8]; mov rax, [rax]
+            load_ind8(R_RDX, R_RAX, 8)
+            load_ind(R_RAX, R_RAX)
+            push_pair()
+        }
+        else {
+            load_at_rax(in.ty)
+            push_rax()
+        }
+        return 0
+    }
+    when (in.kind == ir.I_STORE_AT) {
+        when (in.ty == sema.T_TEXT) {
+            pop_pair_rax_rdx()
+            pop_rcx()
+            store_ind(R_RCX, R_RAX)
+            store_ind8(R_RCX, 8, R_RDX)
+        }
+        else {
+            pop_rax()
+            pop_rcx()
+            store_rax_rcx(in.ty)
+        }
+        return 0
+    }
+    when (in.kind == ir.I_COPY) {
+        pop_reg(R_RSI)
+        pop_reg(R_RDI)
+        mov_rcx_imm(in.i)
+        rep_movsb()
+        return 0
+    }
+    when (in.kind == ir.I_ALLOC) {
+        type.number esz = 8
+        when (in.ty != null) {
+            esz = sema.ty_bytes(in.ty)
+        }
+        pop_rax()
+        when (esz != 1) {
+            imul_r_imm(R_RAX, esz)
+        }
+        mov_rr(R_RDI, R_RAX)
+        call_aligned_sym(rt_sym("mem_alloc"))
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_RELEASE) {
+        pop_rax()
+        mov_rr(R_RDI, R_RAX)
+        call_aligned_sym(rt_sym("mem_release"))
+        return 0
+    }
+    when (in.kind == ir.I_PTRCHK) {
+        type.number pnk = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        pop_rax()
+        test_rr(R_RAX, R_RAX)
+        jcc_lbl(CC_NE, pnk)
+        call_raw(rt_sym("null_trap"))
+        label_here(pnk)
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_PTR_SCALE) {
+        type.number esz = 8
+        when (in.ty != null and in.ty.elem != null) {
+            esz = sema.ty_bytes(in.ty.elem)
+        }
+        pop_rcx()
+        pop_rax()
+        when (esz == 1) {
+            add_rr(R_RAX, R_RCX)
+        }
+        else when (esz == 2 or esz == 4 or esz == 8) {
+            lea_rax_rcx_scaled(esz)
+        }
+        else {
+            imul_r_imm(R_RCX, esz)
+            add_rr(R_RAX, R_RCX)
+        }
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_PTR_DIFF) {
+        type.number esz = 8
+        when (in.ty != null and in.ty.elem != null) {
+            esz = sema.ty_bytes(in.ty.elem)
+        }
+        pop_rcx()
+        pop_rax()
+        sub_rr(R_RAX, R_RCX)
+        # cqo
+        put(0x48)
+        put(0x99)
+        mov_rcx_imm(esz)
+        # idiv rcx
+        put(0x48)
+        put(0xF7)
+        put(0xF9)
+        push_rax()
+        return 0
+    }
+    when (in.kind == ir.I_ADDOFF) {
+        pop_rax()
+        when (in.i != 0) {
+            # add rax, imm
+            put(0x48)
+            when (in.i <= 127) {
+                put(0x83)
+                put(0xC0)
+                put(in.i)
+            }
+            else {
+                put(0x81)
+                put(0xC0)
+                put32(in.i)
+            }
+        }
+        push_rax()
+        return 0
+    }
+    return 0
+}
+
+# ---- sys builtins: inline raw syscalls (the floor the runtime rides on) ----
+# syscall numbers (x86-64): read=0 write=1 open=2 close=3 fstat=5 mmap=9
+# exit=60 chmod=90; arguments in rdi rsi rdx r10 r8 r9, number in rax.
+# Path arguments need NUL termination (256-byte scratch, ENAMETOOLONG=-36
+# beyond, exactly like rt.c's wrappers).
+
+const.SYS_EXTRA = 400            # 256 (path buf) + 144 (struct stat)
+
+function.sys_scratch_off() -> number {
+    # rbp-relative extent of the syscall scratch (below all other scratch)
+    return scratch_base + cur_scratch + SYS_EXTRA
+}
+
+type.number cur_scratch = 0
+
+# mov rdi, rax style helpers already exist; a few extras:
+function.mov_eax_imm(number.v) -> number {
+    put(0xB8)
+    put32(v)
+    return 0
+}
+
+function.mov_r10d_imm(number.v) -> number {
+    put(0x41)
+    put(0xBA)
+    put32(v)
+    return 0
+}
+
+function.mov_r8_imm32(number.v) -> number {
+    put(0x49)
+    put(0xC7)
+    put(0xC0)
+    put32(v)
+    return 0
+}
+
+function.emit_syscall_insn() -> number {
+    put(0x0F)
+    put(0x05)
+    return 0
+}
+
+# copy the path (rax=ptr, rdx=len) into the scratch buffer + NUL;
+# rdi is RESTORED to the buffer start for the syscall (rep movsb advances it)
+function.emit_path_copy() -> number {
+    mov_rr(R_RSI, R_RAX)
+    lea_rbp(R_RDI, -sys_scratch_off())
+    mov_rr(R_RCX, R_RDX)
+    rep_movsb()
+    # mov byte [rdi], 0 (at the advanced position — the terminator)
+    put(0xC6)
+    put(0x07)
+    put(0x00)
+    # restore rdi to the buffer start: the syscall reads from it
+    lea_rbp(R_RDI, -sys_scratch_off())
+    return 0
+}
+
+function.emit_sysop(type.ptr<type.IrInst>.in) -> number {
+    when (in.i == 0) {
+        # sys.write(fd, text.buf): pop the text pair, pop the fd
+        pop_pair_rax_rdx()
+        pop_rcx()
+        mov_rr(R_RDI, R_RCX)
+        mov_rr(R_RSI, R_RAX)
+        mov_eax_imm(1)
+        emit_syscall_insn()
+        push_rax()
+        return 0
+    }
+    when (in.i == 1) {
+        # sys.read(fd, ptr<byte>.buf, number.len)
+        pop_rax()
+        mov_rr(R_R9, R_RAX)
+        pop_rax()
+        mov_rr(R_R10, R_RAX)
+        pop_rax()
+        mov_rr(R_RDI, R_RAX)
+        mov_rr(R_RSI, R_R10)
+        mov_rr(R_RDX, R_R9)
+        mov_eax_imm(0)
+        emit_syscall_insn()
+        push_rax()
+        return 0
+    }
+    when (in.i == 2) {
+        # sys.open(text.path, number.flags, number.mode)
+        pop_rax()
+        mov_rr(R_R9, R_RAX)          # mode
+        pop_rax()
+        mov_rr(R_R10, R_RAX)         # flags
+        pop_pair_rax_rdx()           # path: rax=ptr, rdx=len
+        type.number lok = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        type.number ldone = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        # plen >= 256 -> ENAMETOOLONG (-36)
+        cmp_r_imm32(R_RDX, 256)
+        jcc_lbl(CC_B, lok)
+        mov_r_imm(R_RAX, -36)
+        jmp_lbl(ldone)
+        label_here(lok)
+        # copy the path into the scratch buffer, NUL-terminate
+        emit_path_copy()             # rdi = buffer, rsi = flags next
+        mov_rr(R_RSI, R_R10)         # flags
+        mov_rr(R_RDX, R_R9)          # mode
+        mov_eax_imm(2)
+        emit_syscall_insn()
+        label_here(ldone)
+        push_rax()
+        return 0
+    }
+    when (in.i == 3) {
+        # sys.close(number.fd)
+        pop_rax()
+        mov_rr(R_RDI, R_RAX)
+        mov_eax_imm(3)
+        emit_syscall_insn()
+        push_rax()
+        return 0
+    }
+    when (in.i == 4) {
+        # sys.size(number.fd): fstat into the stat scratch, read st_size
+        pop_rax()
+        mov_rr(R_RDI, R_RAX)
+        lea_rbp(R_RSI, -(sys_scratch_off() - 256))
+        mov_eax_imm(5)
+        emit_syscall_insn()
+        # fstat < 0 -> -1 (skip the st_size load)
+        type.number lok = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        type.number ldone = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        cmp_r_imm32(R_RAX, 0)
+        jcc_lbl(CC_AE, lok)
+        mov_r_imm(R_RAX, -1)
+        jmp_lbl(ldone)
+        label_here(lok)
+        # mov rax, [rsi+48] (st_size)
+        load_ind8(R_RAX, R_RSI, 48)
+        label_here(ldone)
+        push_rax()
+        return 0
+    }
+    when (in.i == 5) {
+        # sys.mmap(number.len): anonymous RW mapping; kernel errors -> null
+        pop_rcx()
+        mov_r_imm(R_RAX, 0)          # default result: null
+        type.number lpush = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        type.number lok = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        test_rr(R_RCX, R_RCX)
+        jcc_lbl(CC_E, lpush)
+        # xor edi, edi (addr = NULL)
+        put(0x31)
+        put(0xFF)
+        mov_rr(R_RSI, R_RCX)
+        mov_r_imm(R_RDX, 3)          # PROT_READ|PROT_WRITE
+        mov_r10d_imm(0x22)           # MAP_PRIVATE|MAP_ANONYMOUS
+        mov_r8_imm32(-1)             # fd
+        # xor r9d, r9d
+        put(0x45)
+        put(0x31)
+        put(0xC9)
+        mov_eax_imm(9)
+        emit_syscall_insn()
+        # error mapping: rax in (-4096, 0) -> null
+        cmp_r_imm32(R_RAX, 0)
+        jcc_lbl(CC_AE, lok)
+        cmp_r_imm32(R_RAX, -4096)
+        jcc_lbl(CC_LE, lok)
+        mov_r_imm(R_RAX, 0)
+        label_here(lok)
+        label_here(lpush)
+        push_rax()
+        return 0
+    }
+    when (in.i == 6) {
+        # sys.exit(number.code): never returns
+        pop_rax()
+        mov_rr(R_RDI, R_RAX)
+        mov_eax_imm(60)
+        emit_syscall_insn()
+        put(0xF4)                     # hlt (never reached)
+        push_rax()                    # stack discipline
+        return 0
+    }
+    when (in.i == 8) {
+        # sys.mkdir(text.path, number.mode): syscall 83, NUL-terminated path
+        pop_rax()
+        mov_rr(R_R9, R_RAX)          # mode
+        pop_pair_rax_rdx()           # path: rax=ptr, rdx=len
+        type.number mok = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        type.number mdone = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        cmp_r_imm32(R_RDX, 256)
+        jcc_lbl(CC_B, mok)
+        mov_r_imm(R_RAX, -36)
+        jmp_lbl(mdone)
+        label_here(mok)
+        emit_path_copy()             # rdi = buffer
+        mov_rr(R_RSI, R_R9)          # mode
+        mov_eax_imm(83)
+        emit_syscall_insn()
+        label_here(mdone)
+        push_rax()
+        return 0
+    }
+    when (in.i == 7) {
+        # sys.chmod(text.path, number.mode)
+        pop_rax()
+        mov_rr(R_R9, R_RAX)          # mode
+        pop_pair_rax_rdx()           # path: rax=ptr, rdx=len
+        # NOTE: trap labels MUST go through trap_lbl() (TRAP_BASE + n).
+        # Raw trap_seq here once collided with IR control-flow label L6
+        # (lbl_pos[6] was overwritten mid-function; a JMPF then jumped into
+        # the middle of this very syscall sequence). Found via the M5
+        # self-build differential.
+        type.number lok = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        type.number ldone = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        cmp_r_imm32(R_RDX, 256)
+        jcc_lbl(CC_B, lok)
+        mov_r_imm(R_RAX, -36)
+        jmp_lbl(ldone)
+        label_here(lok)
+        emit_path_copy()             # rdi = buffer
+        mov_rr(R_RSI, R_R9)          # mode
+        mov_eax_imm(90)
+        emit_syscall_insn()
+        label_here(ldone)
+        push_rax()
+        return 0
+    }
+    return 0
+}
+
+
+# ---- global data emission (arrays, structs, unions included) ----
+
+# emit one constant value into the data buffer; text leaves go to rodata
+function.emit_const_elems(type.ptr<type.Ty>.t, type.ptr<type.ConstVal>.cv) -> number {
+    when (t.form == sema.F_ARRAY) {
+        loop (k from 0 until t.count) {
+            type.ptr<type.ConstVal> ev = null
+            when (cv != null and k < cv.nelems) {
+                ev = cv.elems[k]
+            }
+            when (ev == null or ev.valid == 0) {
+                type.number zb = sema.ty_bytes(t.elem)
+                when (zb == 0) {
+                    zb = 8
+                }
+                loop (i from 0 until zb) {
+                    elf.data_put(0)
+                }
+                continue
+            }
+            emit_const_elems(t.elem, ev)
+        }
+        return 0
+    }
+    when (t.form == sema.F_UNION) {
+        # one activated member's constant, then zero to the union's size
+        type.ptr<type.Ty> mt = null
+        when (cv != null) {
+            mt = cv.mty
+        }
+        when (cv == null or cv.valid == 0 or mt == null) {
+            type.number zb = t.count
+            when (zb == 0) {
+                zb = 8
+            }
+            loop (i from 0 until zb) {
+                elf.data_put(0)
+            }
+        }
+        else {
+            emit_const_elems(mt, cv)
+            type.number mb = sema.ty_bytes(mt)
+            when (t.count > mb) {
+                loop (i from 0 until t.count - mb) {
+                    elf.data_put(0)
+                }
+            }
+        }
+        return 0
+    }
+    when (t.form == sema.F_STRUCT) {
+        type.number cur = 0
+        loop (k from 0 until t.nfields) {
+            type.number foff = t.foffs[k]
+            when (foff > cur) {
+                loop (i from 0 until foff - cur) {
+                    elf.data_put(0)
+                }
+            }
+            type.ptr<type.ConstVal> ev = null
+            when (cv != null and k < cv.nelems) {
+                ev = cv.elems[k]
+            }
+            type.number fb = sema.ty_bytes(t.ftypes[k])
+            when (fb == 0) {
+                fb = 8
+            }
+            when (ev == null or ev.valid == 0) {
+                loop (i from 0 until fb) {
+                    elf.data_put(0)
+                }
+            }
+            else {
+                emit_const_elems(t.ftypes[k], ev)
+            }
+            cur = foff + sema.ty_bytes(t.ftypes[k])
+        }
+        when (t.count > cur) {
+            loop (i from 0 until t.count - cur) {
+                elf.data_put(0)
+            }
+        }
+        return 0
+    }
+    when (t == sema.T_TEXT) {
+        # text bytes to rodata; the (ptr, len) pair into data with a fixup
+        type.number off = elf.rodata_append(cv.t)
+        type.number sid = elf.sym_def(".Lgstr", 1, off)
+        type.number at = elf.data_len_now()
+        elf.data_put64(0)
+        elf.data_fx_abs64(at, sid, 0)
+        elf.data_put64(text.length(cv.t))
+        return 0
+    }
+    when (t.form == sema.F_SCALAR) {
+        when (t == sema.T_BOOL) {
+            elf.data_put(cv.b)
+            return 0
+        }
+        when (t.scalar == sema.S_INT8 or t.scalar == sema.S_UINT8) {
+            elf.data_put(cv.i & 255)
+            return 0
+        }
+        when (t.scalar == sema.S_INT16 or t.scalar == sema.S_UINT16) {
+            elf.data_put(cv.i & 255)
+            elf.data_put((cv.i >> 8) & 255)
+            return 0
+        }
+        when (t.scalar == sema.S_INT32 or t.scalar == sema.S_UINT32) {
+            elf.data_put32(cv.i)
+            return 0
+        }
+        when (t.scalar == sema.S_DECIMAL) {
+            elf.data_put64(elf.dec_bits(cv.d))
+            return 0
+        }
+        # number / uint64 / ptr / null: the raw qword
+        elf.data_put64(cv.i)
+        return 0
+    }
+    elf.data_put64(cv.i)
+    return 0
+}
+
+function.emit_globals(type.ptr<type.IrModule>.im) -> number {
+    loop (i from 0 until im.nglobals) {
+        type.ptr<type.Symbol> s = im.globals[i]
+        type.number bytes = sema.ty_bytes(s.ty)
+        when (bytes == 0) {
+            bytes = 8
+        }
+        # the symbol was registered in the pre-pass; place it now
+        type.number sid = sym_by_name(s.mangled)
+        when (sid < 0) {
+            sid = elf.sym_def(s.mangled, 2, elf.data_len_now())
+        }
+        when (s.cval == null or s.cval.valid == 0) {
+            # broken initializer: sema reported; zeroed storage
+            loop (k from 0 until bytes) {
+                elf.data_put(0)
+            }
+            continue
+        }
+        # natural alignment (capped at 8)
+        type.number al = sema.ty_align(s.ty)
+        when (al < 1) {
+            al = 1
+        }
+        when (al > 8) {
+            al = 8
+        }
+        elf.data_align(al)
+        sym_set_off(sid, elf.data_len_now())
+        emit_const_elems(s.ty, s.cval)
+    }
+    return 0
+}
+
+# ---- module emission ----
+
+function.emit_module(type.ptr<type.IrModule>.im) -> number {
+    load_texts(im)
+    loop (i from 0 until im.nfuncs) {
+        type.ptr<type.IrFunc> f = im.funcs[i]
+        gen_function(im, f, i)
+    }
+    emit_globals(im)
+    return 0
+}
+
+# pre-pass: register every function symbol (calls may precede definitions
+# across modules; offsets are filled during emission)
+function.prepass_module(type.ptr<type.IrModule>.im) -> number {
+    loop (i from 0 until im.nfuncs) {
+        type.ptr<type.IrFunc> f = im.funcs[i]
+        elf.sym_def(f.fi.mangled, 0, 0)
+    }
+    loop (i from 0 until im.nglobals) {
+        elf.sym_def(im.globals[i].mangled, 2, 0)
+    }
+    return 0
+}
+
+# ---- the _start entry stub (mirrors runtime/rt_start.s) ----
+
+function.emit_start(number.entry_sym) -> number {
+    elf.entry_off = code_len()
+    # xor ebp, ebp
+    put(0x31)
+    put(0xED)
+    # mov rdi, [rsp]
+    put(0x48)
+    put(0x8B)
+    put(0x3C)
+    put(0x24)
+    # lea rsi, [rsp+8]
+    put(0x48)
+    put(0x8D)
+    put(0x74)
+    put(0x24)
+    put(0x08)
+    # and rsp, -16
+    put(0x48)
+    put(0x83)
+    put(0xE4)
+    put(0xF0)
+    # call rt_init
+    call_sym(rt_sym("rt_init"))
+    # call __ok_entry
+    call_sym(entry_sym)
+    # mov rdi, rax
+    mov_rr(R_RDI, R_RAX)
+    # call rt_exit
+    call_sym(rt_sym("rt_exit"))
+    # hlt (never reached)
+    put(0xF4)
+    return 0
+}

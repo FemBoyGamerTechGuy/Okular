@@ -940,6 +940,16 @@ static void emit_inst(FnCtx *fc, IrInst *in) {
             push_rax(o);
             break;
         }
+        case SYSOP_MKDIR: {
+            /* path(text), mode: pop mode, pop path (0.14, spec §6.6) */
+            pop_rax(o);                          /* mode */
+            buf_puts(o, "    mov r9, rax\n");
+            pop_pair_rax_rdx(o);                 /* path: rax=ptr, rdx=len */
+            buf_puts(o, "    mov rdi, rax\n    mov rsi, rdx\n    mov rdx, r9\n");
+            call_aligned(o, "rt_sys_mkdir");
+            push_rax(o);
+            break;
+        }
         default:
             OK_ICE("bad sysop %llu at %zu:%zu", (unsigned long long)in->i,
                    in->line, in->col);

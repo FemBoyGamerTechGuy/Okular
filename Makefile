@@ -65,9 +65,24 @@ runtime/rt.o: runtime/rt.c runtime/rt_start.s
 	$(CC) -c -o build/rt_start.o runtime/rt_start.s
 	ld -r -o runtime/rt.o build/rt_code.o build/rt_start.o
 
-test: all selfhost-lex selfhost-parse selfhost-runtime selfhost-assembler
+test: all selfhost-lex selfhost-parse selfhost-runtime selfhost-assembler bootstrap-chain
 	bash tools/run_tests.sh
 
 clean:
 	rm -rf build/bootstrap build/okular build/rt_code.o build/rt_start.o runtime/rt.o
 	rm -rf examples/*/build selfhost/*/build tests/tmp
+
+# the Okular-written compiler (M5): the complete pipeline — project load,
+# sema, IR, x86-64 emission, native ELF64 — in one Okular program
+selfhost/compiler/build/output/main: build/okular selfhost/compiler/main.ok $(wildcard selfhost/compiler/src/*.ok)
+	cd selfhost/compiler && ../../build/okular --compile main.ok
+
+selfhost-compiler: selfhost/compiler/build/output/main
+
+# the M5 acceptance test: the bootstrap chain (stage 0 -> 1 -> 2 -> 3,
+# byte-identical fixed point) plus the differential suite through the
+# self-built compiler — permanently in CI
+bootstrap-chain: selfhost/compiler/build/output/main
+	bash tools/run_bootstrap_chain.sh
+
+.PHONY: selfhost-compiler bootstrap-chain

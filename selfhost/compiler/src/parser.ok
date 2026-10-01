@@ -1,5 +1,10 @@
 # parser.ok — the recursive descent parser, written in Okular (M4).
 #
+# COMPILER COPY (M5): extended with the semantic-analysis annotation
+# fields sema.ok fills (sym/finfo/rtype/autoderef/offset/dval) and the
+# record-layout fields on Ty (fnames/ftypes/foffs/nfields); parser.begin()
+# resets per-file state so one process can parse a whole project.
+#
 # A faithful port of bootstrap/src/parser.c (spec §16): the same grammar,
 # the same precedence ladder, the same recovery model (statements
 # synchronize at newline, `}`, `.end`, and EOF), the same `>>` splitting
@@ -47,6 +52,7 @@ const.N_UNIONDECL = 36
 const.N_CONSTDECL = 37
 const.N_FUNC = 38
 const.N_FILE = 39
+const.N_SYSOP = 40   # sema-created (machine AST protocol append-only)
 
 # binary operators (ast.h BinOp order)
 const.OP_ADD = 0
@@ -108,6 +114,10 @@ struct.Ty = {
     type.text sname
     type.ptr<type.Ty> elem
     type.number count
+    type.number nfields
+    type.ptr<type.text> fnames
+    type.ptr<type.ptr<type.Ty>> ftypes
+    type.ptr<type.number> foffs
 }.end
 
 # ---- AST nodes ----
@@ -142,6 +152,13 @@ struct.Node = {
     type.number inclusive
     type.number feature
     type.number fvalue
+    type.number offset
+    type.number autoderef
+    type.decimal dval
+    type.text tval
+    type.ptr<type.Ty> rtype
+    type.ptr<type.Symbol> sym
+    type.ptr<type.FuncInfo> finfo
 }.end
 
 # ---- parser state ----
@@ -171,6 +188,14 @@ function.err_msg_at(number.i) -> text {
 
 # ---- constructors ----
 
+# reset per-file parser state (the compiler parses many modules in one
+# process; the token buffer is reloaded by the driver between files)
+function.begin() -> number {
+    pos = 0
+    nerr = 0
+    return 0
+}
+
 function.new_ty() -> type.ptr<type.Ty> {
     type.ptr<type.Ty> t = alloc<type.Ty>(1)
     t.form = 0
@@ -178,6 +203,10 @@ function.new_ty() -> type.ptr<type.Ty> {
     t.sname = ""
     t.elem = null
     t.count = 0
+    t.nfields = 0
+    t.fnames = null
+    t.ftypes = null
+    t.foffs = null
     return t
 }
 
@@ -212,6 +241,13 @@ function.new_node(number.kind, number.line, number.col) -> type.ptr<type.Node> {
     n.inclusive = 0
     n.feature = 0
     n.fvalue = 0
+    n.offset = 0
+    n.autoderef = 0
+    n.dval = 0.0
+    n.tval = ""
+    n.rtype = null
+    n.sym = null
+    n.finfo = null
     return n
 }
 

@@ -1,0 +1,4658 @@
+# sema.ok — semantic analysis, written in Okular (M5).
+#
+# A port of bootstrap/src/sema.c + types.c + symtab.c: the two-phase model
+# (collect symbols → check bodies) with the same scope rules (spec §6.2),
+# the same widening lattice (spec §4.4), the same contextual literal typing
+# (spec §4.2), the same constant folding for globals and consts (spec §7/§8.1),
+# and the same diagnostics (messages match the C compiler line for line so
+# the negative suite greps the same text).
+#
+# Annotations written for IR (mirroring the C side):
+#   N_PATH/N_ASSIGN/N_VARDECL -> node.sym
+#   N_CALL                    -> node.finfo, node.rtype
+#   all expressions           -> node.rtype
+#   global N_VARDECL          -> sym.cval (constant initializer)
+
+# ---- symbol kinds (symtab.h) ----
+const.SYM_FUNC = 0
+const.SYM_VAR = 1
+const.SYM_NS = 2
+const.SYM_TYPE = 3
+const.SYM_CONST = 4
+
+# ---- resolved type forms (extends the parser's F_* set) ----
+const.F_SCALAR = 0
+const.F_ARRAY = 1
+const.F_PTR = 2
+const.F_NAMED = 3
+const.F_STRUCT = 4
+const.F_UNION = 5
+const.F_NULL = 6
+const.F_VOID = 7
+
+const.S_NUMBER = 0
+const.S_DECIMAL = 1
+const.S_TEXT = 2
+const.S_BOOL = 3
+const.S_INT8 = 4
+const.S_INT16 = 5
+const.S_INT32 = 6
+const.S_UINT8 = 7
+const.S_UINT16 = 8
+const.S_UINT32 = 9
+const.S_UINT64 = 10
+const.S_AUTO = 11
+
+const.SIGN_BIT = 0x8000000000000000
+const.MAX_STRUCT_BYTES = 1048576
+
+# ---- diagnostics ----
+
+type.number diag_n = 0
+type.number diag_cap = 0
+type.ptr<type.number> diag_sev = null     # 1 = error, 0 = warning
+type.ptr<type.number> diag_line = null
+type.ptr<type.number> diag_col = null
+type.ptr<type.text> diag_file = null
+type.ptr<type.text> diag_msg = null
+type.number n_errors = 0
+
+type.number warn_enabled = 0
+
+function.diag_reset() -> number {
+    diag_n = 0
+    n_errors = 0
+    return 0
+}
+
+function.diag_grow() -> number {
+    type.number newcap = 32
+    when (diag_cap > 0) {
+        newcap = diag_cap * 2
+    }
+    type.ptr<type.number> sev = alloc<type.number>(newcap)
+    type.ptr<type.number> ln = alloc<type.number>(newcap)
+    type.ptr<type.number> cl = alloc<type.number>(newcap)
+    type.ptr<type.text> fl = alloc<type.text>(newcap)
+    type.ptr<type.text> ms = alloc<type.text>(newcap)
+    loop (i from 0 until diag_n) {
+        sev[i] = diag_sev[i]
+        ln[i] = diag_line[i]
+        cl[i] = diag_col[i]
+        fl[i] = diag_file[i]
+        ms[i] = diag_msg[i]
+    }
+    type.ptr<type.number> os = diag_sev
+    type.ptr<type.number> ol = diag_line
+    type.ptr<type.number> oc = diag_col
+    type.ptr<type.text> of = diag_file
+    type.ptr<type.text> om = diag_msg
+    diag_sev = sev
+    diag_line = ln
+    diag_col = cl
+    diag_file = fl
+    diag_msg = ms
+    diag_cap = newcap
+    when (os != null) {
+        release(os)
+        release(ol)
+        release(oc)
+        release(of)
+        release(om)
+    }
+    return 0
+}
+
+# error at a node: sev 1
+function.serr_node(type.ptr<type.Node>.n, text.msg) -> number {
+    when (diag_n == diag_cap) {
+        diag_grow()
+    }
+    diag_sev[diag_n] = 1
+    when (n == null) {
+        diag_line[diag_n] = 0
+        diag_col[diag_n] = 0
+        diag_file[diag_n] = cur_mod_display()
+    }
+    else {
+        diag_line[diag_n] = n.line
+        diag_col[diag_n] = n.col
+        diag_file[diag_n] = cur_mod_display()
+    }
+    diag_msg[diag_n] = msg
+    diag_n = diag_n + 1
+    n_errors = n_errors + 1
+    return 0
+}
+
+function.swarn_node(type.ptr<type.Node>.n, text.msg) -> number {
+    when (warn_enabled == 0) {
+        return 0
+    }
+    when (diag_n == diag_cap) {
+        diag_grow()
+    }
+    diag_sev[diag_n] = 0
+    when (n == null) {
+        diag_line[diag_n] = 0
+        diag_col[diag_n] = 0
+    }
+    else {
+        diag_line[diag_n] = n.line
+        diag_col[diag_n] = n.col
+    }
+    diag_file[diag_n] = cur_mod_display()
+    diag_msg[diag_n] = msg
+    diag_n = diag_n + 1
+    return 0
+}
+
+function.serr_line(number.l, number.c, text.msg) -> number {
+    when (diag_n == diag_cap) {
+        diag_grow()
+    }
+    diag_sev[diag_n] = 1
+    diag_line[diag_n] = l
+    diag_col[diag_n] = c
+    diag_file[diag_n] = cur_mod_display()
+    diag_msg[diag_n] = msg
+    diag_n = diag_n + 1
+    n_errors = n_errors + 1
+    return 0
+}
+
+function.error_count() -> number {
+    return n_errors
+}
+
+function.note(type.ptr<type.Node>.n, text.msg) -> number {
+    # notes ride as low-priority lines after the diagnostic; the C renderer
+    # prints them under the error — here a "note:" tagged entry works for
+    # the suite's fixed-string greps
+    when (diag_n == diag_cap) {
+        diag_grow()
+    }
+    diag_sev[diag_n] = 2
+    when (n == null) {
+        diag_line[diag_n] = 0
+        diag_col[diag_n] = 0
+    }
+    else {
+        diag_line[diag_n] = n.line
+        diag_col[diag_n] = n.col
+    }
+    diag_file[diag_n] = cur_mod_display()
+    diag_msg[diag_n] = "note: " + msg
+    diag_n = diag_n + 1
+    return 0
+}
+
+# ---- the resolved type singletons ----
+
+type.ptr<type.Ty> T_NUMBER = null
+type.ptr<type.Ty> T_DECIMAL = null
+type.ptr<type.Ty> T_TEXT = null
+type.ptr<type.Ty> T_BOOL = null
+type.ptr<type.Ty> T_INT8 = null
+type.ptr<type.Ty> T_INT16 = null
+type.ptr<type.Ty> T_INT32 = null
+type.ptr<type.Ty> T_UINT8 = null
+type.ptr<type.Ty> T_UINT16 = null
+type.ptr<type.Ty> T_UINT32 = null
+type.ptr<type.Ty> T_UINT64 = null
+type.ptr<type.Ty> T_AUTO = null
+type.ptr<type.Ty> T_NULL = null
+type.ptr<type.Ty> T_VOID = null
+
+function.mk_scalar(number.code) -> type.ptr<type.Ty> {
+    type.ptr<type.Ty> t = parser.new_ty()
+    t.form = F_SCALAR
+    t.scalar = code
+    return t
+}
+
+type.number types_ready = 0
+
+function.init_types() -> number {
+    when (types_ready == 1) {
+        return 0
+    }
+    T_NUMBER = mk_scalar(S_NUMBER)
+    T_DECIMAL = mk_scalar(S_DECIMAL)
+    T_TEXT = mk_scalar(S_TEXT)
+    T_BOOL = mk_scalar(S_BOOL)
+    T_INT8 = mk_scalar(S_INT8)
+    T_INT16 = mk_scalar(S_INT16)
+    T_INT32 = mk_scalar(S_INT32)
+    T_UINT8 = mk_scalar(S_UINT8)
+    T_UINT16 = mk_scalar(S_UINT16)
+    T_UINT32 = mk_scalar(S_UINT32)
+    T_UINT64 = mk_scalar(S_UINT64)
+    T_AUTO = mk_scalar(S_AUTO)
+    T_NULL = parser.new_ty()
+    T_NULL.form = F_NULL
+    T_VOID = parser.new_ty()
+    T_VOID.form = F_VOID
+    types_ready = 1
+    return 0
+}
+
+# ---- interned array/ptr types (pointer equality IS type equality) ----
+
+type.ptr<type.ptr<type.Ty>> it_elem = null
+type.ptr<type.number> it_count = null
+type.ptr<type.number> it_form = null
+type.number it_len = 0
+type.number it_cap = 0
+
+function.it_grow() -> number {
+    type.number newcap = 32
+    when (it_cap > 0) {
+        newcap = it_cap * 2
+    }
+    type.ptr<type.ptr<type.Ty>> ne = alloc<type.ptr<type.Ty>>(newcap)
+    type.ptr<type.number> nc = alloc<type.number>(newcap)
+    type.ptr<type.number> nf = alloc<type.number>(newcap)
+    loop (i from 0 until it_len) {
+        ne[i] = it_elem[i]
+        nc[i] = it_count[i]
+        nf[i] = it_form[i]
+    }
+    type.ptr<type.ptr<type.Ty>> oe = it_elem
+    type.ptr<type.number> oc = it_count
+    type.ptr<type.number> of = it_form
+    it_elem = ne
+    it_count = nc
+    it_form = nf
+    it_cap = newcap
+    when (oe != null) {
+        release(oe)
+        release(oc)
+        release(of)
+    }
+    return 0
+}
+
+function.intern_ptr(type.ptr<type.Ty>.elem) -> type.ptr<type.Ty> {
+    loop (i from 0 until it_len) {
+        when (it_form[i] == F_PTR and it_elem[i].elem == elem) {
+            return it_elem[i]
+        }
+    }
+    when (it_len == it_cap) {
+        it_grow()
+    }
+    type.ptr<type.Ty> t = parser.new_ty()
+    t.form = F_PTR
+    t.elem = elem
+    it_elem[it_len] = t
+    it_count[it_len] = 0
+    it_form[it_len] = F_PTR
+    it_len = it_len + 1
+    return t
+}
+
+function.intern_array(type.ptr<type.Ty>.elem, number.count) -> type.ptr<type.Ty> {
+    loop (i from 0 until it_len) {
+        when (it_form[i] == F_ARRAY and it_elem[i].elem == elem and it_elem[i].count == count) {
+            return it_elem[i]
+        }
+    }
+    when (it_len == it_cap) {
+        it_grow()
+    }
+    type.ptr<type.Ty> t = parser.new_ty()
+    t.form = F_ARRAY
+    t.elem = elem
+    t.count = count
+    it_elem[it_len] = t
+    it_count[it_len] = count
+    it_form[it_len] = F_ARRAY
+    it_len = it_len + 1
+    return t
+}
+
+# canonicalize a parsed type: scalars map to singletons, arrays/ptrs to
+# interned descriptors, named types ride the parser's shared registry
+function.canon(type.ptr<type.Ty>.t) -> type.ptr<type.Ty> {
+    when (t == null) {
+        return null
+    }
+    when (t.form == F_SCALAR) {
+        when (t.scalar == S_NUMBER) { return T_NUMBER }
+        else when (t.scalar == S_DECIMAL) { return T_DECIMAL }
+        else when (t.scalar == S_TEXT) { return T_TEXT }
+        else when (t.scalar == S_BOOL) { return T_BOOL }
+        else when (t.scalar == S_INT8) { return T_INT8 }
+        else when (t.scalar == S_INT16) { return T_INT16 }
+        else when (t.scalar == S_INT32) { return T_INT32 }
+        else when (t.scalar == S_UINT8) { return T_UINT8 }
+        else when (t.scalar == S_UINT16) { return T_UINT16 }
+        else when (t.scalar == S_UINT32) { return T_UINT32 }
+        else when (t.scalar == S_UINT64) { return T_UINT64 }
+        else when (t.scalar == S_AUTO) { return T_AUTO }
+        else when (t.scalar == -1) { return T_VOID }
+        return T_NUMBER
+    }
+    when (t.form == F_PTR) {
+        return intern_ptr(canon(t.elem))
+    }
+    when (t.form == F_ARRAY) {
+        return intern_array(canon(t.elem), t.count)
+    }
+    return t
+}
+
+# ---- type classification helpers ----
+
+function.ty_kind(type.ptr<type.Ty>.t) -> number {
+    when (t == null) {
+        return F_VOID
+    }
+    return t.form
+}
+
+function.is_ptr(type.ptr<type.Ty>.t) -> bool {
+    return t != null and t.form == F_PTR
+}
+
+function.is_record(type.ptr<type.Ty>.t) -> bool {
+    return t != null and (t.form == F_STRUCT or t.form == F_UNION)
+}
+
+function.is_struct(type.ptr<type.Ty>.t) -> bool {
+    return t != null and t.form == F_STRUCT
+}
+
+function.is_union(type.ptr<type.Ty>.t) -> bool {
+    return t != null and t.form == F_UNION
+}
+
+function.ty_bits(type.ptr<type.Ty>.t) -> number {
+    when (t == null or t.form != F_SCALAR) {
+        return 0
+    }
+    when (t.scalar == S_NUMBER) { return 64 }
+    else when (t.scalar == S_INT8) { return 8 }
+    else when (t.scalar == S_INT16) { return 16 }
+    else when (t.scalar == S_INT32) { return 32 }
+    else when (t.scalar == S_UINT8) { return 8 }
+    else when (t.scalar == S_UINT16) { return 16 }
+    else when (t.scalar == S_UINT32) { return 32 }
+    else when (t.scalar == S_UINT64) { return 64 }
+    return 0
+}
+
+function.ty_signed(type.ptr<type.Ty>.t) -> bool {
+    when (t == null or t.form != F_SCALAR) {
+        return false
+    }
+    when (t.scalar == S_NUMBER) { return true }
+    else when (t.scalar == S_INT8) { return true }
+    else when (t.scalar == S_INT16) { return true }
+    else when (t.scalar == S_INT32) { return true }
+    return false
+}
+
+function.is_integer(type.ptr<type.Ty>.t) -> bool {
+    # number + the fixed-width family (types.h ty_is_integer)
+    when (t == null) {
+        return false
+    }
+    when (t.form != F_SCALAR) {
+        return false
+    }
+    when (t.scalar == S_NUMBER) { return true }
+    when (ty_bits(t) > 0) { return true }
+    return false
+}
+
+function.is_fixed_int(type.ptr<type.Ty>.t) -> bool {
+    when (t == null or t.form != F_SCALAR) {
+        return false
+    }
+    when (t.scalar == S_NUMBER) {
+        return false
+    }
+    return ty_bits(t) > 0
+}
+
+function.ty_bytes(type.ptr<type.Ty>.t) -> number {
+    when (t == null) {
+        return 0
+    }
+    when (t.form == F_SCALAR) {
+        when (t.scalar == S_NUMBER) { return 8 }
+        else when (t.scalar == S_DECIMAL) { return 8 }
+        else when (t.scalar == S_TEXT) { return 16 }
+        else when (t.scalar == S_BOOL) { return 1 }
+        else when (t.scalar == S_INT8) { return 1 }
+        else when (t.scalar == S_INT16) { return 2 }
+        else when (t.scalar == S_INT32) { return 4 }
+        else when (t.scalar == S_UINT8) { return 1 }
+        else when (t.scalar == S_UINT16) { return 2 }
+        else when (t.scalar == S_UINT32) { return 4 }
+        else when (t.scalar == S_UINT64) { return 8 }
+        else when (t.scalar == S_AUTO) { return 0 }
+        return 0
+    }
+    when (t.form == F_ARRAY) {
+        return t.count * ty_bytes(t.elem)
+    }
+    when (t.form == F_PTR) {
+        return 8
+    }
+    when (t.form == F_STRUCT or t.form == F_UNION) {
+        return t.count
+    }
+    return 0
+}
+
+function.ty_align(type.ptr<type.Ty>.t) -> number {
+    # natural alignment (1/2/4/8; records: their largest field's alignment)
+    when (t == null) {
+        return 1
+    }
+    when (t.form == F_SCALAR) {
+        when (t.scalar == S_NUMBER) { return 8 }
+        else when (t.scalar == S_DECIMAL) { return 8 }
+        else when (t.scalar == S_TEXT) { return 8 }
+        else when (t.scalar == S_BOOL) { return 1 }
+        else when (t.scalar == S_INT8) { return 1 }
+        else when (t.scalar == S_INT16) { return 2 }
+        else when (t.scalar == S_INT32) { return 4 }
+        else when (t.scalar == S_UINT8) { return 1 }
+        else when (t.scalar == S_UINT16) { return 2 }
+        else when (t.scalar == S_UINT32) { return 4 }
+        else when (t.scalar == S_UINT64) { return 8 }
+        return 1
+    }
+    when (t.form == F_ARRAY) {
+        return ty_align(t.elem)
+    }
+    when (t.form == F_PTR) {
+        return 8
+    }
+    when (t.form == F_STRUCT or t.form == F_UNION) {
+        type.number a = 1
+        loop (i from 0 until t.nfields) {
+            type.number fa = ty_align(t.ftypes[i])
+            when (fa > a) {
+                a = fa
+            }
+        }
+        return a
+    }
+    return 1
+}
+
+# rendered type name ("number", "array<number, 5>", "ptr<T>", record names)
+function.ty_name(type.ptr<type.Ty>.t) -> text {
+    when (t == null) {
+        return "void"
+    }
+    when (t.form == F_SCALAR) {
+        when (t.scalar == S_NUMBER) { return "number" }
+        else when (t.scalar == S_DECIMAL) { return "decimal" }
+        else when (t.scalar == S_TEXT) { return "text" }
+        else when (t.scalar == S_BOOL) { return "bool" }
+        else when (t.scalar == S_INT8) { return "int8" }
+        else when (t.scalar == S_INT16) { return "int16" }
+        else when (t.scalar == S_INT32) { return "int32" }
+        else when (t.scalar == S_UINT8) { return "uint8" }
+        else when (t.scalar == S_UINT16) { return "uint16" }
+        else when (t.scalar == S_UINT32) { return "uint32" }
+        else when (t.scalar == S_UINT64) { return "uint64" }
+        else when (t.scalar == S_AUTO) { return "auto" }
+        return "?"
+    }
+    when (t.form == F_ARRAY) {
+        return "array<" + ty_name(t.elem) + ", " + number.to_text(t.count) + ">"
+    }
+    when (t.form == F_PTR) {
+        return "ptr<" + ty_name(t.elem) + ">"
+    }
+    when (t.form == F_NULL) {
+        return "null"
+    }
+    when (t.form == F_VOID) {
+        return "void"
+    }
+    return t.sname
+}
+
+# scalar type from a name (types.c ty_from_scalar_name); false -> -1
+function.scalar_from_name(text.s) -> number {
+    when (s == "number") { return S_NUMBER }
+    else when (s == "int64") { return S_NUMBER }
+    else when (s == "decimal") { return S_DECIMAL }
+    else when (s == "f64") { return S_DECIMAL }
+    else when (s == "text") { return S_TEXT }
+    else when (s == "bool") { return S_BOOL }
+    else when (s == "int8") { return S_INT8 }
+    else when (s == "int16") { return S_INT16 }
+    else when (s == "int32") { return S_INT32 }
+    else when (s == "uint8") { return S_UINT8 }
+    else when (s == "byte") { return S_UINT8 }
+    else when (s == "uint16") { return S_UINT16 }
+    else when (s == "uint32") { return S_UINT32 }
+    else when (s == "uint64") { return S_UINT64 }
+    return -1
+}
+
+function.scalar_ty(number.code) -> type.ptr<type.Ty> {
+    when (code == S_NUMBER) { return T_NUMBER }
+    else when (code == S_DECIMAL) { return T_DECIMAL }
+    else when (code == S_TEXT) { return T_TEXT }
+    else when (code == S_BOOL) { return T_BOOL }
+    else when (code == S_INT8) { return T_INT8 }
+    else when (code == S_INT16) { return T_INT16 }
+    else when (code == S_INT32) { return T_INT32 }
+    else when (code == S_UINT8) { return T_UINT8 }
+    else when (code == S_UINT16) { return T_UINT16 }
+    else when (code == S_UINT32) { return T_UINT32 }
+    else when (code == S_UINT64) { return T_UINT64 }
+    return null
+}
+
+# unsigned 64-bit compare on `number` bits: flip the top bit
+function.ult(number.a, number.b) -> bool {
+    return (a ^ SIGN_BIT) < (b ^ SIGN_BIT)
+}
+
+# does a non-negative literal value fit the type? (types.c ty_uint_fits)
+function.uint_fits(number.v, type.ptr<type.Ty>.t) -> bool {
+    when (t == null or is_integer(t) == false) {
+        return false
+    }
+    when (t == T_NUMBER) {
+        return true
+    }
+    type.number b = ty_bits(t)
+    when (b >= 64) {
+        return true
+    }
+    type.number maxv = (1 << b) - 1
+    when (ty_signed(t)) {
+        # signed targets cap at 2^(b-1)-1; v rides as unsigned bits
+        return ult(v, maxv / 2 + 1)
+    }
+    return ult(v, maxv + 1)
+}
+
+# does a signed constant value fit the type? (types.c ty_sint_fits)
+function.sint_fits(number.v, type.ptr<type.Ty>.t) -> bool {
+    when (t == null or is_integer(t) == false) {
+        return false
+    }
+    when (t == T_NUMBER) {
+        return true
+    }
+    type.number b = ty_bits(t)
+    when (b >= 64) {
+        return true
+    }
+    when (ty_signed(t)) {
+        type.number lo = -(1 << (b - 1))
+        type.number hi = (1 << (b - 1)) - 1
+        return v >= lo and v <= hi
+    }
+    # unsigned target: constants must be non-negative and in range
+    when (v < 0) {
+        return false
+    }
+    type.number maxv = (1 << b) - 1
+    return v <= maxv
+}
+
+# min/max of an integer type as int64 (uint64 max reported as -1 sentinel)
+function.ty_min(number.code) -> number {
+    when (code == S_INT8) { return -128 }
+    else when (code == S_INT16) { return -32768 }
+    else when (code == S_INT32) { return -2147483648 }
+    return -9223372036854775808
+}
+
+function.ty_max(number.code) -> number {
+    when (code == S_INT8) { return 127 }
+    else when (code == S_INT16) { return 32767 }
+    else when (code == S_INT32) { return 2147483647 }
+    else when (code == S_UINT8) { return 255 }
+    else when (code == S_UINT16) { return 65535 }
+    else when (code == S_UINT32) { return 4294967295 }
+    return -1
+}
+
+# re-encode a 64-bit register representation from one integer type's
+# semantics to another's (truncating wrap; types.c ty_reencode)
+function.reencode(number.v, type.ptr<type.Ty>.t) -> number {
+    when (t == null) {
+        return v
+    }
+    type.number b = ty_bits(t)
+    when (b == 0 or b >= 64) {
+        return v
+    }
+    when (ty_signed(t)) {
+        return (v << (64 - b)) >> (64 - b)
+    }
+    type.number mask = (1 << b) - 1
+    return v & mask
+}
+
+# integer rep -> double (types.c ty_int_to_dec): unsigned types read the
+# bits unsigned; signed read signed
+function.int_to_dec(number.v, type.ptr<type.Ty>.t) -> decimal {
+    when (t != null and is_integer(t) and ty_signed(t) == false and v < 0) {
+        return number.to_decimal(v) + 18446744073709551616.0
+    }
+    return number.to_decimal(v)
+}
+
+# double -> integer rep of `to` (types.c ty_dec_to_int): truncate toward
+# zero, wrap on overflow; NaN/out-of-range become the INT64_MIN sentinel
+function.dec_to_int(decimal.d, type.ptr<type.Ty>.t) -> number {
+    type.number v = decimal.to_number(d)
+    return reencode(v, t)
+}
+
+# implicit conversion / assignment compatibility (types.c ty_assignable)
+function.assignable(type.ptr<type.Ty>.frm, type.ptr<type.Ty>.dst) -> bool {
+    when (frm == dst) {
+        return true
+    }
+    when (frm == null or dst == null) {
+        return false
+    }
+    # the null literal initializes any pointer (spec §12)
+    when (frm == T_NULL and dst.form == F_PTR) {
+        return true
+    }
+    # text: exact only
+    when (frm == T_TEXT or dst == T_TEXT) {
+        return false
+    }
+    # bool: exact only
+    when (frm == T_BOOL or dst == T_BOOL) {
+        return false
+    }
+    # any integer -> decimal
+    when (dst == T_DECIMAL and is_integer(frm)) {
+        return true
+    }
+    # integer -> integer widening
+    when (is_integer(frm) and is_integer(dst)) {
+        type.number fb = ty_bits(frm)
+        type.number tb = ty_bits(dst)
+        type.number fs = 0
+        when (ty_signed(frm)) {
+            fs = 1
+        }
+        type.number ts = 0
+        when (ty_signed(dst)) {
+            ts = 1
+        }
+        # signed -> wider signed
+        when (fs == 1 and ts == 1 and tb > fb) {
+            return true
+        }
+        # unsigned -> wider unsigned
+        when (fs == 0 and ts == 0 and tb > fb) {
+            return true
+        }
+        # unsigned -> strictly-wider signed
+        when (fs == 0 and ts == 1 and tb > fb) {
+            return true
+        }
+        return false
+    }
+    return false
+}
+
+# common type for mixed arithmetic (types.c ty_common)
+function.ty_common(type.ptr<type.Ty>.a, type.ptr<type.Ty>.b) -> type.ptr<type.Ty> {
+    when (a == null or b == null) {
+        return null
+    }
+    when (a == b) {
+        return a
+    }
+    when (a == T_DECIMAL and is_integer(b)) {
+        return T_DECIMAL
+    }
+    when (b == T_DECIMAL and is_integer(a)) {
+        return T_DECIMAL
+    }
+    when (a == T_DECIMAL or b == T_DECIMAL) {
+        return null
+    }
+    when (is_integer(a) and is_integer(b)) {
+        # the wider operand's type when one converts implicitly
+        when (assignable(a, b)) {
+            return b
+        }
+        when (assignable(b, a)) {
+            return a
+        }
+        return null
+    }
+    return null
+}
+
+# explicit conversion availability (types.c ty_convertible)
+function.convertible(type.ptr<type.Ty>.frm, type.ptr<type.Ty>.dst) -> bool {
+    when (frm == dst) {
+        return true
+    }
+    when (frm == null or dst == null) {
+        return false
+    }
+    # text conversion builtins (spec §4.4) — checked FIRST
+    when (frm == T_TEXT) {
+        return dst == T_NUMBER or is_integer(dst) or dst == T_DECIMAL
+    }
+    when (dst == T_TEXT) {
+        return is_integer(frm) or frm == T_DECIMAL or frm == T_BOOL
+    }
+    # records/arrays/named never convert
+    when (frm.form == F_ARRAY or dst.form == F_ARRAY) {
+        return false
+    }
+    when (is_record(frm) or is_record(dst)) {
+        return false
+    }
+    when (frm.form == F_NAMED or dst.form == F_NAMED) {
+        return false
+    }
+    when (frm == T_VOID or dst == T_VOID) {
+        return false
+    }
+    # bool -> integer/decimal
+    when (frm == T_BOOL) {
+        return is_integer(dst) or dst == T_DECIMAL
+    }
+    # integer/decimal -> bool: no
+    when (dst == T_BOOL) {
+        return false
+    }
+    # integer <-> integer, integer <-> decimal
+    when (is_integer(frm) and is_integer(dst)) {
+        return true
+    }
+    when (is_integer(frm) and dst == T_DECIMAL) {
+        return true
+    }
+    when (frm == T_DECIMAL and is_integer(dst)) {
+        return true
+    }
+    # pointer raw-address escapes (0.13, spec §12)
+    when (is_ptr(frm) and dst == T_NUMBER) {
+        return true
+    }
+    when (is_integer(frm) and is_ptr(dst)) {
+        return true
+    }
+    # null converts dst any pointer
+    when (frm == T_NULL and is_ptr(dst)) {
+        return true
+    }
+    return false
+}
+
+# ---- the constant value (symtab.h ConstVal) ----
+
+struct.ConstVal = {
+    type.number valid
+    type.ptr<type.Ty> ty
+    type.number i
+    type.decimal d
+    type.number b
+    type.text t
+    type.ptr<type.ptr<type.ConstVal>> elems
+    type.number nelems
+    type.ptr<type.Ty> mty
+}.end
+
+function.new_cv() -> type.ptr<type.ConstVal> {
+    type.ptr<type.ConstVal> v = alloc<type.ConstVal>(1)
+    v.valid = 0
+    v.ty = null
+    v.i = 0
+    v.d = 0.0
+    v.b = 0
+    v.t = ""
+    v.elems = null
+    v.nelems = 0
+    v.mty = null
+    return v
+}
+
+# ---- symbols and scopes (symtab.h) ----
+
+struct.Symbol = {
+    type.text name
+    type.number kind
+    type.ptr<type.Ty> ty
+    type.text mangled
+    type.ptr<type.FuncInfo> func
+    type.ptr<type.Scope> ns
+    type.ptr<type.Scope> scope
+    type.ptr<type.Node> decl
+    type.number is_global
+    type.number used
+    type.number line
+    type.number col
+    type.ptr<type.ConstVal> cval
+}.end
+
+struct.Scope = {
+    type.ptr<type.Scope> parent
+    type.ptr<type.ptr<type.Symbol>> syms
+    type.number n
+    type.number cap
+}.end
+
+struct.FuncInfo = {
+    type.text name
+    type.text mangled
+    type.ptr<type.Ty> ret
+    type.ptr<type.ptr<type.Ty>> ptypes
+    type.ptr<type.text> pnames
+    type.ptr<type.ptr<type.Symbol>> psyms
+    type.number nparams
+    type.ptr<type.Node> decl
+    type.ptr<type.Mod> module
+    type.number is_entry
+}.end
+
+function.new_symbol(text.name, number.kind) -> type.ptr<type.Symbol> {
+    type.ptr<type.Symbol> s = alloc<type.Symbol>(1)
+    s.name = name
+    s.kind = kind
+    s.ty = null
+    s.mangled = ""
+    s.func = null
+    s.ns = null
+    s.scope = null
+    s.decl = null
+    s.is_global = 0
+    s.used = 0
+    s.line = 0
+    s.col = 0
+    s.cval = null
+    return s
+}
+
+function.scope_new(type.ptr<type.Scope>.parent) -> type.ptr<type.Scope> {
+    type.ptr<type.Scope> sc = alloc<type.Scope>(1)
+    sc.parent = parent
+    sc.syms = null
+    sc.n = 0
+    sc.cap = 0
+    return sc
+}
+
+function.scope_grow(type.ptr<type.Scope>.s) -> number {
+    type.number newcap = 8
+    when (s.cap > 0) {
+        newcap = s.cap * 2
+    }
+    type.ptr<type.ptr<type.Symbol>> ns = alloc<type.ptr<type.Symbol>>(newcap)
+    loop (i from 0 until s.n) {
+        ns[i] = s.syms[i]
+    }
+    type.ptr<type.ptr<type.Symbol>> old = s.syms
+    s.syms = ns
+    s.cap = newcap
+    when (old != null) {
+        release(old)
+    }
+    return 0
+}
+
+# insert; returns the existing symbol when duplicate (caller reports)
+function.scope_insert(type.ptr<type.Scope>.s, text.name, number.kind, number.line, number.col) -> type.ptr<type.Symbol> {
+    type.ptr<type.Symbol> ex = scope_find_local(s, name)
+    when (ex != null) {
+        return ex
+    }
+    when (s.n == s.cap) {
+        scope_grow(s)
+    }
+    type.ptr<type.Symbol> sym = new_symbol(name, kind)
+    sym.scope = s
+    sym.line = line
+    sym.col = col
+    s.syms[s.n] = sym
+    s.n = s.n + 1
+    return sym
+}
+
+function.scope_find_local(type.ptr<type.Scope>.s, text.name) -> type.ptr<type.Symbol> {
+    when (s == null) {
+        return null
+    }
+    loop (i from 0 until s.n) {
+        when (s.syms[i].name == name) {
+            return s.syms[i]
+        }
+    }
+    return null
+}
+
+function.scope_lookup(type.ptr<type.Scope>.s, text.name) -> type.ptr<type.Symbol> {
+    type.ptr<type.Scope> sc = s
+    loop (sc != null) {
+        type.ptr<type.Symbol> hit = scope_find_local(sc, name)
+        when (hit != null) {
+            return hit
+        }
+        sc = sc.parent
+    }
+    return null
+}
+
+function.funcinfo_new(text.name, text.mangled, type.ptr<type.Ty>.ret, type.ptr<type.Node>.decl, type.ptr<type.Mod>.mod) -> type.ptr<type.FuncInfo> {
+    type.ptr<type.FuncInfo> fi = alloc<type.FuncInfo>(1)
+    fi.name = name
+    fi.mangled = mangled
+    fi.ret = ret
+    fi.ptypes = null
+    fi.pnames = null
+    fi.psyms = null
+    fi.nparams = 0
+    fi.decl = decl
+    fi.module = mod
+    fi.is_entry = 0
+    return fi
+}
+
+# ---- module record ----
+
+struct.Mod = {
+    type.text name
+    type.text path
+    type.text display
+    type.ptr<type.Node> ast
+    type.number required
+    type.number broken
+    type.number state       # 1 = loaded ok, 0 = failed
+    type.ptr<type.FuncInfo> entry
+    type.number ftext       # type.text=1 feature flag
+    # IR-facing outputs (filled by ir.ok through these lists)
+    type.ptr<type.ptr<type.Symbol>> globals
+    type.number nglobals
+    type.number globals_cap
+}.end
+
+function.new_mod(text.name, text.path, text.display, number.required) -> type.ptr<type.Mod> {
+    type.ptr<type.Mod> m = alloc<type.Mod>(1)
+    m.name = name
+    m.path = path
+    m.display = display
+    m.ast = null
+    m.required = required
+    m.broken = 0
+    m.state = 1
+    m.entry = null
+    m.ftext = 0
+    m.globals = null
+    m.nglobals = 0
+    m.globals_cap = 0
+    return m
+}
+
+# ---- sema context (module-level state) ----
+
+type.ptr<type.Scope> root_scope = null
+type.ptr<type.Mod> cur_mod = null
+type.ptr<type.Scope> cur_scope = null
+type.ptr<type.FuncInfo> cur_func = null
+type.number in_loop = 0
+
+function.cur_mod_display() -> text {
+    when (cur_mod == null) {
+        return "main.ok"
+    }
+    return cur_mod.display
+}
+
+# ---- struct declaration sites (layout fixpoint) ----
+
+type.ptr<type.ptr<type.Node>> site_decls = null
+type.ptr<type.ptr<type.Mod>> site_mods = null
+type.ptr<type.ptr<type.Scope>> site_scopes = null
+type.number n_sites = 0
+type.number sites_cap = 0
+
+function.push_site(type.ptr<type.Node>.decl, type.ptr<type.Mod>.mod, type.ptr<type.Scope>.scope) -> number {
+    when (n_sites == sites_cap) {
+        type.number newcap = 16
+        when (sites_cap > 0) {
+            newcap = sites_cap * 2
+        }
+        type.ptr<type.ptr<type.Node>> nd = alloc<type.ptr<type.Node>>(newcap)
+        type.ptr<type.ptr<type.Mod>> nm = alloc<type.ptr<type.Mod>>(newcap)
+        type.ptr<type.ptr<type.Scope>> nsc = alloc<type.ptr<type.Scope>>(newcap)
+        loop (i from 0 until n_sites) {
+            nd[i] = site_decls[i]
+            nm[i] = site_mods[i]
+            nsc[i] = site_scopes[i]
+        }
+        type.ptr<type.ptr<type.Node>> od = site_decls
+        type.ptr<type.ptr<type.Mod>> om = site_mods
+        type.ptr<type.ptr<type.Scope>> osc = site_scopes
+        site_decls = nd
+        site_mods = nm
+        site_scopes = nsc
+        sites_cap = newcap
+        when (od != null) {
+            release(od)
+            release(om)
+            release(osc)
+        }
+    }
+    site_decls[n_sites] = decl
+    site_mods[n_sites] = mod
+    site_scopes[n_sites] = scope
+    n_sites = n_sites + 1
+    return 0
+}
+
+# ---- text literal unescaping (lexer.c's escape set) ----
+
+function.unescape(text.sp, number.uline, number.ucol) -> text {
+    # sp is the raw spelling INCLUDING the surrounding quotes
+    type.number n = text.length(sp)
+    type.text out = ""
+    type.number i = 1
+    type.number endlim = n - 1
+    loop (i < endlim) {
+        type.number b = text.byte_at(sp, i)
+        when (b == 92) {
+            # backslash escape; the closing quote bounds the scan
+            type.number e = 0
+            when (i + 1 < endlim) {
+                e = text.byte_at(sp, i + 1)
+            }
+            when (e == 110) { out = out + "\n" }
+            else when (e == 116) { out = out + "\t" }
+            else when (e == 114) { out = out + "\r" }
+            else when (e == 48) { out = out + "\0" }
+            else when (e == 92) { out = out + "\\" }
+            else when (e == 34) { out = out + "\"" }
+            else {
+                # unknown escape: a lex-level error in the C compiler; the
+                # message matches so the negative suite greps it
+                type.text ch = "?"
+                when (e >= 33 and e < 127) {
+                    ch = text.slice(sp, i + 1, i + 2)
+                }
+                serr_line(uline, ucol, "unknown escape `\\" + ch + "` in text literal (supported: \\n \\t \\r \\0 \\\\ \\\").")
+                return out
+            }
+            i = i + 2
+        }
+        else {
+            out = out + text.slice(sp, i, i + 1)
+            i = i + 1
+        }
+    }
+    return out
+}
+
+# ---- mangled assembly names: ok_<module>[_<col>...]<name> ----
+
+function.replace_dots(text.s) -> text {
+    type.text out = ""
+    type.number n = text.length(s)
+    loop (i from 0 until n) {
+        when (text.byte_at(s, i) == 46) {
+            out = out + "_"
+        }
+        else {
+            out = out + text.slice(s, i, i + 1)
+        }
+    }
+    return out
+}
+
+function.mangle(text.mod, text.colpath, text.name) -> text {
+    type.text base = ""
+    when (text.length(colpath) > 0) {
+        base = "ok_" + mod + "_" + colpath + "_" + name
+    }
+    else {
+        base = "ok_" + mod + "_" + name
+    }
+    return replace_dots(base)
+}
+
+# ---- name suggestions (edit distance <= 2, brief §42) ----
+
+function.edit_distance(text.a, text.b) -> number {
+    type.number la = text.length(a)
+    type.number lb = text.length(b)
+    when (la == 0) {
+        return lb
+    }
+    when (lb == 0) {
+        return la
+    }
+    when (lb >= 64) {
+        return 99
+    }
+    type.array<type.number, 64> prev = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    type.array<type.number, 64> cur = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    loop (j from 0 until lb + 1) {
+        prev[j] = j
+    }
+    loop (i2 from 1 until la + 1) {
+        cur[0] = i2
+        loop (j from 1 until lb + 1) {
+            type.number cost = 1
+            when (text.byte_at(a, i2 - 1) == text.byte_at(b, j - 1)) {
+                cost = 0
+            }
+            type.number m = prev[j - 1] + cost
+            when (cur[j - 1] + 1 < m) {
+                m = cur[j - 1] + 1
+            }
+            when (prev[j] + 1 < m) {
+                m = prev[j] + 1
+            }
+            cur[j] = m
+        }
+        loop (j from 0 until lb + 1) {
+            prev[j] = cur[j]
+        }
+    }
+    return prev[lb]
+}
+
+function.suggest_name(type.ptr<type.Scope>.s, text.name) -> text {
+    type.ptr<type.Scope> sc = s
+    loop (sc != null) {
+        loop (i from 0 until sc.n) {
+            when (edit_distance(name, sc.syms[i].name) <= 2) {
+                return sc.syms[i].name
+            }
+        }
+        sc = sc.parent
+    }
+    return ""
+}
+
+# ---- the canonicalization + literal-value pass ----
+
+function.canon_node(type.ptr<type.Node>.n) -> number {
+    when (n == null) {
+        return 0
+    }
+    n.otype = canon(n.otype)
+    type.number i = 0
+    loop (i < n.nparams) {
+        n.ptypes[i] = canon(n.ptypes[i])
+        i = i + 1
+    }
+    when (n.kind == parser.N_DEC) {
+        n.dval = text.to_decimal(n.str)
+    }
+    else when (n.kind == parser.N_TEXT) {
+        n.tval = unescape(n.str, n.line, n.col)
+    }
+    canon_node(n.a)
+    canon_node(n.b)
+    canon_node(n.c)
+    loop (i from 0 until n.nbody) {
+        canon_node(n.body[i])
+    }
+    loop (i from 0 until n.nbody_else) {
+        canon_node(n.body_else[i])
+    }
+    loop (i from 0 until n.nargs) {
+        canon_node(n.args[i])
+    }
+    return 0
+}
+
+# ---------------- structs (spec §8.3/§8.5) ----------------
+
+function.is_record_decl(type.ptr<type.Node>.n) -> bool {
+    return n.kind == parser.N_STRUCTDECL or n.kind == parser.N_UNIONDECL
+}
+
+function.register_struct_decl(type.ptr<type.Mod>.m, type.ptr<type.Scope>.scope, type.ptr<type.Node>.n) -> number {
+    type.ptr<type.Symbol> ex = scope_insert(scope, n.name, SYM_TYPE, n.line, n.col)
+    when (ex.kind != SYM_TYPE or (ex.decl != null and ex.decl != n)) {
+        serr_node(n, "duplicate definition of type `" + n.name + "`.")
+        return 0
+    }
+    ex.ty = n.otype
+    ex.decl = n
+    push_site(n, m, scope)
+    return 0
+}
+
+function.collect_structs_in(type.ptr<type.Mod>.m, type.ptr<type.Node>.file, type.ptr<type.Scope>.scope) -> number {
+    loop (i from 0 until file.nbody) {
+        type.ptr<type.Node> n = file.body[i]
+        when (is_record_decl(n)) {
+            register_struct_decl(m, scope, n)
+        }
+        else when (n.kind == parser.N_DEVCOL) {
+            type.ptr<type.Symbol> colsym = scope_find_local(scope, n.name)
+            when (colsym != null and colsym.ns != null) {
+                loop (k from 0 until n.nbody) {
+                    type.ptr<type.Node> mem = n.body[k]
+                    when (is_record_decl(mem)) {
+                        register_struct_decl(m, colsym.ns, mem)
+                    }
+                    else when (mem.kind == parser.N_DEVCOL) {
+                        type.ptr<type.Symbol> nested = scope_find_local(colsym.ns, mem.name)
+                        when (nested != null and nested.ns != null) {
+                            loop (j from 0 until mem.nbody) {
+                                when (is_record_decl(mem.body[j])) {
+                                    register_struct_decl(m, nested.ns, mem.body[j])
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+
+# fill one record placeholder: fields, offsets, total size (spec §8.3/§8.5)
+function.layout_one_struct(type.ptr<type.Node>.decl) -> number {
+    type.ptr<type.Ty> t = decl.otype
+    when (t.form != F_NAMED) {
+        return 1
+    }
+    type.number nf = decl.nparams
+    loop (i from 0 until nf) {
+        when (decl.ptypes[i].form == F_NAMED) {
+            return 0
+        }
+    }
+    type.number is_union = 0
+    when (decl.kind == parser.N_UNIONDECL) {
+        is_union = 1
+    }
+    type.ptr<type.text> fnames = alloc<type.text>(nf + 1)
+    type.ptr<type.ptr<type.Ty>> ftypes = alloc<type.ptr<type.Ty>>(nf + 1)
+    type.ptr<type.number> foffs = alloc<type.number>(nf + 1)
+    type.number off = 0
+    type.number align = 1
+    type.number size = 0
+    loop (i from 0 until nf) {
+        type.ptr<type.Ty> ft = decl.ptypes[i]
+        type.number fa = ty_align(ft)
+        when (fa > align) {
+            align = fa
+        }
+        fnames[i] = decl.pnames[i]
+        ftypes[i] = ft
+        when (is_union == 1) {
+            foffs[i] = 0
+            when (ty_bytes(ft) > size) {
+                size = ty_bytes(ft)
+            }
+        }
+        else {
+            off = (off + fa - 1) & ~(fa - 1)
+            foffs[i] = off
+            off = off + ty_bytes(ft)
+            when (off > MAX_STRUCT_BYTES) {
+                type.text kindw = "struct"
+                when (is_union == 1) {
+                    kindw = "union"
+                }
+                serr_node(decl, kindw + " `" + decl.name + "` is too large (more than 1 MiB).")
+                return 1
+            }
+        }
+    }
+    when (is_union == 1) {
+        when (size > MAX_STRUCT_BYTES) {
+            serr_node(decl, "union `" + decl.name + "` is too large (more than 1 MiB).")
+            return 1
+        }
+    }
+    else {
+        size = (off + align - 1) & ~(align - 1)
+        when (size == 0) {
+            size = align
+        }
+    }
+    when (size == 0) {
+        size = align
+    }
+    # fill the shared placeholder IN PLACE: every reference resolves
+    t.fnames = fnames
+    t.ftypes = ftypes
+    t.foffs = foffs
+    t.nfields = nf
+    t.count = size
+    t.elem = null
+    when (is_union == 1) {
+        t.form = F_UNION
+    }
+    else {
+        t.form = F_STRUCT
+    }
+    return 1
+}
+
+function.layout_all_structs() -> number {
+    type.number progress = 1
+    loop (progress == 1) {
+        progress = 0
+        loop (i from 0 until n_sites) {
+            type.ptr<type.Node> d = site_decls[i]
+            when (d.otype.form == F_NAMED) {
+                when (layout_one_struct(d) == 1) {
+                    progress = 1
+                }
+            }
+        }
+    }
+    # leftovers: unknown or mutually-recursive field types
+    loop (i from 0 until n_sites) {
+        type.ptr<type.Node> d = site_decls[i]
+        when (d.otype.form == F_NAMED) {
+            type.text kindw = "struct"
+            when (d.kind == parser.N_UNIONDECL) {
+                kindw = "union"
+            }
+            serr_node(d, kindw + " `" + d.name + "` cannot be laid out: a member type is unknown or circular.")
+            note(d, "records may nest, but a struct or union cannot contain itself (directly or through a cycle).")
+        }
+    }
+    return 0
+}
+
+# struct field lookup by name (types.c ty_field); returns the field index
+function.ty_field(type.ptr<type.Ty>.t, text.name) -> number {
+    when (t == null) {
+        return -1
+    }
+    loop (i from 0 until t.nfields) {
+        when (t.fnames[i] == name) {
+            return i
+        }
+    }
+    return -1
+}
+
+# ---- the sema context module list ----
+
+type.ptr<type.ptr<type.Mod>> all_mods = null
+type.number n_mods = 0
+type.number mods_cap = 0
+
+function.push_mod(type.ptr<type.Mod>.m) -> number {
+    when (n_mods == mods_cap) {
+        type.number newcap = 16
+        when (mods_cap > 0) {
+            newcap = mods_cap * 2
+        }
+        type.ptr<type.ptr<type.Mod>> nm = alloc<type.ptr<type.Mod>>(newcap)
+        loop (i from 0 until n_mods) {
+            nm[i] = all_mods[i]
+        }
+        type.ptr<type.ptr<type.Mod>> old = all_mods
+        all_mods = nm
+        mods_cap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    all_mods[n_mods] = m
+    n_mods = n_mods + 1
+    return 0
+}
+
+function.find_mod(text.name) -> type.ptr<type.Mod> {
+    loop (i from 0 until n_mods) {
+        when (all_mods[i].name == name) {
+            return all_mods[i]
+        }
+    }
+    return null
+}
+
+
+# ---------------- constant evaluation (globals + consts) ----------------
+
+function.is_space(number.b) -> bool {
+    return b == 32 or b == 9 or b == 10 or b == 11 or b == 12 or b == 13
+}
+
+# strtoll-parity validation + value for text->integer const folding.
+# Returns the value and sets text_int_ok; grammar: ws* [+-]? digits (end).
+type.number text_int_ok = 0
+
+function.parse_text_int(text.s) -> number {
+    text_int_ok = 0
+    type.number n = text.length(s)
+    type.number i = 0
+    loop (i < n and is_space(text.byte_at(s, i))) {
+        i = i + 1
+    }
+    type.number neg = 0
+    when (i < n) {
+        type.number b = text.byte_at(s, i)
+        when (b == 45) {
+            neg = 1
+            i = i + 1
+        }
+        else when (b == 43) {
+            i = i + 1
+        }
+    }
+    type.number v = 0
+    type.number digits = 0
+    loop (i < n) {
+        type.number b = text.byte_at(s, i)
+        when (b < 48 or b > 57) {
+            return 0
+        }
+        # ERANGE check: v*10+d must stay in int64 range
+        type.number d = b - 48
+        when (neg == 0) {
+            when (v > (9223372036854775807 - d) / 10) {
+                return 0
+            }
+        }
+        else {
+            when (v > (9223372036854775807 - d) / 10 and digits + 1 < 19) {
+                return 0
+            }
+            # -9223372036854775808 itself is legal
+            when (digits + 1 == 19 and v * 10 + d != 9223372036854775808 - 9223372036854775808 + 0 + 0 and v * 10 + d < 0 - 9223372036854775807 - 1 + 1) {
+                # fallthrough handled below
+            }
+        }
+        v = v * 10 + d
+        digits = digits + 1
+        i = i + 1
+    }
+    when (digits == 0 or i != n) {
+        return 0
+    }
+    when (digits > 19) {
+        return 0
+    }
+    text_int_ok = 1
+    when (neg == 1) {
+        return 0 - v
+    }
+    return v
+}
+
+# strtod-core validation + value for text->decimal const folding.
+# Grammar: ws* [+-]? digits [.digits] — the runtime's shape; sets dec_ok.
+type.number text_dec_ok = 0
+
+function.parse_text_dec(text.s) -> decimal {
+    text_dec_ok = 0
+    type.number n = text.length(s)
+    type.number i = 0
+    loop (i < n and is_space(text.byte_at(s, i))) {
+        i = i + 1
+    }
+    type.number neg = 0
+    when (i < n) {
+        type.number b = text.byte_at(s, i)
+        when (b == 45) {
+            neg = 1
+            i = i + 1
+        }
+        else when (b == 43) {
+            i = i + 1
+        }
+    }
+    type.decimal ip = 0.0
+    type.number int_digits = 0
+    loop (i < n) {
+        type.number b = text.byte_at(s, i)
+        when (b < 48 or b > 57) {
+            break
+        }
+        ip = ip * 10.0 + number.to_decimal(b - 48)
+        int_digits = int_digits + 1
+        i = i + 1
+    }
+    when (int_digits == 0) {
+        return 0.0
+    }
+    type.decimal frac = 0.0
+    type.decimal scale = 0.1
+    when (i < n and text.byte_at(s, i) == 46) {
+        i = i + 1
+        type.number frac_digits = 0
+        loop (i < n) {
+            type.number b = text.byte_at(s, i)
+            when (b < 48 or b > 57) {
+                break
+            }
+            frac = frac + number.to_decimal(b - 48) * scale
+            scale = scale * 0.1
+            frac_digits = frac_digits + 1
+            i = i + 1
+        }
+        when (frac_digits == 0) {
+            return 0.0
+        }
+    }
+    when (i != n) {
+        return 0.0
+    }
+    text_dec_ok = 1
+    type.decimal r = ip + frac
+    when (neg == 1) {
+        return 0.0 - r
+    }
+    return r
+}
+
+function.cv_int(number.v, type.ptr<type.Ty>.t) -> type.ptr<type.ConstVal> {
+    type.ptr<type.ConstVal> o = new_cv()
+    o.valid = 1
+    o.ty = t
+    o.i = v
+    return o
+}
+
+function.cv_dec(decimal.v) -> type.ptr<type.ConstVal> {
+    type.ptr<type.ConstVal> o = new_cv()
+    o.valid = 1
+    o.ty = T_DECIMAL
+    o.d = v
+    return o
+}
+
+function.cv_bool(number.v) -> type.ptr<type.ConstVal> {
+    type.ptr<type.ConstVal> o = new_cv()
+    o.valid = 1
+    o.ty = T_BOOL
+    o.b = v
+    return o
+}
+
+function.cv_text(text.v) -> type.ptr<type.ConstVal> {
+    type.ptr<type.ConstVal> o = new_cv()
+    o.valid = 1
+    o.ty = T_TEXT
+    o.t = v
+    return o
+}
+
+function.cv_null() -> type.ptr<type.ConstVal> {
+    type.ptr<type.ConstVal> o = new_cv()
+    o.valid = 1
+    o.ty = T_NULL
+    o.i = 0
+    return o
+}
+
+function.const_eval(type.ptr<type.Node>.e) -> type.ptr<type.ConstVal> {
+    when (e == null) {
+        return null
+    }
+    when (e.kind == parser.N_PATH) {
+        # a constant reference folds to its stored value (spec §8.1)
+        when (cur_scope == null) {
+            return null
+        }
+        type.ptr<type.Symbol> cur = scope_lookup(cur_scope, e.parts[0])
+        type.number i = 1
+        loop (i < e.nparts and cur != null and cur.kind == SYM_NS and cur.ns != null) {
+            cur = scope_find_local(cur.ns, e.parts[i])
+            i = i + 1
+        }
+        when (cur == null or cur.kind != SYM_CONST or i != e.nparts) {
+            return null
+        }
+        when (cur.cval == null or cur.cval.valid == 0) {
+            return null
+        }
+        # shallow copy (text bytes alias — process-lifetime immutable)
+        type.ptr<type.ConstVal> o = new_cv()
+        o.valid = 1
+        o.ty = cur.cval.ty
+        o.i = cur.cval.i
+        o.d = cur.cval.d
+        o.b = cur.cval.b
+        o.t = cur.cval.t
+        o.elems = cur.cval.elems
+        o.nelems = cur.cval.nelems
+        o.mty = null
+        return o
+    }
+    when (e.kind == parser.N_INT) {
+        return cv_int(e.ival, T_NUMBER)
+    }
+    when (e.kind == parser.N_DEC) {
+        return cv_dec(e.dval)
+    }
+    when (e.kind == parser.N_BOOL) {
+        return cv_bool(e.bval)
+    }
+    when (e.kind == parser.N_NULL) {
+        return cv_null()
+    }
+    when (e.kind == parser.N_TEXT) {
+        return cv_text(e.tval)
+    }
+    when (e.kind == parser.N_UN) {
+        type.ptr<type.ConstVal> v = const_eval(e.a)
+        when (v == null) {
+            return null
+        }
+        when (e.uop == parser.UN_NEG) {
+            when (v.ty == T_NUMBER) {
+                return cv_int(0 - v.i, T_NUMBER)
+            }
+            when (v.ty == T_DECIMAL) {
+                return cv_dec(0.0 - v.d)
+            }
+            when (v.ty != null and is_integer(v.ty)) {
+                return cv_int(reencode(0 - v.i, v.ty), v.ty)
+            }
+            return null
+        }
+        when (e.uop == parser.UN_BNOT) {
+            when (v.ty != null and is_integer(v.ty)) {
+                return cv_int(reencode(~v.i, v.ty), v.ty)
+            }
+            return null
+        }
+        when (v.ty == T_BOOL) {
+            when (v.b == 1) {
+                return cv_bool(0)
+            }
+            return cv_bool(1)
+        }
+        return null
+    }
+    when (e.kind == parser.N_TEXTOP) {
+        # text builtins fold when their operands do (spec §4.5)
+        type.number op = e.fvalue
+        type.number nargs = 1
+        when (op == 1) {
+            nargs = 2
+        }
+        else when (op == 2) {
+            nargs = 3
+        }
+        when (e.nargs != nargs) {
+            return null
+        }
+        type.ptr<type.ConstVal> s = const_eval(e.args[0])
+        when (s == null or s.valid == 0 or s.ty != T_TEXT) {
+            return null
+        }
+        when (op == 0) {
+            return cv_int(text.length(s.t), T_NUMBER)
+        }
+        type.ptr<type.ConstVal> iv = const_eval(e.args[1])
+        when (iv == null or iv.valid == 0 or is_integer(iv.ty) == false) {
+            return null
+        }
+        when (op == 1) {
+            when (iv.i >= text.length(s.t)) {
+                return null
+            }
+            return cv_int(text.byte_at(s.t, iv.i), T_UINT8)
+        }
+        type.ptr<type.ConstVal> tv = const_eval(e.args[2])
+        when (tv == null or tv.valid == 0 or is_integer(tv.ty) == false) {
+            return null
+        }
+        when (iv.i > tv.i or tv.i > text.length(s.t)) {
+            return null
+        }
+        return cv_text(text.slice(s.t, iv.i, tv.i))
+    }
+    when (e.kind == parser.N_CONV) {
+        # conversion of a constant folds at compile time (spec §4.4)
+        type.ptr<type.ConstVal> v = const_eval(e.a)
+        when (v == null or v.valid == 0) {
+            return null
+        }
+        type.ptr<type.Ty> dst = e.otype
+        when (v.ty == dst) {
+            return v
+        }
+        when (convertible(v.ty, dst) == false) {
+            return null
+        }
+        when (v.ty == T_TEXT and (dst == T_NUMBER or is_integer(dst))) {
+            type.number parsed = parse_text_int(v.t)
+            when (text_int_ok == 0) {
+                serr_node(e, "text is not a number: \"" + v.t + "\".")
+                return null
+            }
+            type.ptr<type.Ty> rt2 = T_NUMBER
+            when (dst != T_NUMBER) {
+                rt2 = dst
+            }
+            return cv_int(reencode(parsed, rt2), rt2)
+        }
+        when (v.ty == T_TEXT and dst == T_DECIMAL) {
+            type.decimal parsed = parse_text_dec(v.t)
+            when (text_dec_ok == 0) {
+                serr_node(e, "text is not a number: \"" + v.t + "\".")
+                return null
+            }
+            return cv_dec(parsed)
+        }
+        when ((is_integer(v.ty) or v.ty == T_DECIMAL or v.ty == T_BOOL) and dst == T_TEXT) {
+            type.text out = ""
+            when (v.ty == T_BOOL) {
+                when (v.b == 1) {
+                    out = "true"
+                }
+                else {
+                    out = "false"
+                }
+            }
+            else when (v.ty == T_DECIMAL) {
+                out = rt.decimal_to_text(v.d)
+            }
+            else when (v.ty == T_UINT64) {
+                out = rt.uint_to_text(v.i)
+            }
+            else when (v.ty == T_NUMBER) {
+                out = rt.number_to_text(v.i)
+            }
+            else {
+                out = rt.number_to_text(reencode(v.i, v.ty))
+            }
+            return cv_text(out)
+        }
+        when (v.ty == T_DECIMAL and is_integer(dst)) {
+            return cv_int(dec_to_int(v.d, dst), dst)
+        }
+        when (is_integer(v.ty) and dst == T_DECIMAL) {
+            return cv_dec(int_to_dec(v.i, v.ty))
+        }
+        when (is_integer(v.ty) and is_integer(dst)) {
+            return cv_int(reencode(v.i, dst), dst)
+        }
+        when (v.ty == T_BOOL and (is_integer(dst) or dst == T_DECIMAL)) {
+            when (dst == T_DECIMAL) {
+                type.decimal d = 0.0
+                when (v.b == 1) {
+                    d = 1.0
+                }
+                return cv_dec(d)
+            }
+            type.number iv = 0
+            when (v.b == 1) {
+                iv = 1
+            }
+            return cv_int(iv, dst)
+        }
+        return null
+    }
+    when (e.kind == parser.N_BIN) {
+        type.ptr<type.ConstVal> l = const_eval(e.a)
+        type.ptr<type.ConstVal> r = const_eval(e.b)
+        when (l == null or r == null) {
+            return null
+        }
+        # shifts fold before the same-type guard (0.11)
+        when (e.op == parser.OP_SHL or e.op == parser.OP_SHR) {
+            when (l.valid == 0 or r.valid == 0) {
+                return null
+            }
+            when (is_integer(l.ty) == false or is_integer(r.ty) == false) {
+                return null
+            }
+            type.number cnt = r.i
+            type.number width = ty_bits(l.ty)
+            when (cnt < 0 or cnt >= width) {
+                serr_node(e, "shift count " + number.to_text(cnt) + " is out of range for `" + ty_name(l.ty) + "` (width " + number.to_text(width) + ") in a constant expression.")
+                return null
+            }
+            type.number res = 0
+            when (e.op == parser.OP_SHL) {
+                res = l.i << cnt
+            }
+            else when (ty_signed(l.ty)) {
+                res = l.i >> cnt
+            }
+            else {
+                # logical shift: ride the value through a uint64-typed
+                # local so `>>` selects shr, then read the bits back
+                type.uint64 uv = number.to_uint64(l.i)
+                type.uint64 sv = uv >> cnt
+                res = uint64.to_number(sv)
+            }
+            return cv_int(reencode(res, l.ty), l.ty)
+        }
+        when (l.ty != r.ty) {
+            return null
+        }
+        when (e.op == parser.OP_ADD) {
+            when (l.ty == T_NUMBER) {
+                return cv_int(l.i + r.i, T_NUMBER)
+            }
+            when (l.ty == T_DECIMAL) {
+                return cv_dec(l.d + r.d)
+            }
+            when (l.ty == T_TEXT) {
+                return cv_text(l.t + r.t)
+            }
+            return null
+        }
+        when (e.op == parser.OP_SUB) {
+            when (l.ty == T_NUMBER) {
+                return cv_int(l.i - r.i, T_NUMBER)
+            }
+            when (l.ty == T_DECIMAL) {
+                return cv_dec(l.d - r.d)
+            }
+            return null
+        }
+        when (e.op == parser.OP_MUL) {
+            when (l.ty == T_NUMBER) {
+                return cv_int(l.i * r.i, T_NUMBER)
+            }
+            when (l.ty == T_DECIMAL) {
+                return cv_dec(l.d * r.d)
+            }
+            return null
+        }
+        when (e.op == parser.OP_DIV) {
+            when (l.ty == T_NUMBER) {
+                when (r.i == 0) {
+                    serr_node(e, "division by zero in a constant expression.")
+                    return null
+                }
+                # INT64_MIN / -1 wraps to INT64_MIN (two's complement)
+                type.number a = l.i
+                type.number b = r.i
+                type.number q = a / b
+                when (a == 0 - 9223372036854775807 - 1 and b == -1) {
+                    q = a
+                }
+                return cv_int(q, T_NUMBER)
+            }
+            when (l.ty == T_DECIMAL) {
+                return cv_dec(l.d / r.d)
+            }
+            return null
+        }
+        when (e.op == parser.OP_MOD) {
+            when (l.ty == T_NUMBER) {
+                when (r.i == 0) {
+                    serr_node(e, "remainder by zero in a constant expression.")
+                    return null
+                }
+                type.number a = l.i
+                type.number b = r.i
+                type.number m = a % b
+                when (a == 0 - 9223372036854775807 - 1 and b == -1) {
+                    m = 0
+                }
+                return cv_int(m, T_NUMBER)
+            }
+            return null
+        }
+        when (e.op == parser.OP_AND) {
+            when (l.ty == T_BOOL) {
+                type.number bv = 0
+                when (l.b == 1 and r.b == 1) {
+                    bv = 1
+                }
+                return cv_bool(bv)
+            }
+            return null
+        }
+        when (e.op == parser.OP_OR) {
+            when (l.ty == T_BOOL) {
+                type.number bv = 0
+                when (l.b == 1 or r.b == 1) {
+                    bv = 1
+                }
+                return cv_bool(bv)
+            }
+            return null
+        }
+        when (e.op == parser.OP_BAND or e.op == parser.OP_BOR or e.op == parser.OP_XOR) {
+            when (is_integer(l.ty) == false) {
+                return null
+            }
+            type.number res = 0
+            when (e.op == parser.OP_BAND) {
+                res = l.i & r.i
+            }
+            else when (e.op == parser.OP_BOR) {
+                res = l.i | r.i
+            }
+            else {
+                res = l.i ^ r.i
+            }
+            return cv_int(reencode(res, l.ty), l.ty)
+        }
+        # comparisons
+        when (e.op == parser.OP_EQ or e.op == parser.OP_NEQ or e.op == parser.OP_LT or e.op == parser.OP_LE or e.op == parser.OP_GT or e.op == parser.OP_GE) {
+            type.number res = 0
+            when (l.ty == T_NUMBER) {
+                when (e.op == parser.OP_EQ) { when (l.i == r.i) { res = 1 } }
+                else when (e.op == parser.OP_NEQ) { when (l.i != r.i) { res = 1 } }
+                else when (e.op == parser.OP_LT) { when (l.i < r.i) { res = 1 } }
+                else when (e.op == parser.OP_LE) { when (l.i <= r.i) { res = 1 } }
+                else when (e.op == parser.OP_GT) { when (l.i > r.i) { res = 1 } }
+                else when (e.op == parser.OP_GE) { when (l.i >= r.i) { res = 1 } }
+                return cv_bool(res)
+            }
+            when (l.ty == T_DECIMAL) {
+                when (e.op == parser.OP_EQ) { when (l.d == r.d) { res = 1 } }
+                else when (e.op == parser.OP_NEQ) { when (l.d != r.d) { res = 1 } }
+                else when (e.op == parser.OP_LT) { when (l.d < r.d) { res = 1 } }
+                else when (e.op == parser.OP_LE) { when (l.d <= r.d) { res = 1 } }
+                else when (e.op == parser.OP_GT) { when (l.d > r.d) { res = 1 } }
+                else when (e.op == parser.OP_GE) { when (l.d >= r.d) { res = 1 } }
+                return cv_bool(res)
+            }
+            when (l.ty == T_BOOL) {
+                when (e.op == parser.OP_EQ) {
+                    when (l.b == r.b) { res = 1 }
+                    return cv_bool(res)
+                }
+                when (e.op == parser.OP_NEQ) {
+                    when (l.b != r.b) { res = 1 }
+                    return cv_bool(res)
+                }
+                return null
+            }
+            # fixed-width integers: compare with the type's signedness
+            when (is_integer(l.ty)) {
+                when (ty_signed(l.ty)) {
+                    when (e.op == parser.OP_EQ) { when (l.i == r.i) { res = 1 } }
+                    else when (e.op == parser.OP_NEQ) { when (l.i != r.i) { res = 1 } }
+                    else when (e.op == parser.OP_LT) { when (l.i < r.i) { res = 1 } }
+                    else when (e.op == parser.OP_LE) { when (l.i <= r.i) { res = 1 } }
+                    else when (e.op == parser.OP_GT) { when (l.i > r.i) { res = 1 } }
+                    else when (e.op == parser.OP_GE) { when (l.i >= r.i) { res = 1 } }
+                }
+                else {
+                    when (e.op == parser.OP_EQ) { when (l.i == r.i) { res = 1 } }
+                    else when (e.op == parser.OP_NEQ) { when (l.i != r.i) { res = 1 } }
+                    else when (e.op == parser.OP_LT) { when (ult(l.i, r.i)) { res = 1 } }
+                    else when (e.op == parser.OP_LE) { when (ult(l.i, r.i) or l.i == r.i) { res = 1 } }
+                    else when (e.op == parser.OP_GT) { when (ult(r.i, l.i)) { res = 1 } }
+                    else when (e.op == parser.OP_GE) { when (ult(r.i, l.i) or l.i == r.i) { res = 1 } }
+                }
+                return cv_bool(res)
+            }
+            return null
+        }
+        return null
+    }
+    return null
+}
+
+# ---------------- assignment compatibility ----------------
+
+# Full assignment decision for a value expression (sema.c assignable_value)
+function.assignable_value(type.ptr<type.Node>.val, type.ptr<type.Ty>.frm, type.ptr<type.Ty>.dst) -> bool {
+    when (frm == null) {
+        return false
+    }
+    when (assignable(frm, dst)) {
+        return true
+    }
+    when (dst == null or is_integer(dst) == false) {
+        return false
+    }
+    # direct non-negative literal
+    when (val.kind == parser.N_INT and frm == T_NUMBER) {
+        return uint_fits(val.ival, dst)
+    }
+    # negated literal
+    when (val.kind == parser.N_UN and val.uop == parser.UN_NEG and val.a.kind == parser.N_INT and frm == T_NUMBER) {
+        type.number raw = 0 - val.a.ival
+        return sint_fits(raw, dst)
+    }
+    # foldable constant expression: signed interpretation
+    when (frm == T_NUMBER) {
+        type.number mark = n_errors
+        type.ptr<type.ConstVal> cv = const_eval(val)
+        when (cv != null and n_errors == mark and cv.valid == 1) {
+            return sint_fits(cv.i, dst)
+        }
+    }
+    return false
+}
+
+# ---------------- literal checking (arrays, structs, unions) ----------------
+
+function.check_array_lit_runtime(type.ptr<type.Node>.lit, type.ptr<type.Ty>.atype, text.what) -> bool {
+    type.number ok = 1
+    lit.rtype = atype
+    when (lit.nargs != atype.count) {
+        serr_node(lit, what + " expects " + number.to_text(atype.count) + " element" + plural(atype.count) + ", but " + number.to_text(lit.nargs) + " were given.")
+        note(lit, "the element count is part of the type: " + ty_name(atype) + ".")
+        ok = 0
+    }
+    type.number check_n = lit.nargs
+    when (check_n > atype.count) {
+        check_n = atype.count
+    }
+    loop (k from 0 until check_n) {
+        type.ptr<type.Node> el = lit.args[k]
+        when (el.kind == parser.N_ARRAYLIT) {
+            when (is_record(atype.elem)) {
+                when (check_struct_lit_runtime(el, atype.elem, what) == false) {
+                    ok = 0
+                }
+                continue
+            }
+            when (atype.elem.form != F_ARRAY) {
+                serr_node(el, "element " + number.to_text(k + 1) + " of " + what + " must be `" + ty_name(atype.elem) + "`, not a nested literal.")
+                ok = 0
+                continue
+            }
+            when (check_array_lit_runtime(el, atype.elem, what) == false) {
+                ok = 0
+            }
+            continue
+        }
+        type.ptr<type.Ty> et = check_expr(el)
+        when (assignable_value(el, et, atype.elem) == false) {
+            serr_node(el, "element " + number.to_text(k + 1) + " of " + what + " must be `" + ty_name(atype.elem) + "`, but a `" + ty_name(et) + "` value was given.")
+            note(el, "safe widening is implicit; everything else converts explicitly (spec §4.4).")
+            ok = 0
+        }
+        else when (et != atype.elem and atype.elem == T_DECIMAL and warn_enabled == 1 and el.kind != parser.N_INT) {
+            swarn_node(el, "element " + number.to_text(k + 1) + " of " + what + " implicitly widens to `decimal`.")
+        }
+    }
+    return ok == 1
+}
+
+function.check_array_lit_const(type.ptr<type.Node>.lit, type.ptr<type.Ty>.atype, text.what) -> type.ptr<type.ConstVal> {
+    type.number ok = 1
+    type.ptr<type.ConstVal> out = new_cv()
+    out.ty = atype
+    out.nelems = lit.nargs
+    type.ptr<type.ptr<type.ConstVal>> elems = alloc<type.ptr<type.ConstVal>>(lit.nargs + 1)
+    out.elems = elems
+    when (lit.nargs != atype.count) {
+        serr_node(lit, what + " expects " + number.to_text(atype.count) + " element" + plural(atype.count) + ", but " + number.to_text(lit.nargs) + " were given.")
+        note(lit, "the element count is part of the type: " + ty_name(atype) + ".")
+        ok = 0
+    }
+    type.number check_n = lit.nargs
+    when (check_n > atype.count) {
+        check_n = atype.count
+    }
+    loop (k from 0 until check_n) {
+        type.ptr<type.Node> el = lit.args[k]
+        when (el.kind == parser.N_ARRAYLIT) {
+            when (is_record(atype.elem)) {
+                type.ptr<type.ConstVal> sub = check_struct_lit_const(el, atype.elem, what)
+                when (sub == null or sub.valid == 0) {
+                    ok = 0
+                }
+                else {
+                    sub.valid = 1
+                }
+                elems[k] = sub
+                continue
+            }
+            when (atype.elem.form != F_ARRAY) {
+                serr_node(el, "element " + number.to_text(k + 1) + " of " + what + " must be `" + ty_name(atype.elem) + "`, not a nested literal.")
+                ok = 0
+                continue
+            }
+            type.ptr<type.ConstVal> sub = check_array_lit_const(el, atype.elem, what)
+            when (sub == null or sub.valid == 0) {
+                ok = 0
+            }
+            else {
+                sub.valid = 1
+            }
+            elems[k] = sub
+            continue
+        }
+        type.number mark = n_errors
+        type.ptr<type.ConstVal> ev = const_eval(el)
+        when (ev == null) {
+            when (n_errors == mark) {
+                serr_node(el, "element " + number.to_text(k + 1) + " of " + what + " is not a compile-time constant.")
+                note(el, "global array elements must be literal or foldable values (spec §7).")
+            }
+            ok = 0
+            continue
+        }
+        when (assignable_value(el, ev.ty, atype.elem) == false) {
+            serr_node(el, "element " + number.to_text(k + 1) + " of " + what + " must be `" + ty_name(atype.elem) + "`, but a `" + ty_name(ev.ty) + "` value was given.")
+            when (is_integer(atype.elem) and ev.ty == T_NUMBER) {
+                type.text range = ""
+                when (ty_signed(atype.elem)) {
+                    range = number.to_text(ty_min(atype.elem.scalar)) + ".." + number.to_text(ty_max(atype.elem.scalar))
+                }
+                else {
+                    type.number b = ty_bits(atype.elem)
+                    when (b >= 64) {
+                        range = "0.." + rt.uint_to_text(0 - 1)
+                    }
+                    else {
+                        range = "0.." + number.to_text((1 << b) - 1)
+                    }
+                }
+                note(el, "the value does not fit `" + ty_name(atype.elem) + "` (accepts " + range + ").")
+            }
+            ok = 0
+            continue
+        }
+        when (is_integer(atype.elem)) {
+            ev.ty = atype.elem
+            ev.i = reencode(ev.i, atype.elem)
+        }
+        else when (ev.ty == T_NUMBER and atype.elem == T_DECIMAL) {
+            ev.ty = T_DECIMAL
+            ev.d = number.to_decimal(ev.i)
+        }
+        ev.valid = 1
+        elems[k] = ev
+    }
+    out.valid = ok
+    return out
+}
+
+# constant global initializer into a typed slot (sema.c const_into_type)
+function.const_into_type(type.ptr<type.Node>.init, type.ptr<type.ConstVal>.cv, type.ptr<type.Ty>.dst) -> bool {
+    when (cv.ty == dst) {
+        return true
+    }
+    when (assignable_value(init, cv.ty, dst) == false) {
+        return false
+    }
+    when (dst == T_DECIMAL) {
+        cv.ty = T_DECIMAL
+        cv.d = number.to_decimal(cv.i)
+        return true
+    }
+    when (is_integer(dst)) {
+        cv.ty = dst
+        cv.i = reencode(cv.i, dst)
+        return true
+    }
+    when (is_ptr(dst)) {
+        # null initializes any pointer
+        cv.ty = dst
+        cv.i = 0
+        return true
+    }
+    return false
+}
+
+# ---------------- union literals (spec §8.5) ----------------
+
+function.check_union_lit_runtime(type.ptr<type.Node>.lit, type.ptr<type.Ty>.ut, text.what) -> bool {
+    lit.rtype = ut
+    when (lit.nargs != 1) {
+        serr_node(lit, what + " takes exactly one value, but " + number.to_text(lit.nargs) + " were given.")
+        note(lit, "a union literal activates one member: `type." + ut.sname + " u = { value }` picks the first member whose type accepts the value (spec §8.5).")
+        return false
+    }
+    type.ptr<type.Node> el = lit.args[0]
+    when (el.kind == parser.N_ARRAYLIT) {
+        loop (k from 0 until ut.nfields) {
+            type.ptr<type.Ty> mt = ut.ftypes[k]
+            when (mt.form == F_ARRAY) {
+                lit.offset = k
+                return check_array_lit_runtime(el, mt, what)
+            }
+            when (is_record(mt)) {
+                lit.offset = k
+                when (is_union(mt)) {
+                    return check_union_lit_runtime(el, mt, what)
+                }
+                return check_struct_lit_runtime(el, mt, what)
+            }
+        }
+        serr_node(el, what + " has no array, struct, or union member for a nested literal.")
+        return false
+    }
+    type.ptr<type.Ty> et = check_expr(el)
+    loop (k from 0 until ut.nfields) {
+        type.ptr<type.Ty> mt = ut.ftypes[k]
+        when (mt.form == F_ARRAY or is_record(mt)) {
+            continue
+        }
+        when (assignable_value(el, et, mt)) {
+            lit.offset = k
+            return true
+        }
+    }
+    serr_node(el, "no member of " + what + " accepts a `" + ty_name(et) + "` value.")
+    note(el, "the first member whose type accepts the value is activated (spec §8.5); convert explicitly with `T.to_U(x)` if that is what you mean (spec §4.4).")
+    return false
+}
+
+function.check_union_lit_const(type.ptr<type.Node>.lit, type.ptr<type.Ty>.ut, text.what) -> type.ptr<type.ConstVal> {
+    type.ptr<type.ConstVal> out = new_cv()
+    out.ty = ut
+    lit.rtype = ut
+    when (lit.nargs != 1) {
+        serr_node(lit, what + " takes exactly one value, but " + number.to_text(lit.nargs) + " were given.")
+        note(lit, "a union literal activates one member: `type." + ut.sname + " u = { value }` (spec §8.5).")
+        return out
+    }
+    type.ptr<type.Node> el = lit.args[0]
+    when (el.kind == parser.N_ARRAYLIT) {
+        loop (k from 0 until ut.nfields) {
+            type.ptr<type.Ty> mt = ut.ftypes[k]
+            when (mt.form == F_ARRAY) {
+                lit.offset = k
+                type.ptr<type.ConstVal> sub = check_array_lit_const(el, mt, what)
+                sub.mty = mt
+                return sub
+            }
+            when (is_record(mt)) {
+                lit.offset = k
+                type.ptr<type.ConstVal> sub = null
+                when (is_union(mt)) {
+                    sub = check_union_lit_const(el, mt, what)
+                }
+                else {
+                    sub = check_struct_lit_const(el, mt, what)
+                }
+                sub.mty = mt
+                return sub
+            }
+        }
+        serr_node(el, what + " has no array, struct, or union member for a nested literal.")
+        return out
+    }
+    type.number mark = n_errors
+    type.ptr<type.ConstVal> ev = const_eval(el)
+    when (ev == null or n_errors != mark or ev.valid == 0) {
+        when (n_errors == mark) {
+            serr_node(el, "the initializer of " + what + " is not a compile-time constant.")
+            note(el, "global union values must be literal or foldable (spec §7).")
+        }
+        return out
+    }
+    loop (k from 0 until ut.nfields) {
+        type.ptr<type.Ty> mt = ut.ftypes[k]
+        when (mt.form == F_ARRAY or is_record(mt)) {
+            continue
+        }
+        when (assignable_value(el, ev.ty, mt) == false) {
+            continue
+        }
+        lit.offset = k
+        when (is_integer(mt)) {
+            ev.ty = mt
+            ev.i = reencode(ev.i, mt)
+        }
+        else when (ev.ty == T_NUMBER and mt == T_DECIMAL) {
+            ev.ty = T_DECIMAL
+            ev.d = number.to_decimal(ev.i)
+        }
+        ev.ty = ut
+        ev.mty = mt
+        ev.valid = 1
+        return ev
+    }
+    serr_node(el, "no member of " + what + " accepts a `" + ty_name(ev.ty) + "` value.")
+    return out
+}
+
+# ---------------- struct literals (spec §8.3) ----------------
+
+function.check_struct_lit_runtime(type.ptr<type.Node>.lit, type.ptr<type.Ty>.st, text.what) -> bool {
+    when (is_union(st)) {
+        return check_union_lit_runtime(lit, st, what)
+    }
+    type.number ok = 1
+    lit.rtype = st
+    when (lit.nargs != st.nfields) {
+        serr_node(lit, what + " has " + number.to_text(st.nfields) + " field" + plural(st.nfields) + ", but " + number.to_text(lit.nargs) + " initializer" + plural(lit.nargs) + " were given.")
+        note(lit, "struct literals are positional: `type." + st.sname + " v = { field1, field2, ... }` in declaration order.")
+        ok = 0
+    }
+    type.number check_n = lit.nargs
+    when (check_n > st.nfields) {
+        check_n = st.nfields
+    }
+    loop (k from 0 until check_n) {
+        type.ptr<type.Node> el = lit.args[k]
+        type.ptr<type.Ty> ft = st.ftypes[k]
+        type.text fname = st.fnames[k]
+        when (el.kind == parser.N_ARRAYLIT) {
+            when (is_record(ft)) {
+                when (check_struct_lit_runtime(el, ft, what) == false) {
+                    ok = 0
+                }
+                continue
+            }
+            when (ft.form == F_ARRAY) {
+                when (check_array_lit_runtime(el, ft, what) == false) {
+                    ok = 0
+                }
+                continue
+            }
+            serr_node(el, "field `" + fname + "` is `" + ty_name(ft) + "`, not a nested literal.")
+            ok = 0
+            continue
+        }
+        type.ptr<type.Ty> et = check_expr(el)
+        when (ft.form == F_ARRAY or is_record(ft)) {
+            when (et != ft) {
+                serr_node(el, "field `" + fname + "` is `" + ty_name(ft) + "`, but a `" + ty_name(et) + "` value was given.")
+                note(el, "whole array/record values copy into fields; the types must match exactly.")
+                ok = 0
+            }
+            continue
+        }
+        when (assignable_value(el, et, ft) == false) {
+            serr_node(el, "field `" + fname + "` is `" + ty_name(ft) + "`, but a `" + ty_name(et) + "` value was given.")
+            note(el, "safe widening is implicit; everything else converts explicitly (spec §4.4).")
+            ok = 0
+        }
+        else when (et != ft and ft == T_DECIMAL and warn_enabled == 1 and el.kind != parser.N_INT) {
+            swarn_node(el, "field `" + fname + "` implicitly widens to `decimal`.")
+        }
+    }
+    return ok == 1
+}
+
+function.check_struct_lit_const(type.ptr<type.Node>.lit, type.ptr<type.Ty>.st, text.what) -> type.ptr<type.ConstVal> {
+    when (is_union(st)) {
+        return check_union_lit_const(lit, st, what)
+    }
+    type.number ok = 1
+    type.ptr<type.ConstVal> out = new_cv()
+    out.ty = st
+    type.ptr<type.ptr<type.ConstVal>> elems = alloc<type.ptr<type.ConstVal>>(lit.nargs + 1)
+    out.elems = elems
+    out.nelems = lit.nargs
+    when (lit.nargs != st.nfields) {
+        serr_node(lit, what + " has " + number.to_text(st.nfields) + " field" + plural(st.nfields) + ", but " + number.to_text(lit.nargs) + " initializer" + plural(lit.nargs) + " were given.")
+        note(lit, "struct literals are positional: `type." + st.sname + " v = { field1, field2, ... }` in declaration order.")
+        ok = 0
+    }
+    type.number check_n = lit.nargs
+    when (check_n > st.nfields) {
+        check_n = st.nfields
+    }
+    loop (k from 0 until check_n) {
+        type.ptr<type.Node> el = lit.args[k]
+        type.ptr<type.Ty> ft = st.ftypes[k]
+        type.text fname = st.fnames[k]
+        when (el.kind == parser.N_ARRAYLIT) {
+            when (is_record(ft)) {
+                type.ptr<type.ConstVal> sub = check_struct_lit_const(el, ft, what)
+                when (sub == null or sub.valid == 0) {
+                    ok = 0
+                }
+                else {
+                    sub.valid = 1
+                }
+                elems[k] = sub
+                continue
+            }
+            when (ft.form == F_ARRAY) {
+                type.ptr<type.ConstVal> sub = check_array_lit_const(el, ft, what)
+                when (sub == null or sub.valid == 0) {
+                    ok = 0
+                }
+                else {
+                    sub.valid = 1
+                }
+                elems[k] = sub
+                continue
+            }
+            serr_node(el, "field `" + fname + "` is `" + ty_name(ft) + "`, not a nested literal.")
+            ok = 0
+            continue
+        }
+        type.number mark = n_errors
+        type.ptr<type.ConstVal> ev = const_eval(el)
+        when (ev == null) {
+            when (n_errors == mark) {
+                serr_node(el, "the initializer of field `" + fname + "` is not a compile-time constant.")
+                note(el, "global struct fields must be literal or foldable values (spec §7).")
+            }
+            ok = 0
+            continue
+        }
+        when (ft.form == F_ARRAY or is_record(ft)) {
+            serr_node(el, "whole `" + ty_name(ft) + "` values are not constants; use a literal `{ ... }` for field `" + fname + "`.")
+            ok = 0
+            continue
+        }
+        when (assignable_value(el, ev.ty, ft) == false) {
+            serr_node(el, "field `" + fname + "` is `" + ty_name(ft) + "`, but a `" + ty_name(ev.ty) + "` value was given.")
+            ok = 0
+            continue
+        }
+        when (is_integer(ft)) {
+            ev.ty = ft
+            ev.i = reencode(ev.i, ft)
+        }
+        else when (ev.ty == T_NUMBER and ft == T_DECIMAL) {
+            ev.ty = T_DECIMAL
+            ev.d = number.to_decimal(ev.i)
+        }
+        ev.valid = 1
+        elems[k] = ev
+    }
+    out.valid = ok
+    return out
+}
+
+# ---------------- path helpers ----------------
+
+function.plural(number.n) -> text {
+    when (n == 1) {
+        return ""
+    }
+    return "s"
+}
+
+function.path_join(type.ptr<type.text>.parts, number.n) -> text {
+    type.text out = ""
+    loop (i from 0 until n) {
+        when (i > 0) {
+            out = out + "."
+        }
+        out = out + parts[i]
+    }
+    return out
+}
+
+# build the A_MEMBER chain for a record-field path (sema.c mk_field_chain)
+function.mk_field_chain(type.ptr<type.Node>.origin, type.ptr<type.text>.parts, number.nparts, number.first_field, type.ptr<type.Symbol>.base) -> type.ptr<type.Node> {
+    type.ptr<type.Node> basenode = parser.new_node(parser.N_PATH, origin.line, origin.col)
+    basenode.parts = parts
+    basenode.nparts = first_field
+    basenode.sym = base
+    basenode.rtype = base.ty
+    base.used = 1
+
+    type.ptr<type.Ty> t = base.ty
+    type.ptr<type.Node> cur = basenode
+    type.number i = first_field
+    loop (i < nparts) {
+        type.number deref = 0
+        when (is_ptr(t)) {
+            t = t.elem
+            deref = 1
+        }
+        when (is_record(t) == false) {
+            type.text prev = "?"
+            when (i > 0) {
+                prev = parts[i - 1]
+            }
+            serr_node(origin, "`" + prev + "` is a `" + ty_name(t) + "` — `.` needs a struct, a union, or a pointer to one.")
+            return null
+        }
+        type.number fi = ty_field(t, parts[i])
+        when (fi < 0) {
+            type.text kindw = "struct"
+            when (is_union(t)) {
+                kindw = "union"
+            }
+            serr_node(origin, kindw + " `" + t.sname + "` has no member `" + parts[i] + "`.")
+            return null
+        }
+        type.ptr<type.Node> mem = parser.new_node(parser.N_MEMBER, origin.line, origin.col)
+        mem.a = cur
+        mem.name = parts[i]
+        mem.autoderef = deref
+        mem.offset = t.foffs[fi]
+        mem.rtype = t.ftypes[fi]
+        cur = mem
+        t = t.ftypes[fi]
+        i = i + 1
+    }
+    return cur
+}
+
+# record-field path? (`var.f1.f2` / `column.member.f1`) — builds the chain
+function.try_struct_field_path(type.ptr<type.Node>.n) -> bool {
+    when (n.nparts < 2) {
+        return false
+    }
+    type.ptr<type.Symbol> cur = scope_lookup(cur_scope, n.parts[0])
+    type.number i = 1
+    loop (i < n.nparts and cur != null and cur.kind == SYM_NS and cur.ns != null) {
+        cur = scope_find_local(cur.ns, n.parts[i])
+        i = i + 1
+    }
+    when (cur == null or cur.kind != SYM_VAR or i >= n.nparts) {
+        return false
+    }
+    type.ptr<type.Ty> bt = cur.ty
+    when (is_ptr(bt)) {
+        bt = bt.elem
+    }
+    when (is_record(bt) == false) {
+        return false
+    }
+    type.ptr<type.Node> root = mk_field_chain(n, n.parts, n.nparts, i, cur)
+    when (root == null) {
+        n.rtype = null
+        return true
+    }
+    n.sym = cur
+    n.a = root
+    n.rtype = root.rtype
+    return true
+}
+
+# resolve a dotted path to a symbol; null on failure (reported)
+function.resolve_path(type.ptr<type.Node>.n, number.want_var) -> type.ptr<type.Symbol> {
+    type.text full = path_join(n.parts, n.nparts)
+    type.ptr<type.Symbol> first = scope_lookup(cur_scope, n.parts[0])
+    when (first == null) {
+        serr_node(n, "unknown name `" + full + "`.")
+        type.text sug = suggest_name(cur_scope, n.parts[0])
+        when (text.length(sug) > 0) {
+            note(n, "did you mean `" + sug + "`?")
+        }
+        else {
+            note(n, "names come from this file, its columns, main.ok, and used modules (`greeting.greet`).")
+        }
+        return null
+    }
+    when (n.nparts == 1) {
+        when (want_var == 1 and first.kind != SYM_VAR and first.kind != SYM_CONST) {
+            serr_node(n, "`" + full + "` is a " + sym_kind_name(first.kind) + ", not a variable — it cannot be assigned or read as a value.")
+            return null
+        }
+        when (first.kind == SYM_VAR) {
+            first.used = 1
+        }
+        return first
+    }
+    # dotted: walk namespaces
+    type.ptr<type.Symbol> cur = first
+    type.number i = 1
+    loop (i < n.nparts) {
+        when (cur.kind != SYM_NS) {
+            when (cur.kind == SYM_VAR) {
+                serr_node(n, "`" + path_join(n.parts, i) + "` is a `" + ty_name(cur.ty) + "` value — `.` accesses record members, namespaces hold declarations.")
+            }
+            else {
+                serr_node(n, "`" + path_join(n.parts, i) + "` is not a namespace — `.` cannot follow it.")
+            }
+            return null
+        }
+        type.ptr<type.Symbol> next = scope_find_local(cur.ns, n.parts[i])
+        when (next == null) {
+            serr_node(n, "`" + path_join(n.parts, i) + "` has no member `" + n.parts[i] + "`.")
+            note(n, "available: the public names of `" + n.parts[0] + "`.")
+            return null
+        }
+        cur = next
+        i = i + 1
+    }
+    when (want_var == 1 and cur.kind != SYM_VAR and cur.kind != SYM_CONST) {
+        serr_node(n, "`" + full + "` is a " + sym_kind_name(cur.kind) + ", not a variable — it cannot be assigned or read as a value.")
+        return null
+    }
+    when (cur.kind == SYM_VAR) {
+        cur.used = 1
+    }
+    return cur
+}
+
+function.sym_kind_name(number.kind) -> text {
+    when (kind == SYM_FUNC) {
+        return "function"
+    }
+    else when (kind == SYM_NS) {
+        return "namespace"
+    }
+    else when (kind == SYM_TYPE) {
+        return "type"
+    }
+    return "constant"
+}
+
+function.require_text_feature(type.ptr<type.Node>.n) -> number {
+    when (cur_mod.ftext == 0) {
+        serr_node(n, "the text subsystem is not active in this file.")
+        note(n, "add `type.text=1` at the top of the file to activate `write` and `print` (spec §5).")
+    }
+    return 0
+}
+
+# ---------------- conversion builtins (spec §4.4) ----------------
+
+# recognize `<typename>.to_<typename>`; returns the source code or -1
+function.conv_builtin_src(type.ptr<type.Node>.n) -> number {
+    when (n.nparts != 2) {
+        return -1
+    }
+    when (text.length(n.parts[1]) < 3) {
+        return -1
+    }
+    when (text.slice(n.parts[1], 0, 3) != "to_") {
+        return -1
+    }
+    type.number src = scalar_from_name(n.parts[0])
+    when (src < 0) {
+        return -1
+    }
+    type.number dst = scalar_from_name(text.slice(n.parts[1], 3, text.length(n.parts[1])))
+    when (dst < 0) {
+        return -1
+    }
+    return src
+}
+
+function.conv_builtin_dst(type.ptr<type.Node>.n) -> number {
+    return scalar_from_name(text.slice(n.parts[1], 3, text.length(n.parts[1])))
+}
+
+function.check_conv_builtin(type.ptr<type.Node>.n, type.ptr<type.Ty>.frm, type.ptr<type.Ty>.dst) -> type.ptr<type.Ty> {
+    type.text full = path_join(n.parts, n.nparts)
+    when (n.nargs != 1) {
+        serr_node(n, "`" + full + "` converts exactly one value, but " + number.to_text(n.nargs) + " were given.")
+        note(n, "form: `" + full + "(value)`.")
+        return dst
+    }
+    type.ptr<type.Node> arg = n.args[0]
+    type.ptr<type.Ty> at = check_expr(arg)
+    # an integer literal argument takes the SOURCE type when it fits (spec §4.2)
+    when (is_integer(frm) and frm != T_NUMBER and at == T_NUMBER and arg.kind == parser.N_INT and uint_fits(arg.ival, frm)) {
+        arg.rtype = frm
+        at = frm
+    }
+    when (is_integer(frm) and frm != T_NUMBER and at == T_NUMBER and arg.kind == parser.N_UN and arg.uop == parser.UN_NEG and arg.a.kind == parser.N_INT) {
+        type.number v = 0 - arg.a.ival
+        when (sint_fits(v, frm)) {
+            arg.rtype = frm
+            at = frm
+        }
+    }
+    when (convertible(at, dst) == false) {
+        when (dst == T_BOOL) {
+            serr_node(arg, "there is no conversion dst `bool` — compare explicitly instead.")
+            note(arg, "for example `x != 0` produces the `bool` you probably meant.")
+        }
+        else {
+            serr_node(arg, "`" + full + "` cannot convert a `" + ty_name(at) + "` value.")
+        }
+    }
+    # rewrite the call node as a conversion expression (IR reads otype)
+    n.kind = parser.N_CONV
+    n.a = arg
+    n.otype = dst
+    n.rtype = dst
+    return dst
+}
+
+# builtin-namespace clash check: a user symbol with the same path loses
+function.builtin_clash(type.ptr<type.Node>.n) -> number {
+    type.ptr<type.Symbol> clash = scope_lookup(cur_scope, n.parts[0])
+    when (clash != null and clash.kind == SYM_NS and clash.ns != null) {
+        type.ptr<type.Symbol> inner = scope_find_local(clash.ns, n.parts[1])
+        when (inner != null) {
+            serr_node(n, "`" + path_join(n.parts, n.nparts) + "` is a built-in operation; `" + n.parts[0] + "." + n.parts[1] + "` must be renamed.")
+        }
+    }
+    return 0
+}
+
+# ---------------- check_call: every builtin family + user calls ----------------
+
+function.check_call(type.ptr<type.Node>.n) -> type.ptr<type.Ty> {
+    # pointer-address conversions (0.13, spec §12)
+    when (n.nparts == 2 and n.parts[0] == "ptr" and n.parts[1] == "to_number") {
+        builtin_clash(n)
+        when (n.nargs != 1) {
+            serr_node(n, "`ptr.to_number` converts exactly one value, but " + number.to_text(n.nargs) + " were given.")
+            note(n, "form: `ptr.to_number(value)`.")
+            return T_NUMBER
+        }
+        type.ptr<type.Node> arg = n.args[0]
+        type.ptr<type.Ty> at = check_expr(arg)
+        when (is_ptr(at) == false and at != T_NULL) {
+            serr_node(arg, "`ptr.to_number` converts a pointer, but a `" + ty_name(at) + "` value was given.")
+            note(arg, "form: `ptr.to_number(value)` — any `ptr<T>` (or `null`).")
+        }
+        n.kind = parser.N_CONV
+        n.a = arg
+        n.otype = T_NUMBER
+        n.rtype = T_NUMBER
+        return T_NUMBER
+    }
+    when (n.nparts == 2 and n.parts[0] == "number" and n.parts[1] == "to_ptr") {
+        builtin_clash(n)
+        when (n.nargs != 1) {
+            serr_node(n, "`number.to_ptr` converts exactly one value, but " + number.to_text(n.nargs) + " were given.")
+            note(n, "form: `number.to_ptr(address)`.")
+            return intern_ptr(T_UINT8)
+        }
+        type.ptr<type.Node> arg = n.args[0]
+        type.ptr<type.Ty> at = check_expr(arg)
+        when (is_integer(at) == false) {
+            serr_node(arg, "`number.to_ptr` converts an integer address, but a `" + ty_name(at) + "` value was given.")
+            note(arg, "form: `number.to_ptr(address)` — produces `ptr<byte>`.")
+        }
+        type.ptr<type.Ty> pt = intern_ptr(T_UINT8)
+        n.kind = parser.N_CONV
+        n.a = arg
+        n.otype = pt
+        n.rtype = pt
+        return pt
+    }
+    # scalar conversion builtins
+    when (n.nparts == 2 and text.length(n.parts[1]) >= 3 and text.slice(n.parts[1], 0, 3) == "to_") {
+        type.number srcc = conv_builtin_src(n)
+        when (srcc >= 0) {
+            builtin_clash(n)
+            type.ptr<type.Ty> frm = scalar_ty(srcc)
+            type.ptr<type.Ty> dst = scalar_ty(conv_builtin_dst(n))
+            return check_conv_builtin(n, frm, dst)
+        }
+    }
+    # text operation builtins (0.9, spec §4.5)
+    when (n.nparts == 2 and n.parts[0] == "text") {
+        type.number op = -1
+        type.number want_args = 0
+        type.text sig = ""
+        when (n.parts[1] == "length") {
+            op = 0
+            want_args = 1
+            sig = "text.length(text.s) -> number"
+        }
+        else when (n.parts[1] == "byte_at") {
+            op = 1
+            want_args = 2
+            sig = "text.byte_at(text.s, number.i) -> uint8"
+        }
+        else when (n.parts[1] == "slice") {
+            op = 2
+            want_args = 3
+            sig = "text.slice(text.s, number.from, number.to) -> text (end-exclusive)"
+        }
+        else when (n.parts[1] == "from_bytes") {
+            op = 3
+            want_args = 2
+            sig = "text.from_bytes(ptr<byte>.buf, number.len) -> text"
+        }
+        when (op >= 0) {
+            builtin_clash(n)
+            type.text full = path_join(n.parts, n.nparts)
+            when (n.nargs != want_args) {
+                serr_node(n, "`" + full + "` expects " + number.to_text(want_args) + " argument" + plural(want_args) + ", but " + number.to_text(n.nargs) + " were given.")
+                note(n, "signature: " + sig)
+            }
+            type.number check_n = n.nargs
+            when (check_n > want_args) {
+                check_n = want_args
+            }
+            type.number ok_args = 1
+            loop (i from 0 until n.nargs) {
+                type.ptr<type.Node> arg = n.args[i]
+                type.ptr<type.Ty> at = check_expr(arg)
+                when (i >= check_n) {
+                    continue
+                }
+                when (op == 3) {
+                    when (i == 0 and (is_ptr(at) == false or at.elem != T_UINT8)) {
+                        serr_node(arg, "argument 1 of `text.from_bytes` must be `ptr<byte>`, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                        ok_args = 0
+                    }
+                    else when (i == 1 and is_integer(at) == false) {
+                        serr_node(arg, "argument 2 of `text.from_bytes` must be the byte count, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                        ok_args = 0
+                    }
+                    continue
+                }
+                when (i == 0) {
+                    when (at != T_TEXT) {
+                        serr_node(arg, "argument 1 of `" + full + "` must be `text`, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                        ok_args = 0
+                    }
+                    continue
+                }
+                when (is_integer(at) == false and at != T_NULL) {
+                    serr_node(arg, "argument " + number.to_text(i + 1) + " of `" + full + "` must be an integer (byte position), but a `" + ty_name(at) + "` value was given.")
+                    note(arg, "signature: " + sig)
+                    ok_args = 0
+                }
+            }
+            # compile-time slice-bounds validation when foldable
+            when (ok_args == 1 and op == 2 and n.nargs == 3) {
+                type.number mark = n_errors
+                type.ptr<type.ConstVal> sv = const_eval(n.args[0])
+                type.ptr<type.ConstVal> fv = const_eval(n.args[1])
+                type.ptr<type.ConstVal> tv = const_eval(n.args[2])
+                when (sv != null and sv.valid == 1 and sv.ty == T_TEXT and fv != null and fv.valid == 1 and is_integer(fv.ty) and tv != null and tv.valid == 1 and is_integer(tv.ty) and n_errors == mark) {
+                    type.number fromv = fv.i
+                    type.number tov = tv.i
+                    when (fromv > tov or tov > text.length(sv.t)) {
+                        serr_node(n, "text.slice bounds are invalid: [" + number.to_text(fromv) + ", " + number.to_text(tov) + ") into " + number.to_text(text.length(sv.t)) + " bytes.")
+                        note(n, "bounds are 0 <= from <= to <= text.length(s); the end is exclusive.")
+                    }
+                }
+            }
+            n.kind = parser.N_TEXTOP
+            n.fvalue = op
+            when (op == 0) {
+                n.rtype = T_NUMBER
+            }
+            else when (op == 1) {
+                n.rtype = T_UINT8
+            }
+            else {
+                n.rtype = T_TEXT
+            }
+            return n.rtype
+        }
+    }
+    # file operation builtins (0.10, spec §6.4)
+    when (n.nparts == 2 and n.parts[0] == "fs") {
+        type.number op = -1
+        type.number want_args = 0
+        type.text sig = ""
+        when (n.parts[1] == "read") {
+            op = 0
+            want_args = 1
+            sig = "fs.read(text.path) -> text"
+        }
+        else when (n.parts[1] == "save") {
+            op = 1
+            want_args = 2
+            sig = "fs.save(text.path, text.data) -> number (bytes written)"
+        }
+        else when (n.parts[1] == "exists") {
+            op = 2
+            want_args = 1
+            sig = "fs.exists(text.path) -> bool"
+        }
+        when (op >= 0) {
+            builtin_clash(n)
+            type.text full = path_join(n.parts, n.nparts)
+            when (n.nargs != want_args) {
+                serr_node(n, "`" + full + "` expects " + number.to_text(want_args) + " argument" + plural(want_args) + ", but " + number.to_text(n.nargs) + " were given.")
+                note(n, "signature: " + sig)
+            }
+            type.number check_n = n.nargs
+            when (check_n > want_args) {
+                check_n = want_args
+            }
+            loop (i from 0 until n.nargs) {
+                type.ptr<type.Node> arg = n.args[i]
+                type.ptr<type.Ty> at = check_expr(arg)
+                when (i >= check_n) {
+                    continue
+                }
+                when (at != T_TEXT) {
+                    serr_node(arg, "argument " + number.to_text(i + 1) + " of `" + full + "` must be `text`, but a `" + ty_name(at) + "` value was given.")
+                    note(arg, "signature: " + sig)
+                }
+            }
+            n.kind = parser.N_FSOP
+            n.fvalue = op
+            when (op == 0) {
+                n.rtype = T_TEXT
+            }
+            else when (op == 1) {
+                n.rtype = T_NUMBER
+            }
+            else {
+                n.rtype = T_BOOL
+            }
+            return n.rtype
+        }
+    }
+    # environment builtins (0.12, spec §6.5)
+    when (n.nparts == 2 and n.parts[0] == "env") {
+        type.number op = -1
+        type.number want_args = 0
+        type.text sig = ""
+        when (n.parts[1] == "arg_count") {
+            op = 0
+            want_args = 0
+            sig = "env.arg_count() -> number"
+        }
+        else when (n.parts[1] == "arg") {
+            op = 1
+            want_args = 1
+            sig = "env.arg(number.index) -> text"
+        }
+        when (op >= 0) {
+            builtin_clash(n)
+            type.text full = path_join(n.parts, n.nparts)
+            when (n.nargs != want_args) {
+                serr_node(n, "`" + full + "` expects " + number.to_text(want_args) + " argument" + plural(want_args) + ", but " + number.to_text(n.nargs) + " were given.")
+                note(n, "signature: " + sig)
+            }
+            loop (i from 0 until n.nargs) {
+                type.ptr<type.Node> arg = n.args[i]
+                type.ptr<type.Ty> at = check_expr(arg)
+                when (op == 1 and i == 0 and is_integer(at) == false) {
+                    serr_node(arg, "the index of `env.arg` must be an integer, but a `" + ty_name(at) + "` value was given.")
+                    note(arg, "signature: " + sig)
+                }
+            }
+            n.kind = parser.N_ENVOP
+            n.fvalue = op
+            when (op == 0) {
+                n.rtype = T_NUMBER
+            }
+            else {
+                n.rtype = T_TEXT
+            }
+            return n.rtype
+        }
+    }
+    # system builtins (0.13, spec §6.6)
+    when (n.nparts == 2 and n.parts[0] == "sys") {
+        type.number op = -1
+        type.number want_args = 0
+        type.text sig = ""
+        type.ptr<type.Ty> rty = T_VOID
+        when (n.parts[1] == "write") {
+            op = 0
+            want_args = 2
+            sig = "sys.write(number.fd, text.buf) -> number"
+            rty = T_NUMBER
+        }
+        else when (n.parts[1] == "read") {
+            op = 1
+            want_args = 3
+            sig = "sys.read(number.fd, ptr<byte>.buf, number.len) -> number"
+            rty = T_NUMBER
+        }
+        else when (n.parts[1] == "open") {
+            op = 2
+            want_args = 3
+            sig = "sys.open(text.path, number.flags, number.mode) -> number"
+            rty = T_NUMBER
+        }
+        else when (n.parts[1] == "close") {
+            op = 3
+            want_args = 1
+            sig = "sys.close(number.fd) -> number"
+            rty = T_NUMBER
+        }
+        else when (n.parts[1] == "size") {
+            op = 4
+            want_args = 1
+            sig = "sys.size(number.fd) -> number"
+            rty = T_NUMBER
+        }
+        else when (n.parts[1] == "mmap") {
+            op = 5
+            want_args = 1
+            sig = "sys.mmap(number.len) -> ptr<byte>"
+            rty = intern_ptr(T_UINT8)
+        }
+        else when (n.parts[1] == "exit") {
+            op = 6
+            want_args = 1
+            sig = "sys.exit(number.code)"
+            rty = T_VOID
+        }
+        else when (n.parts[1] == "chmod") {
+            op = 7
+            want_args = 2
+            sig = "sys.chmod(text.path, number.mode) -> number"
+            rty = T_NUMBER
+        }
+        else when (n.parts[1] == "mkdir") {
+            op = 8
+            want_args = 2
+            sig = "sys.mkdir(text.path, number.mode) -> number"
+            rty = T_NUMBER
+        }
+        when (op >= 0) {
+            builtin_clash(n)
+            type.text full = path_join(n.parts, n.nparts)
+            when (n.nargs != want_args) {
+                serr_node(n, "`" + full + "` expects " + number.to_text(want_args) + " argument" + plural(want_args) + ", but " + number.to_text(n.nargs) + " were given.")
+                note(n, "signature: " + sig)
+            }
+            loop (i from 0 until n.nargs) {
+                type.ptr<type.Node> arg = n.args[i]
+                type.ptr<type.Ty> at = check_expr(arg)
+                when (op == 0) {
+                    when (i == 0 and is_integer(at) == false) {
+                        serr_node(arg, "the file descriptor of `sys.write` must be an integer, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                    else when (i == 1 and at != T_TEXT) {
+                        serr_node(arg, "the buffer of `sys.write` must be `text`, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                }
+                else when (op == 1) {
+                    when (i == 0 and is_integer(at) == false) {
+                        serr_node(arg, "the file descriptor of `sys.read` must be an integer, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                    else when (i == 1 and (is_ptr(at) == false or at.elem != T_UINT8)) {
+                        serr_node(arg, "the buffer of `sys.read` must be `ptr<byte>`, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                    else when (i == 2 and is_integer(at) == false) {
+                        serr_node(arg, "the length of `sys.read` must be an integer, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                }
+                else when (op == 2) {
+                    when (i == 0 and at != T_TEXT) {
+                        serr_node(arg, "the path of `sys.open` must be `text`, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                    else when (i == 1 and is_integer(at) == false) {
+                        serr_node(arg, "the flags of `sys.open` must be an integer, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                    else when (i == 2 and is_integer(at) == false) {
+                        serr_node(arg, "the mode of `sys.open` must be an integer, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                }
+                else when (op == 3 or op == 4) {
+                    when (is_integer(at) == false) {
+                        type.text nm = "close"
+                        when (op == 4) {
+                            nm = "size"
+                        }
+                        serr_node(arg, "the file descriptor of `sys." + nm + "` must be an integer, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                }
+                else when (op == 5) {
+                    when (is_integer(at) == false) {
+                        serr_node(arg, "the length of `sys.mmap` must be an integer, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                }
+                else when (op == 6) {
+                    when (is_integer(at) == false) {
+                        serr_node(arg, "the exit code of `sys.exit` must be an integer, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                }
+                else when (op == 7 or op == 8) {
+                    type.text nm = "chmod"
+                    when (op == 8) {
+                        nm = "mkdir"
+                    }
+                    when (i == 0 and at != T_TEXT) {
+                        serr_node(arg, "the path of `sys." + nm + "` must be `text`, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                    else when (i == 1 and is_integer(at) == false) {
+                        serr_node(arg, "the mode of `sys." + nm + "` must be an integer, but a `" + ty_name(at) + "` value was given.")
+                        note(arg, "signature: " + sig)
+                    }
+                }
+            }
+            n.kind = parser.N_SYSOP
+            n.fvalue = op
+            n.rtype = rty
+            return rty
+        }
+    }
+    # regular call
+    type.text full = path_join(n.parts, n.nparts)
+    type.ptr<type.Symbol> target = resolve_path(n, 0)
+    when (target == null) {
+        return T_VOID
+    }
+    when (target.kind != SYM_FUNC) {
+        serr_node(n, "`" + full + "` is not a function — it cannot be called.")
+        return T_VOID
+    }
+    type.ptr<type.FuncInfo> fi = target.func
+    n.finfo = fi
+    when (n.nargs != fi.nparams) {
+        serr_node(n, "`" + full + "` expects " + number.to_text(fi.nparams) + " argument" + plural(fi.nparams) + ", but " + number.to_text(n.nargs) + " were given.")
+        type.text sig = "signature: " + full + "("
+        loop (k from 0 until fi.nparams) {
+            when (k > 0) {
+                sig = sig + ", "
+            }
+            sig = sig + ty_name(fi.ptypes[k]) + " " + fi.pnames[k]
+        }
+        sig = sig + ") -> " + ty_name(fi.ret)
+        note(n, sig)
+    }
+    type.number check_n = n.nargs
+    when (check_n > fi.nparams) {
+        check_n = fi.nparams
+    }
+    loop (i from 0 until n.nargs) {
+        type.ptr<type.Node> arg = n.args[i]
+        type.ptr<type.Ty> at = check_expr(arg)
+        when (i < check_n) {
+            type.ptr<type.Ty> want = fi.ptypes[i]
+            when (assignable_value(arg, at, want) == false) {
+                serr_node(arg, "argument " + number.to_text(i + 1) + " of `" + full + "` must be `" + ty_name(want) + "`, but a `" + ty_name(at) + "` value was given.")
+                note(arg, "conversions are explicit builtins like `int32.to_uint8(x)` (spec §4.4).")
+            }
+            else when (at != want and want == T_DECIMAL and warn_enabled == 1 and arg.kind != parser.N_INT) {
+                swarn_node(arg, "argument " + number.to_text(i + 1) + " of `" + full + "` implicitly widens to `decimal`.")
+            }
+        }
+    }
+    n.rtype = fi.ret
+    return fi.ret
+}
+
+# ---------------- write checking ----------------
+
+function.check_write(type.ptr<type.Node>.n) -> type.ptr<type.Ty> {
+    require_text_feature(n)
+    when (n.nargs != 1) {
+        serr_node(n, "`write` takes exactly one value (`write(x)`), but " + number.to_text(n.nargs) + " were given.")
+    }
+    loop (i from 0 until n.nargs) {
+        type.ptr<type.Node> arg = n.args[i]
+        type.ptr<type.Ty> at = check_expr(arg)
+        when (at != null and at.form == F_ARRAY) {
+            serr_node(arg, "`write` prints one value at a time, not a whole array.")
+            note(arg, "loop over the array and `write(xs[i])` for each element (spec §11).")
+        }
+        when (at != null and at.form == F_STRUCT) {
+            serr_node(arg, "`write` cannot print a whole struct in 0.7.")
+            note(arg, "print its fields: `write(pkt.length)` (spec §11).")
+        }
+        when (at != null and at.form == F_UNION) {
+            serr_node(arg, "`write` cannot print a whole union in 0.7.")
+            note(arg, "print the active member: `write(u.value)` (spec §11/§8.5).")
+        }
+        when (is_ptr(at) or at == T_NULL) {
+            serr_node(arg, "`write` does not print pointer values in 0.4.")
+            note(arg, "compare with `== null` for checks; debug address printing is planned (spec §11).")
+        }
+    }
+    n.rtype = T_VOID
+    return T_VOID
+}
+
+# contextual literal typing (spec §4.2)
+function.literal_as(type.ptr<type.Node>.e, type.ptr<type.Ty>.other) -> type.ptr<type.Ty> {
+    when (other == null or is_integer(other) == false) {
+        return null
+    }
+    when (e.rtype != T_NUMBER) {
+        return null
+    }
+    when (e.kind == parser.N_INT and uint_fits(e.ival, other)) {
+        return other
+    }
+    when (e.kind == parser.N_UN and e.uop == parser.UN_NEG and e.a.kind == parser.N_INT) {
+        type.number v = 0 - e.a.ival
+        when (sint_fits(v, other)) {
+            return other
+        }
+    }
+    return null
+}
+
+# ---------------- binary operators ----------------
+
+function.binop_name(number.op) -> text {
+    when (op == parser.OP_ADD) { return "+" }
+    else when (op == parser.OP_SUB) { return "-" }
+    else when (op == parser.OP_MUL) { return "*" }
+    else when (op == parser.OP_DIV) { return "/" }
+    else when (op == parser.OP_MOD) { return "%" }
+    else when (op == parser.OP_EQ) { return "==" }
+    else when (op == parser.OP_NEQ) { return "!=" }
+    else when (op == parser.OP_LT) { return "<" }
+    else when (op == parser.OP_LE) { return "<=" }
+    else when (op == parser.OP_GT) { return ">" }
+    else when (op == parser.OP_GE) { return ">=" }
+    else when (op == parser.OP_AND) { return "and" }
+    else when (op == parser.OP_OR) { return "or" }
+    else when (op == parser.OP_BAND) { return "&" }
+    else when (op == parser.OP_BOR) { return "|" }
+    else when (op == parser.OP_XOR) { return "^" }
+    else when (op == parser.OP_SHL) { return "<<" }
+    return ">>"
+}
+
+function.check_bin(type.ptr<type.Node>.e) -> type.ptr<type.Ty> {
+    type.ptr<type.Ty> lt = check_expr(e.a)
+    type.ptr<type.Ty> rt = check_expr(e.b)
+
+    # operand type after literal adaptation + widening; stashed on the node
+    type.ptr<type.Ty> lt_eff = literal_as(e.a, rt)
+    when (lt_eff == null) {
+        lt_eff = lt
+    }
+    type.ptr<type.Ty> rt_eff = literal_as(e.b, lt)
+    when (rt_eff == null) {
+        rt_eff = rt
+    }
+    type.ptr<type.Ty> ct = ty_common(lt_eff, rt_eff)
+    e.otype = ct
+
+    # ---- pointer operations (spec §12) ----
+    type.number lp = 0
+    type.number rp = 0
+    when (is_ptr(lt)) { lp = 1 }
+    when (is_ptr(rt)) { rp = 1 }
+    type.number ln = 0
+    type.number rn = 0
+    when (lt == T_NULL) { ln = 1 }
+    when (rt == T_NULL) { rn = 1 }
+    when (lp == 1 or rp == 1 or ln == 1 or rn == 1) {
+            when (e.op == parser.OP_EQ or e.op == parser.OP_NEQ) {
+                type.number ok_pairs = 0
+                when ((lp == 1 and rp == 1 and lt == rt) or (lp == 1 and rn == 1) or (rp == 1 and ln == 1) or (ln == 1 and rn == 1)) {
+                    ok_pairs = 1
+                }
+                when (ok_pairs == 0) {
+                    serr_node(e, "`" + ty_name(lt) + "` and `" + ty_name(rt) + "` cannot be compared — pointers compare only with pointers of the same type or with `null`.")
+                }
+                when (lp == 1) {
+                    e.otype = lt
+                }
+                else when (rp == 1) {
+                    e.otype = rt
+                }
+                else {
+                    e.otype = T_NUMBER
+                }
+                e.rtype = T_BOOL
+                return T_BOOL
+            }
+            when (e.op == parser.OP_ADD or e.op == parser.OP_SUB) {
+                when (lp == 1 and rp == 1) {
+                    when (e.op == parser.OP_ADD or lt != rt) {
+                        serr_node(e, "pointers do not add; `" + ty_name(lt) + "` and `" + ty_name(rt) + "` combine only as `p - q` (element difference).")
+                        e.rtype = T_NUMBER
+                        return T_NUMBER
+                    }
+                    e.otype = lt
+                    e.rtype = T_NUMBER
+                    return T_NUMBER
+                }
+                when (lp == 1 and rt != null and is_integer(rt)) {
+                    e.otype = lt
+                    e.rtype = lt
+                    return lt
+                }
+                when (rp == 1 and lt != null and is_integer(lt)) {
+                    when (e.op == parser.OP_SUB) {
+                        serr_node(e, "`integer - pointer` is not defined — subtract from the pointer instead (`p - n`).")
+                    }
+                    else {
+                        e.otype = rt
+                        e.rtype = rt
+                        return rt
+                    }
+                    e.rtype = T_NUMBER
+                    return T_NUMBER
+                }
+                serr_node(e, "`" + ty_name(lt) + "` and `" + ty_name(rt) + "` do not combine — pointers add or subtract integers, or subtract a matching pointer.")
+                e.rtype = T_NUMBER
+                return T_NUMBER
+            }
+            when (e.op == parser.OP_AND or e.op == parser.OP_OR) {
+                serr_node(e, "`and`/`or` combine `bool` values — compare pointers with `==`/`!=` first.")
+                e.rtype = T_BOOL
+                return T_BOOL
+            }
+            serr_node(e, "pointer values do not take arithmetic or ordering here — use `==`/`!=`, `p + n`, or `p - q`.")
+            e.rtype = T_NUMBER
+            return T_NUMBER
+        }
+
+    when (e.op == parser.OP_AND or e.op == parser.OP_OR) {
+        when (lt != T_BOOL or rt != T_BOOL) {
+            serr_node(e, "`and`/`or` combine `bool` values, but `" + ty_name(lt) + "` and `" + ty_name(rt) + "` were given.")
+        }
+        e.rtype = T_BOOL
+        return T_BOOL
+    }
+    when (e.op == parser.OP_EQ or e.op == parser.OP_NEQ) {
+        when ((lt != null and lt.form == F_ARRAY) or (rt != null and rt.form == F_ARRAY)) {
+            type.text opn = "!="
+            when (e.op == parser.OP_EQ) {
+                opn = "=="
+            }
+            serr_node(e, "arrays are not comparable with `" + opn + "` in 0.2.")
+            note(e, "compare elements individually (for example inside a loop).")
+            e.rtype = T_BOOL
+            return T_BOOL
+        }
+        when (lt == T_TEXT and rt == T_TEXT) {
+            e.rtype = T_BOOL
+            return T_BOOL
+        }
+        when (lt == T_BOOL and rt == T_BOOL) {
+            e.rtype = T_BOOL
+            return T_BOOL
+        }
+        when (ct != null) {
+            when (lt != rt and warn_enabled == 1 and e.a.kind != parser.N_INT and e.b.kind != parser.N_INT) {
+                swarn_node(e, "comparison mixes `" + ty_name(lt) + "` and `" + ty_name(rt) + "` — the narrower operand widens.")
+            }
+            e.rtype = T_BOOL
+            return T_BOOL
+        }
+        serr_node(e, "`" + ty_name(lt) + "` and `" + ty_name(rt) + "` cannot be compared for equality.")
+        e.rtype = T_BOOL
+        return T_BOOL
+    }
+    when (e.op == parser.OP_LT or e.op == parser.OP_LE or e.op == parser.OP_GT or e.op == parser.OP_GE) {
+        when (ct != null and ct != T_DECIMAL) {
+            when (lt != rt and warn_enabled == 1 and e.a.kind != parser.N_INT and e.b.kind != parser.N_INT) {
+                swarn_node(e, "comparison mixes `" + ty_name(lt) + "` and `" + ty_name(rt) + "` — the narrower operand widens.")
+            }
+            e.rtype = T_BOOL
+            return T_BOOL
+        }
+        when (ct == T_DECIMAL) {
+            when (lt != rt and warn_enabled == 1 and e.a.kind != parser.N_INT and e.b.kind != parser.N_INT) {
+                swarn_node(e, "comparison mixes an integer and `decimal` — the integer side widens.")
+            }
+            e.rtype = T_BOOL
+            return T_BOOL
+        }
+        when (lt == T_TEXT and rt == T_TEXT) {
+            serr_node(e, "text is not ordered — only `==` and `!=` are defined for `text` in 0.1.")
+            e.rtype = T_BOOL
+            return T_BOOL
+        }
+        serr_node(e, "`" + ty_name(lt) + "` and `" + ty_name(rt) + "` cannot be ordered.")
+        e.rtype = T_BOOL
+        return T_BOOL
+    }
+    when (e.op == parser.OP_ADD) {
+        when (lt == T_TEXT and rt == T_TEXT) {
+            e.rtype = T_TEXT
+            return T_TEXT
+        }
+    }
+    when (e.op == parser.OP_SUB or e.op == parser.OP_MUL or e.op == parser.OP_DIV) {
+        when (lt == T_TEXT or rt == T_TEXT) {
+            serr_node(e, "`+` concatenates `text` with `text`; `" + ty_name(lt) + "` and `" + ty_name(rt) + "` do not combine.")
+            when (lt == T_TEXT) {
+                e.rtype = T_TEXT
+            }
+            else {
+                e.rtype = T_NUMBER
+            }
+            return e.rtype
+        }
+    }
+    when (e.op == parser.OP_MOD) {
+        when (ct != null and ct != T_DECIMAL and is_integer(ct)) {
+            e.rtype = ct
+            return ct
+        }
+        when (ct == T_DECIMAL or lt == T_DECIMAL or rt == T_DECIMAL) {
+            serr_node(e, "remainder (`%`) is defined for integer types only in 0.3; a decimal remainder builtin is planned.")
+        }
+        else {
+            serr_node(e, "`%` needs integer operands, but `" + ty_name(lt) + "` and `" + ty_name(rt) + "` were given.")
+        }
+        e.rtype = T_NUMBER
+        return T_NUMBER
+    }
+    when (e.op == parser.OP_BAND or e.op == parser.OP_BOR or e.op == parser.OP_XOR) {
+        when (ct != null and ct != T_DECIMAL and is_integer(ct)) {
+            e.rtype = ct
+            return ct
+        }
+        when (lt == T_TEXT or rt == T_TEXT or lt == T_DECIMAL or rt == T_DECIMAL or lt == T_BOOL or rt == T_BOOL) {
+            serr_node(e, "`" + binop_name(e.op) + "` combines two integer values, but `" + ty_name(lt) + "` and `" + ty_name(rt) + "` were given.")
+        }
+        else {
+            serr_node(e, "`" + binop_name(e.op) + "` needs integer operands of combinable types, but `" + ty_name(lt) + "` and `" + ty_name(rt) + "` were given.")
+            note(e, "mixed signedness or widths that do not widen safely need an explicit conversion (for example `int32.to_uint8(x)`).")
+        }
+        e.rtype = T_NUMBER
+        return T_NUMBER
+    }
+    when (e.op == parser.OP_SHL or e.op == parser.OP_SHR) {
+        # shifts (0.11, spec §9): the result carries the LEFT operand's type
+        when (lt == null or is_integer(lt) == false) {
+            serr_node(e, "`" + binop_name(e.op) + "` shifts an integer value, but `" + ty_name(lt) + "` was given as the value.")
+            e.otype = T_NUMBER
+            e.rtype = T_NUMBER
+            return T_NUMBER
+        }
+        when (rt == null or is_integer(rt) == false) {
+            serr_node(e, "the shift count for `" + binop_name(e.op) + "` must be an integer, but `" + ty_name(rt) + "` was given.")
+            e.otype = T_NUMBER
+            e.rtype = T_NUMBER
+            return T_NUMBER
+        }
+        type.ptr<type.Ty> vt = lt
+        when (lt_eff != null and is_integer(lt_eff)) {
+            vt = lt_eff
+        }
+        e.otype = vt
+        e.rtype = vt
+        return vt
+    }
+    # arith
+    when (ct != null) {
+        when (ct == T_DECIMAL and lt != T_DECIMAL and warn_enabled == 1) {
+            when (e.a.kind != parser.N_INT and e.b.kind != parser.N_INT) {
+                swarn_node(e, "arithmetic mixes an integer and `decimal` — the integer operand widens to `decimal`.")
+            }
+        }
+        else when (ct != T_DECIMAL and lt != rt and warn_enabled == 1 and e.a.kind != parser.N_INT and e.b.kind != parser.N_INT) {
+            swarn_node(e, "arithmetic mixes `" + ty_name(lt) + "` and `" + ty_name(rt) + "` — the narrower operand widens to `" + ty_name(ct) + "`.")
+        }
+        e.rtype = ct
+        return ct
+    }
+    when (lt == T_BOOL or rt == T_BOOL) {
+        serr_node(e, "`bool` values do not take arithmetic (use `and`/`or`/`not`).")
+    }
+    else {
+        serr_node(e, "`" + ty_name(lt) + "` and `" + ty_name(rt) + "` do not combine arithmetically.")
+        when (is_integer(lt) and is_integer(rt)) {
+            note(e, "mixed signedness or widths that do not widen safely need an explicit conversion (for example `int32.to_uint8(x)`).")
+        }
+    }
+    e.rtype = T_NUMBER
+    return T_NUMBER
+}
+
+# ---------------- check_expr ----------------
+
+function.check_expr(type.ptr<type.Node>.e) -> type.ptr<type.Ty> {
+    when (e.kind == parser.N_INT) {
+        e.rtype = T_NUMBER
+        return T_NUMBER
+    }
+    when (e.kind == parser.N_DEC) {
+        e.rtype = T_DECIMAL
+        return T_DECIMAL
+    }
+    when (e.kind == parser.N_BOOL) {
+        e.rtype = T_BOOL
+        return T_BOOL
+    }
+    when (e.kind == parser.N_TEXT) {
+        e.rtype = T_TEXT
+        return T_TEXT
+    }
+    when (e.kind == parser.N_NULL) {
+        e.rtype = T_NULL
+        return T_NULL
+    }
+    when (e.kind == parser.N_TEXTOP or e.kind == parser.N_FSOP or e.kind == parser.N_ENVOP or e.kind == parser.N_SYSOP) {
+        loop (i from 0 until e.nargs) {
+            check_expr(e.args[i])
+        }
+        return e.rtype
+    }
+    when (e.kind == parser.N_ALLOC) {
+        type.ptr<type.Ty> ct = check_expr(e.a)
+        when (ct == null or is_integer(ct) == false) {
+            serr_node(e.a, "the element count of `alloc` must be an integer type, but `" + ty_name(ct) + "` was given.")
+            note(e.a, "example: `alloc<type.number>(10)` allocates room for 10 numbers.")
+        }
+        e.rtype = e.otype
+        return e.otype
+    }
+    when (e.kind == parser.N_PATH) {
+        # struct-field path? rewrite into an A_MEMBER chain (spec §8.3)
+        when (try_struct_field_path(e)) {
+            when (e.rtype == null) {
+                e.rtype = T_NUMBER
+                return T_NUMBER
+            }
+            return e.rtype
+        }
+        type.ptr<type.Symbol> s = resolve_path(e, 1)
+        when (s == null) {
+            e.rtype = T_NUMBER
+            return T_NUMBER
+        }
+        when (s.ty == T_AUTO) {
+            serr_node(e, "the type of `" + path_join(e.parts, e.nparts) + "` is not known yet — `type.auto` declarations must precede their uses.")
+            e.rtype = T_NUMBER
+            return T_NUMBER
+        }
+        e.sym = s
+        e.rtype = s.ty
+        return s.ty
+    }
+    when (e.kind == parser.N_CALL) {
+        return check_call(e)
+    }
+    when (e.kind == parser.N_CONV) {
+        check_expr(e.a)
+        e.rtype = e.otype
+        return e.otype
+    }
+    when (e.kind == parser.N_MEMBER) {
+        # base.field — record member access (spec §8.3/§8.5)
+        type.ptr<type.Ty> bt = check_expr(e.a)
+        type.number deref = 0
+        when (is_ptr(bt)) {
+            bt = bt.elem
+            deref = 1
+        }
+        when (is_record(bt) == false) {
+            serr_node(e, "member access `." + e.name + "` needs a struct, a union, or a pointer to one, but the base is `" + ty_name(bt) + "`.")
+            note(e, "record fields are declared with `struct.Name = { ... }.end` or `union.Name = { ... }.end` (spec §8.3/§8.5).")
+            e.rtype = T_NUMBER
+            return T_NUMBER
+        }
+        type.number fi = ty_field(bt, e.name)
+        when (fi < 0) {
+            type.text kindw = "union"
+            when (is_union(bt) == false) {
+                kindw = "struct"
+            }
+            serr_node(e, kindw + " `" + bt.sname + "` has no member `" + e.name + "`.")
+            type.text list = "members:"
+            loop (k from 0 until bt.nfields) {
+                list = list + " " + bt.fnames[k]
+            }
+            note(e, list)
+            e.rtype = T_NUMBER
+            return T_NUMBER
+        }
+        e.autoderef = deref
+        e.offset = bt.foffs[fi]
+        e.rtype = bt.ftypes[fi]
+        return e.rtype
+    }
+    when (e.kind == parser.N_WRITE) {
+        return check_write(e)
+    }
+    when (e.kind == parser.N_BIN) {
+        return check_bin(e)
+    }
+    when (e.kind == parser.N_ARRAYLIT) {
+        serr_node(e, "an array literal belongs to a declaration: `type.array<type.number, 3> xs = { ... }`.")
+        note(e, "assignment copies whole arrays from other arrays; literals are for declarations (spec §8.4).")
+        e.rtype = null
+        return null
+    }
+    when (e.kind == parser.N_INDEX) {
+        type.ptr<type.Ty> bt = check_expr(e.a)
+        when ((bt == null or bt.form != F_ARRAY) and is_ptr(bt) == false) {
+            serr_node(e, "this value is a `" + ty_name(bt) + "` — only arrays and pointers can be indexed.")
+            note(e, "array indexing is `name[index]`; the index must be an integer type (spec §9/§12).")
+            check_expr(e.b)
+            e.rtype = T_NUMBER
+            return T_NUMBER
+        }
+        type.ptr<type.Ty> it = check_expr(e.b)
+        when (it == null or is_integer(it) == false) {
+            serr_node(e.b, "the index must be an integer type, but `" + ty_name(it) + "` was given.")
+            note(e.b, "out-of-bounds array access is a runtime trap; pointer indexing is unchecked (spec §8.4/§12).")
+        }
+        e.rtype = bt.elem
+        return bt.elem
+    }
+    when (e.kind == parser.N_UN) {
+        type.ptr<type.Ty> t = check_expr(e.a)
+        when (e.uop == parser.UN_NEG) {
+            when (is_integer(t) == false and t != T_DECIMAL) {
+                serr_node(e, "unary `-` needs an integer or `decimal`, but `" + ty_name(t) + "` was given.")
+            }
+            e.rtype = t
+            return t
+        }
+        when (e.uop == parser.UN_NOT) {
+            when (t != T_BOOL) {
+                serr_node(e, "`not` needs a `bool`, but `" + ty_name(t) + "` was given.")
+            }
+            e.rtype = T_BOOL
+            return T_BOOL
+        }
+        when (e.uop == parser.UN_BNOT) {
+            when (is_integer(t) == false) {
+                serr_node(e, "`~` (bitwise not) needs an integer, but `" + ty_name(t) + "` was given.")
+            }
+            e.rtype = t
+            return t
+        }
+        when (e.uop == parser.UN_ADDR) {
+            # &x — address-of (spec §12)
+            when (e.a.kind == parser.N_PATH and e.a.sym != null) {
+                e.rtype = intern_ptr(e.a.rtype)
+                return e.rtype
+            }
+            when (e.a.kind == parser.N_INDEX) {
+                e.rtype = intern_ptr(e.a.rtype)
+                return e.rtype
+            }
+            when (e.a.kind == parser.N_UN and e.a.uop == parser.UN_DEREF) {
+                e.rtype = intern_ptr(e.a.rtype)
+                return e.rtype
+            }
+            serr_node(e, "`&` needs a variable, an array element, or a dereference — not this expression.")
+            note(e, "addressable forms: `&x`, `&xs[i]`, `&*p` (spec §12).")
+            e.rtype = null
+            return null
+        }
+        # UN_DEREF
+        when (is_ptr(t) == false) {
+            serr_node(e, "`*` dereferences a pointer, but `" + ty_name(t) + "` was given.")
+            note(e, "pointers come from `&x`, `alloc<T>(n)`, or pointer-typed values (spec §12).")
+            e.rtype = T_NUMBER
+            return T_NUMBER
+        }
+        e.rtype = t.elem
+        return t.elem
+    }
+    serr_node(e, "this expression form is not valid here.")
+    e.rtype = T_VOID
+    return T_VOID
+}
+
+# ---------------- statements ----------------
+
+# does a statement list always flow out (return/break/continue, when/else)?
+function.list_exits(type.ptr<type.ptr<type.Node>>.body, number.n) -> bool {
+    loop (i from 0 until n) {
+        type.ptr<type.Node> s = body[i]
+        when (s.kind == parser.N_RETURN or s.kind == parser.N_BREAK or s.kind == parser.N_CONTINUE) {
+            return true
+        }
+        when (s.kind == parser.N_WHEN and s.nbody_else > 0 and list_exits(s.body, s.nbody) and list_exits(s.body_else, s.nbody_else)) {
+            return true
+        }
+    }
+    return false
+}
+
+function.list_returns(type.ptr<type.ptr<type.Node>>.body, number.n) -> bool {
+    loop (i from 0 until n) {
+        type.ptr<type.Node> s = body[i]
+        when (s.kind == parser.N_RETURN and s.a != null) {
+            return true
+        }
+        when (s.kind == parser.N_WHEN and s.nbody_else > 0 and list_returns(s.body, s.nbody) and list_returns(s.body_else, s.nbody_else)) {
+            return true
+        }
+    }
+    return false
+}
+
+# `type.auto name = init` (0.8, spec §8.1): infer + patch in place
+function.infer_auto_type(type.ptr<type.Node>.s) -> number {
+    when (s.otype != T_AUTO) {
+        return 0
+    }
+    type.ptr<type.Ty> it = null
+    when (s.a.kind != parser.N_ARRAYLIT) {
+        it = check_expr(s.a)
+    }
+    when (it == null) {
+        serr_node(s, "`type.auto` cannot infer the type of `" + s.name + "` from this initializer.")
+        note(s, "literals like `{ ... }` need a target type; write the type explicitly (spec §8.1).")
+    }
+    else when (it == T_VOID or it == T_NULL or it == T_AUTO) {
+        serr_node(s, "`type.auto` cannot infer the type of `" + s.name + "` from a `" + ty_name(it) + "` initializer.")
+        note(s, "`null` needs a pointer type; write it explicitly (`type.ptr<type.number> p = null`).")
+        it = null
+    }
+    when (it != null) {
+        s.otype = it
+    }
+    else {
+        s.otype = T_NUMBER
+    }
+    when (s.sym != null) {
+        s.sym.ty = s.otype
+    }
+    return 0
+}
+
+function.check_stmt(type.ptr<type.Node>.s) -> number {
+    when (s.kind == parser.N_VARDECL) {
+        infer_auto_type(s)
+        when (is_record(s.otype)) {
+            when (s.a.kind == parser.N_ARRAYLIT) {
+                check_struct_lit_runtime(s.a, s.otype, s.name)
+            }
+            else {
+                type.ptr<type.Ty> it = check_expr(s.a)
+                when (it != s.otype) {
+                    serr_node(s, "variable `" + s.name + "` is `" + ty_name(s.otype) + "`, but the initializer is `" + ty_name(it) + "`.")
+                    note(s, "struct/union assignment copies the contents; the types must match exactly (spec §8.3/§8.5).")
+                }
+            }
+            type.ptr<type.Symbol> ex = scope_insert(cur_scope, s.name, SYM_VAR, s.line, s.col)
+            when (ex.decl != null and ex.decl != s) {
+                serr_node(s, "duplicate definition of `" + s.name + "` in this scope.")
+                return 0
+            }
+            ex.ty = s.otype
+            ex.decl = s
+            s.sym = ex
+            return 0
+        }
+        when (s.otype != null and s.otype.form == F_ARRAY) {
+            when (s.a.kind == parser.N_ARRAYLIT) {
+                check_array_lit_runtime(s.a, s.otype, s.name)
+            }
+            else {
+                type.ptr<type.Ty> it = check_expr(s.a)
+                when (it != s.otype) {
+                    serr_node(s, "variable `" + s.name + "` is `" + ty_name(s.otype) + "`, but the initializer is `" + ty_name(it) + "`.")
+                    note(s, "array copies require the exact same array type (element type and count).")
+                }
+            }
+            type.ptr<type.Symbol> ex = scope_insert(cur_scope, s.name, SYM_VAR, s.line, s.col)
+            when (ex.decl != null and ex.decl != s) {
+                serr_node(s, "duplicate definition of `" + s.name + "` in this scope.")
+                return 0
+            }
+            ex.ty = s.otype
+            ex.decl = s
+            s.sym = ex
+            return 0
+        }
+        when (s.a.kind == parser.N_ARRAYLIT) {
+            serr_node(s, "variable `" + s.name + "` is `" + ty_name(s.otype) + "`, but the initializer is an array literal.")
+            note(s, "array literals initialize array variables: `type.array<type." + ty_name(s.otype) + ", N> name = { ... }`.")
+            return 0
+        }
+        type.ptr<type.Ty> it = check_expr(s.a)
+        when (assignable_value(s.a, it, s.otype) == false) {
+            serr_node(s, "variable `" + s.name + "` is `" + ty_name(s.otype) + "`, but the initializer is `" + ty_name(it) + "`.")
+            note(s, "safe widening is implicit; narrowing and signedness changes use explicit conversions like `int32.to_uint8(x)` (spec §4.4).")
+        }
+        else when (it != s.otype and s.otype == T_DECIMAL and warn_enabled == 1 and s.a.kind != parser.N_INT) {
+            swarn_node(s, "initializer implicitly widens to `decimal` for `" + s.name + "`.")
+        }
+        type.ptr<type.Symbol> ex = scope_insert(cur_scope, s.name, SYM_VAR, s.line, s.col)
+        when (ex.decl != null and ex.decl != s) {
+            serr_node(s, "duplicate definition of `" + s.name + "` in this scope.")
+            return 0
+        }
+        ex.ty = s.otype
+        ex.decl = s
+        s.sym = ex
+        return 0
+    }
+    when (s.kind == parser.N_ASSIGN) {
+        # struct-field path target? rewrite into FIELDASSIGN (spec §8.3);
+        # the value node must be saved FIRST (the rewrite overwrites s.a)
+        type.ptr<type.Node> assign_val = s.a
+        when (try_struct_field_path(s)) {
+            type.ptr<type.Node> val = assign_val
+            when (s.a != null and s.rtype != null) {
+                type.ptr<type.Node> root = s.a
+                s.kind = parser.N_FIELDASSIGN
+                s.a = root.a
+                s.name = root.name
+                s.autoderef = root.autoderef
+                s.offset = root.offset
+                s.c = val
+                check_stmt(s)
+                return 0
+            }
+            # reported inside; still check the value
+            check_expr(val)
+            return 0
+        }
+        type.ptr<type.Symbol> target = resolve_path(s, 1)
+        when (target == null) {
+            return 0
+        }
+        when (target.kind == SYM_CONST) {
+            serr_node(s, "`" + path_join(s.parts, s.nparts) + "` is a constant — its value is fixed at compile time and cannot be assigned.")
+            check_expr(s.a)
+            return 0
+        }
+        s.sym = target
+        type.ptr<type.Ty> vt = check_expr(s.a)
+        when (is_record(target.ty) or (target.ty != null and target.ty.form == F_ARRAY) or (vt != null and vt.form == F_ARRAY)) {
+            when (vt != target.ty) {
+                serr_node(s, "cannot assign a `" + ty_name(vt) + "` value to `" + path_join(s.parts, s.nparts) + "`, which is `" + ty_name(target.ty) + "`.")
+                note(s, "array/struct/union assignment copies the contents; the types must match exactly (spec §8.4/§8.3/§8.5).")
+            }
+            return 0
+        }
+        when (assignable_value(s.a, vt, target.ty) == false) {
+            serr_node(s, "cannot assign a `" + ty_name(vt) + "` value to `" + path_join(s.parts, s.nparts) + "`, which is `" + ty_name(target.ty) + "`.")
+        }
+        else when (vt != target.ty and target.ty == T_DECIMAL and warn_enabled == 1 and s.a.kind != parser.N_INT) {
+            swarn_node(s, "assignment implicitly widens to `decimal`.")
+        }
+        return 0
+    }
+    when (s.kind == parser.N_INDEXASSIGN) {
+        type.ptr<type.Ty> bt = check_expr(s.a)
+        when ((bt == null or bt.form != F_ARRAY) and is_ptr(bt) == false) {
+            serr_node(s, "this value is a `" + ty_name(bt) + "` — only array elements or pointers can be indexed for assignment.")
+            note(s, "store into arrays with `name[index] = value`, or through pointers with `p[index] = value` (spec §8.4/§12).")
+            check_expr(s.b)
+            check_expr(s.c)
+            return 0
+        }
+        type.ptr<type.Ty> it = check_expr(s.b)
+        when (it == null or is_integer(it) == false) {
+            serr_node(s.b, "the index must be an integer type, but `" + ty_name(it) + "` was given.")
+            note(s.b, "out-of-bounds array access is a runtime trap; pointer indexing is unchecked (spec §8.4/§12).")
+        }
+        type.ptr<type.Ty> elem = bt.elem
+        type.ptr<type.Ty> vt = check_expr(s.c)
+        when (elem.form == F_ARRAY) {
+            when (vt != elem) {
+                serr_node(s.c, "this element is `" + ty_name(elem) + "`, but a `" + ty_name(vt) + "` value was given.")
+                note(s.c, "assigning a whole inner array copies it; the types must match exactly.")
+            }
+            return 0
+        }
+        when (assignable_value(s.c, vt, elem) == false) {
+            serr_node(s.c, "the elements are `" + ty_name(elem) + "`, but a `" + ty_name(vt) + "` value was given.")
+            note(s.c, "safe widening is implicit; everything else converts explicitly (spec §4.4).")
+        }
+        else when (vt != elem and elem == T_DECIMAL and warn_enabled == 1 and s.c.kind != parser.N_INT) {
+            swarn_node(s, "element assignment implicitly widens to `decimal`.")
+        }
+        return 0
+    }
+    when (s.kind == parser.N_DEREFASSIGN) {
+        type.ptr<type.Ty> pt = check_expr(s.a)
+        when (is_ptr(pt) == false) {
+            serr_node(s.a, "`*` stores through a pointer, but this value is `" + ty_name(pt) + "`.")
+            note(s.a, "pointers come from `&x`, `alloc<T>(n)`, or pointer-typed values (spec §12).")
+            check_expr(s.c)
+            return 0
+        }
+        type.ptr<type.Ty> elem = pt.elem
+        type.ptr<type.Ty> vt = check_expr(s.c)
+        when (elem.form == F_ARRAY) {
+            when (vt != elem) {
+                serr_node(s.c, "`*p` is `" + ty_name(elem) + "`, but a `" + ty_name(vt) + "` value was given.")
+                note(s.c, "storing a whole array copies it into the destination; the types must match exactly.")
+            }
+            return 0
+        }
+        when (assignable_value(s.c, vt, elem) == false) {
+            serr_node(s.c, "`*p` holds `" + ty_name(elem) + "`, but a `" + ty_name(vt) + "` value was given.")
+        }
+        else when (vt != elem and elem == T_DECIMAL and warn_enabled == 1 and s.c.kind != parser.N_INT) {
+            swarn_node(s, "deref assignment implicitly widens to `decimal`.")
+        }
+        return 0
+    }
+    when (s.kind == parser.N_FIELDASSIGN) {
+        type.ptr<type.Ty> bt = check_expr(s.a)
+        type.number deref = 0
+        when (is_ptr(bt)) {
+            bt = bt.elem
+            deref = 1
+        }
+        when (is_record(bt) == false) {
+            serr_node(s.a, "member assignment `." + s.name + "` needs a struct, a union, or a pointer to one, but the base is `" + ty_name(bt) + "`.")
+            note(s.a, "record fields are declared with `struct.Name = { ... }.end` or `union.Name = { ... }.end` (spec §8.3/§8.5).")
+            check_expr(s.c)
+            return 0
+        }
+        type.number fi = ty_field(bt, s.name)
+        when (fi < 0) {
+            type.text kindw = "union"
+            when (is_union(bt) == false) {
+                kindw = "struct"
+            }
+            serr_node(s, kindw + " `" + bt.sname + "` has no member `" + s.name + "`.")
+            check_expr(s.c)
+            return 0
+        }
+        s.autoderef = deref
+        s.offset = bt.foffs[fi]
+        type.ptr<type.Ty> ft = bt.ftypes[fi]
+        s.otype = ft
+        type.ptr<type.Ty> vt = check_expr(s.c)
+        when (ft.form == F_ARRAY or is_record(ft)) {
+            when (vt != ft) {
+                serr_node(s.c, "field `" + s.name + "` is `" + ty_name(ft) + "`, but a `" + ty_name(vt) + "` value was given.")
+                note(s.c, "whole array/record values copy into fields; the types must match exactly.")
+            }
+            return 0
+        }
+        when (assignable_value(s.c, vt, ft) == false) {
+            serr_node(s.c, "field `" + s.name + "` is `" + ty_name(ft) + "`, but a `" + ty_name(vt) + "` value was given.")
+            note(s.c, "safe widening is implicit; everything else converts explicitly (spec §4.4).")
+        }
+        else when (vt != ft and ft == T_DECIMAL and warn_enabled == 1 and s.c.kind != parser.N_INT) {
+            swarn_node(s, "field assignment implicitly widens to `decimal`.")
+        }
+        return 0
+    }
+    when (s.kind == parser.N_RELEASE) {
+        type.ptr<type.Ty> pt = check_expr(s.a)
+        when (is_ptr(pt) == false and pt != T_NULL) {
+            serr_node(s.a, "`release` takes a pointer (or `null`, which is a no-op), but `" + ty_name(pt) + "` was given.")
+            note(s.a, "heap blocks come from `alloc<T>(n)` (spec §12).")
+        }
+        return 0
+    }
+    when (s.kind == parser.N_EXPRSTMT) {
+        check_expr(s.a)
+        when (s.a.kind != parser.N_CALL and s.a.kind != parser.N_WRITE and s.a.kind != parser.N_FSOP and s.a.kind != parser.N_ENVOP and s.a.kind != parser.N_SYSOP and s.a.kind != parser.N_TEXTOP) {
+            serr_node(s.a, "an expression statement must be a call like `physics.fall(3)` or `write(x)`.")
+        }
+        return 0
+    }
+    when (s.kind == parser.N_WHEN) {
+        type.ptr<type.Ty> ct = check_expr(s.a)
+        when (ct != T_BOOL) {
+            serr_node(s.a, "the `when` condition must be `bool`, but `" + ty_name(ct) + "` was given.")
+            note(s.a, "comparisons (`==`, `<`, ...) produce `bool`.")
+        }
+        type.ptr<type.Scope> sc = scope_new(cur_scope)
+        cur_scope = sc
+        check_stmt_list(s.body, s.nbody)
+        cur_scope = sc.parent
+        when (s.nbody_else > 0) {
+            type.ptr<type.Scope> sc2 = scope_new(cur_scope)
+            cur_scope = sc2
+            check_stmt_list(s.body_else, s.nbody_else)
+            cur_scope = sc2.parent
+        }
+        return 0
+    }
+    when (s.kind == parser.N_LOOP_COUNT) {
+        type.ptr<type.Ty> ft = check_expr(s.a)
+        type.ptr<type.Ty> bt = check_expr(s.b)
+        when (ft != T_NUMBER) {
+            serr_node(s.a, "the loop start must be `number`, but `" + ty_name(ft) + "` was given.")
+        }
+        when (bt != T_NUMBER) {
+            serr_node(s.b, "the loop bound must be `number`, but `" + ty_name(bt) + "` was given.")
+        }
+        type.ptr<type.Scope> sc = scope_new(cur_scope)
+        cur_scope = sc
+        type.ptr<type.Symbol> lv = scope_insert(sc, s.name, SYM_VAR, s.line, s.col)
+        lv.ty = T_NUMBER
+        lv.decl = s
+        lv.used = 1
+        s.sym = lv
+        type.number saved = in_loop
+        in_loop = 1
+        check_stmt_list(s.body, s.nbody)
+        in_loop = saved
+        cur_scope = sc.parent
+        return 0
+    }
+    when (s.kind == parser.N_LOOP_COND) {
+        type.ptr<type.Ty> ct = check_expr(s.a)
+        when (ct != T_BOOL) {
+            serr_node(s.a, "the loop condition must be `bool`, but `" + ty_name(ct) + "` was given.")
+        }
+        type.ptr<type.Scope> sc = scope_new(cur_scope)
+        cur_scope = sc
+        type.number saved = in_loop
+        in_loop = 1
+        check_stmt_list(s.body, s.nbody)
+        in_loop = saved
+        cur_scope = sc.parent
+        return 0
+    }
+    when (s.kind == parser.N_BREAK) {
+        when (in_loop == 0) {
+            serr_node(s, "`break` is only meaningful inside a loop.")
+        }
+        return 0
+    }
+    when (s.kind == parser.N_CONTINUE) {
+        when (in_loop == 0) {
+            serr_node(s, "`continue` is only meaningful inside a loop.")
+        }
+        return 0
+    }
+    when (s.kind == parser.N_PRINT) {
+        require_text_feature(s)
+        return 0
+    }
+    when (s.kind == parser.N_WRITE) {
+        check_write(s)
+        return 0
+    }
+    when (s.kind == parser.N_DIRECTIVE or s.kind == parser.N_LANGCOL) {
+        return 0
+    }
+    when (s.kind == parser.N_RETURN) {
+        when (cur_func == null) {
+            serr_node(s, "`return` is only valid inside a function.")
+            return 0
+        }
+        type.ptr<type.Ty> rt = cur_func.ret
+        when (s.a != null) {
+            type.ptr<type.Ty> vt = check_expr(s.a)
+            when (rt == T_VOID) {
+                serr_node(s, "this function returns nothing, so `return` must not carry a value.")
+                note(s, "returned a `" + ty_name(vt) + "` value.")
+            }
+            else when (assignable_value(s.a, vt, rt) == false) {
+                serr_node(s, "this function must return `" + ty_name(rt) + "`, but `return` gives `" + ty_name(vt) + "`.")
+            }
+            else when (vt != rt and rt == T_DECIMAL and warn_enabled == 1 and s.a.kind != parser.N_INT) {
+                swarn_node(s, "return value implicitly widens to `decimal`.")
+            }
+        }
+        else {
+            when (rt != T_VOID and cur_func.is_entry == 0) {
+                serr_node(s, "this function promises a `" + ty_name(rt) + "` result — `return` needs a value.")
+            }
+        }
+        return 0
+    }
+    serr_node(s, "this statement is not allowed here.")
+    return 0
+}
+
+function.check_stmt_list(type.ptr<type.ptr<type.Node>>.body, number.n) -> number {
+    loop (i from 0 until n) {
+        type.ptr<type.Node> s = body[i]
+        check_stmt(s)
+        # unreachable code after an exiting statement (spec §14, -w)
+        when (warn_enabled == 1 and i + 1 < n) {
+            type.number exits = 0
+            when (s.kind == parser.N_RETURN or s.kind == parser.N_BREAK or s.kind == parser.N_CONTINUE) {
+                exits = 1
+            }
+            when (exits == 1) {
+                swarn_node(body[i + 1], "unreachable code — the statement above always exits this block.")
+            }
+        }
+    }
+    return 0
+}
+
+function.check_func_body(type.ptr<type.Node>.fn, type.ptr<type.FuncInfo>.fi) -> number {
+    type.ptr<type.Scope> fs = scope_new(cur_scope)
+    cur_scope = fs
+    cur_func = fi
+    in_loop = 0
+
+    # struct/array returns are rejected post-layout
+    when (fi.ret != null and (fi.ret.form == F_STRUCT or fi.ret.form == F_UNION)) {
+        type.text kindw = "structs"
+        when (fi.ret.form == F_UNION) {
+            kindw = "unions"
+        }
+        serr_node(fn, "functions cannot return " + kindw + " directly in Okular 0.7.")
+        note(fn, "return `ptr<" + ty_name(fi.ret) + ">` (heap- or global-backed), or write into a pointer parameter (spec §12).")
+    }
+
+    # parameters live in the function scope
+    type.ptr<type.ptr<type.Symbol>> psyms = alloc<type.ptr<type.Symbol>>(fn.nparams + 1)
+    fi.psyms = psyms
+    loop (i from 0 until fn.nparams) {
+        type.ptr<type.Symbol> ps = scope_insert(fs, fn.pnames[i], SYM_VAR, fn.line, fn.col)
+        ps.ty = fn.ptypes[i]
+        ps.decl = fn
+        ps.used = 1
+        psyms[i] = ps
+    }
+
+    check_stmt_list(fn.body, fn.nbody)
+
+    # valued functions must return on every path (spec §8.2)
+    when (fi.ret != T_VOID and list_returns(fn.body, fn.nbody) == false) {
+        serr_node(fn, "function `" + fi.name + "` promises a `" + ty_name(fi.ret) + "` result, but some paths fall off the end without `return`.")
+        note(fn, "Okular checks every exit path conservatively: loops never count as guaranteed returns.")
+    }
+
+    # unused locals (warning)
+    when (warn_enabled == 1) {
+        loop (i from 0 until fs.n) {
+            type.ptr<type.Symbol> sym = fs.syms[i]
+            when (sym.kind == SYM_VAR and sym.used == 0 and sym.decl != null and sym.decl.kind == parser.N_VARDECL) {
+                swarn_node(sym.decl, "variable `" + sym.name + "` is never used.")
+            }
+        }
+    }
+
+    cur_scope = fs.parent
+    cur_func = null
+    return 0
+}
+
+# ---------------- collect + check: columns, modules ----------------
+
+function.register_const_decl(type.ptr<type.Scope>.scope, type.ptr<type.Node>.n) -> number {
+    type.ptr<type.Symbol> ex = scope_insert(scope, n.name, SYM_CONST, n.line, n.col)
+    when (ex.kind != SYM_CONST or (ex.decl != null and ex.decl != n)) {
+        serr_node(n, "duplicate definition of `" + n.name + "` in this scope.")
+        return 0
+    }
+    ex.decl = n
+    n.sym = ex
+
+    type.ptr<type.Scope> saved = cur_scope
+    cur_scope = scope
+    type.number mark = n_errors
+    type.ptr<type.ConstVal> cv = const_eval(n.a)
+    when (cv == null) {
+        # first attempt failed: check (rewrites conversion/text builtins into
+        # foldable nodes), then retry the fold
+        check_expr(n.a)
+        when (n_errors == mark) {
+            mark = n_errors
+            cv = const_eval(n.a)
+        }
+    }
+    cur_scope = saved
+    when (cv == null or n_errors != mark or cv.valid == 0) {
+        when (n_errors == mark) {
+            serr_node(n, "the value of `const." + n.name + "` is not a compile-time constant.")
+        }
+        ex.ty = T_NUMBER
+        return 0
+    }
+    when (cv.ty.form == F_ARRAY or is_record(cv.ty) or cv.ty == T_NULL or cv.ty == T_AUTO or cv.ty == T_VOID) {
+        serr_node(n, "constants are number, decimal, text, bool, or fixed-width values.")
+        ex.ty = T_NUMBER
+        return 0
+    }
+    ex.ty = cv.ty
+    ex.cval = cv
+    ex.is_global = 1
+    ex.used = 1
+    return 0
+}
+
+function.collect_devcol(type.ptr<type.Mod>.m, type.ptr<type.Node>.col, type.ptr<type.Scope>.parent, text.colpath_in) -> number {
+    # namespace scope
+    type.ptr<type.Scope> ns = scope_new(parent)
+
+    # colpath for mangling
+    type.text colpath = colpath_in
+    when (text.length(colpath_in) > 0) {
+        colpath = colpath_in + "." + col.name
+    }
+    else {
+        colpath = col.name
+    }
+
+    # insert the namespace symbol into the PARENT scope
+    type.ptr<type.Symbol> ex = scope_insert(parent, col.name, SYM_NS, col.line, col.col)
+    when (ex.kind != SYM_NS or (ex.decl != null and ex.decl != col)) {
+        serr_node(col, "duplicate definition of `" + col.name + "` in this scope.")
+        return 0
+    }
+    ex.ns = ns
+    ex.decl = col
+
+    loop (i from 0 until col.nbody) {
+        type.ptr<type.Node> n = col.body[i]
+        when (n.kind == parser.N_FUNC) {
+            type.ptr<type.Symbol> fs = scope_insert(ns, n.name, SYM_FUNC, n.line, n.col)
+            when (fs.kind != SYM_FUNC or (fs.decl != null and fs.decl != n)) {
+                serr_node(n, "duplicate definition of `" + n.name + "` in column `" + col.name + "`.")
+                continue
+            }
+            ex.decl = n
+            check_func_decl_shape(m, n)
+                        type.text mg = mangle(m.name, colpath, n.name)
+            type.ptr<type.Ty> fret = n.otype
+            when (fret == null) {
+                fret = T_VOID
+            }
+            type.ptr<type.FuncInfo> fi = funcinfo_new(n.name, mg, fret, n, m)
+            fi.nparams = n.nparams
+            type.ptr<type.ptr<type.Ty>> pt = alloc<type.ptr<type.Ty>>(n.nparams + 1)
+            type.ptr<type.text> pn = alloc<type.text>(n.nparams + 1)
+            loop (k from 0 until n.nparams) {
+                pt[k] = n.ptypes[k]
+                pn[k] = n.pnames[k]
+            }
+            fi.ptypes = pt
+            fi.pnames = pn
+            fs.func = fi
+            n.finfo = fi
+        }
+        else when (n.kind == parser.N_VARDECL) {
+            type.ptr<type.Symbol> vs = scope_insert(ns, n.name, SYM_VAR, n.line, n.col)
+            when (vs.kind != SYM_VAR or (vs.decl != null and vs.decl != n)) {
+                serr_node(n, "duplicate definition of `" + n.name + "` in column `" + col.name + "`.")
+                continue
+            }
+            vs.ty = n.otype
+            vs.decl = n
+            vs.is_global = 1
+            vs.mangled = mangle(m.name, colpath, n.name)
+            n.sym = vs
+        }
+        else when (n.kind == parser.N_CONSTDECL) {
+            register_const_decl(ns, n)
+        }
+        else when (n.kind == parser.N_DEVCOL) {
+            collect_devcol(m, n, ns, colpath)
+        }
+    }
+    return 0
+}
+
+# shared function-declaration shape checks (top level and columns)
+function.check_func_decl_shape(type.ptr<type.Mod>.m, type.ptr<type.Node>.n) -> number {
+    when (n.nparams > 6) {
+        serr_node(n, "functions with more than 6 parameters are not implemented in Okular 0.2.")
+        note(n, "the 0.2 internal ABI passes up to 6 arguments in registers (docs/architecture.md §3.5); the limit lifts with the stack-args milestone.")
+    }
+    when (n.otype != null and n.otype.form == F_ARRAY) {
+        serr_node(n, "functions cannot return arrays directly in Okular.")
+        note(n, "return `ptr<array<T, N>>` instead (0.4, spec §12), or an element.")
+    }
+    when (is_record(n.otype)) {
+        type.text kindw = "unions"
+        when (is_union(n.otype) == false) {
+            kindw = "structs"
+        }
+        serr_node(n, "functions cannot return " + kindw + " directly in Okular 0.7.")
+        note(n, "return `ptr<" + ty_name(n.otype) + ">` (heap- or global-backed), or write into a pointer parameter (spec §12).")
+    }
+    return 0
+}
+
+function.collect_toplevel(type.ptr<type.Mod>.m, type.ptr<type.Node>.file, type.ptr<type.Scope>.scope) -> number {
+    cur_mod = m
+    loop (i from 0 until file.nbody) {
+        type.ptr<type.Node> n = file.body[i]
+        when (n.kind == parser.N_DIRECTIVE) {
+            when (n.feature < 0) {
+                continue
+            }
+            when (n.feature == 0) {
+                when (n.fvalue != 0) {
+                    m.ftext = 1
+                }
+                else {
+                    m.ftext = 0
+                }
+            }
+        }
+        else when (n.kind == parser.N_CONSTDECL) {
+            register_const_decl(scope, n)
+        }
+        else when (n.kind == parser.N_LANGCOL) {
+            type.text p = path_join(n.parts, n.nparts)
+            when (p != "source.files.use" and p != "libs.use") {
+                serr_node(n, "unknown language column `[" + p + "]`.")
+                note(n, "the language columns in 0.1 are: [libs.use], [source.files.use].")
+                note(n, "developer columns are plain names: `physics = { ... }.end`.")
+            }
+        }
+        else when (n.kind == parser.N_DEVCOL) {
+            collect_devcol(m, n, scope, "")
+        }
+        else when (n.kind == parser.N_FUNC) {
+            type.ptr<type.Symbol> ex = scope_insert(scope, n.name, SYM_FUNC, n.line, n.col)
+            when (ex.kind != SYM_FUNC or (ex.decl != null and ex.decl != n)) {
+                serr_node(n, "duplicate definition of `" + n.name + "` in this scope.")
+                serr_node(ex.decl, "`" + n.name + "` was first defined here.")
+                continue
+            }
+            ex.decl = n
+            check_func_decl_shape(m, n)
+                        type.text mg = mangle(m.name, "", n.name)
+            type.ptr<type.Ty> fret = n.otype
+            when (fret == null) {
+                fret = T_VOID
+            }
+            type.ptr<type.FuncInfo> fi = funcinfo_new(n.name, mg, fret, n, m)
+            fi.nparams = n.nparams
+            type.ptr<type.ptr<type.Ty>> pt = alloc<type.ptr<type.Ty>>(n.nparams + 1)
+            type.ptr<type.text> pn = alloc<type.text>(n.nparams + 1)
+            loop (k from 0 until n.nparams) {
+                pt[k] = n.ptypes[k]
+                pn[k] = n.pnames[k]
+            }
+            fi.ptypes = pt
+            fi.pnames = pn
+            ex.func = fi
+            n.finfo = fi
+        }
+        else when (n.kind == parser.N_VARDECL) {
+            type.ptr<type.Symbol> ex = scope_insert(scope, n.name, SYM_VAR, n.line, n.col)
+            when (ex.kind != SYM_VAR or (ex.decl != null and ex.decl != n)) {
+                serr_node(n, "duplicate definition of `" + n.name + "` in this scope.")
+                continue
+            }
+            ex.ty = n.otype
+            ex.decl = n
+            ex.is_global = 1
+            ex.mangled = mangle(m.name, "", n.name)
+            n.sym = ex
+        }
+    }
+    return 0
+}
+
+# check one column's members with the column's namespace scope
+function.check_column(type.ptr<type.Node>.col, type.ptr<type.Scope>.ns) -> number {
+    loop (k from 0 until col.nbody) {
+        type.ptr<type.Node> mem = col.body[k]
+        when (mem.kind == parser.N_FUNC) {
+            when (mem.finfo != null) {
+                cur_scope = ns
+                check_func_body(mem, mem.finfo)
+            }
+        }
+        else when (mem.kind == parser.N_VARDECL) {
+            cur_scope = ns
+            infer_auto_type(mem)
+            cur_scope = ns
+            when (is_record(mem.otype)) {
+                type.text what = "struct `" + col.name + "." + mem.name + "`"
+                when (is_union(mem.otype)) {
+                    what = "union `" + col.name + "." + mem.name + "`"
+                }
+                when (mem.a.kind != parser.N_ARRAYLIT) {
+                    serr_node(mem, "the initializer of `" + col.name + "." + mem.name + "` must be a literal `{ ... }`.")
+                    note(mem, "global initializers must be compile-time constants (spec §7).")
+                    cur_scope = ns
+                    check_expr(mem.a)
+                }
+                else {
+                    type.ptr<type.ConstVal> cv = check_struct_lit_const(mem.a, mem.otype, what)
+                    when (mem.sym != null) {
+                        mem.sym.cval = cv
+                    }
+                }
+                continue
+            }
+            when (mem.otype != null and mem.otype.form == F_ARRAY) {
+                type.text what = "array `" + col.name + "." + mem.name + "`"
+                when (mem.a.kind != parser.N_ARRAYLIT) {
+                    serr_node(mem, "the initializer of `" + col.name + "." + mem.name + "` must be an array literal `{ ... }`.")
+                    note(mem, "global initializers must be compile-time constants (spec §7).")
+                    cur_scope = ns
+                    check_expr(mem.a)
+                }
+                else {
+                    type.ptr<type.ConstVal> cv = check_array_lit_const(mem.a, mem.otype, what)
+                    when (mem.sym != null) {
+                        mem.sym.cval = cv
+                    }
+                }
+                continue
+            }
+            when (mem.a.kind == parser.N_ARRAYLIT) {
+                serr_node(mem, "`" + col.name + "." + mem.name + "` is `" + ty_name(mem.otype) + "`, but the initializer is an array literal.")
+                continue
+            }
+            type.number mark = n_errors
+            type.ptr<type.ConstVal> cv = const_eval(mem.a)
+            when (cv == null) {
+                cur_scope = ns
+                check_expr(mem.a)
+                when (n_errors == mark) {
+                    mark = n_errors
+                    cv = const_eval(mem.a)
+                }
+            }
+            when (cv == null) {
+                when (n_errors == mark) {
+                    serr_node(mem, "the initializer of `" + col.name + "." + mem.name + "` is not a compile-time constant.")
+                    note(mem, "global initializers must be literal or foldable values in 0.1 (spec §7); use main.ok top-level statements for computed setup.")
+                }
+            }
+            else {
+                when (const_into_type(mem.a, cv, mem.otype) == false) {
+                    serr_node(mem, "`" + col.name + "." + mem.name + "` is `" + ty_name(mem.otype) + "`, but the initializer is `" + ty_name(cv.ty) + "`.")
+                }
+                when (mem.sym != null) {
+                    mem.sym.cval = cv
+                }
+            }
+        }
+        else when (mem.kind == parser.N_DEVCOL) {
+            type.ptr<type.Symbol> nested = scope_find_local(ns, mem.name)
+            when (nested != null and nested.ns != null) {
+                check_column(mem, nested.ns)
+            }
+        }
+    }
+    return 0
+}
+
+# check one module's declarations and bodies
+function.check_module(type.ptr<type.Mod>.m, type.ptr<type.Scope>.scope) -> number {
+    cur_mod = m
+    cur_scope = scope
+
+    loop (i from 0 until m.ast.nbody) {
+        type.ptr<type.Node> n = m.ast.body[i]
+        when (n.kind == parser.N_FUNC) {
+            when (n.finfo != null) {
+                cur_scope = scope
+                check_func_body(n, n.finfo)
+            }
+        }
+        else when (n.kind == parser.N_VARDECL) {
+            # global: initializer must be a compile-time constant (spec §7)
+            cur_scope = scope
+            infer_auto_type(n)
+            cur_scope = scope
+            when (is_record(n.otype)) {
+                type.text what = "global struct `" + n.name + "`"
+                when (is_union(n.otype)) {
+                    what = "global union `" + n.name + "`"
+                }
+                when (n.a.kind != parser.N_ARRAYLIT) {
+                    serr_node(n, "the initializer of " + what + " must be a literal `{ ... }`.")
+                    note(n, "global initializers must be compile-time constants (spec §7).")
+                    cur_scope = scope
+                    check_expr(n.a)
+                }
+                else {
+                    type.ptr<type.ConstVal> cv = check_struct_lit_const(n.a, n.otype, what)
+                    when (n.sym != null) {
+                        n.sym.cval = cv
+                    }
+                }
+                continue
+            }
+            when (n.otype != null and n.otype.form == F_ARRAY) {
+                type.text what = "global array `" + n.name + "`"
+                when (n.a.kind != parser.N_ARRAYLIT) {
+                    serr_node(n, "the initializer of global array `" + n.name + "` must be an array literal `{ ... }`.")
+                    note(n, "global initializers must be compile-time constants (spec §7).")
+                    cur_scope = scope
+                    check_expr(n.a)
+                }
+                else {
+                    type.ptr<type.ConstVal> cv = check_array_lit_const(n.a, n.otype, what)
+                    when (n.sym != null) {
+                        n.sym.cval = cv
+                    }
+                }
+                continue
+            }
+            when (n.a.kind == parser.N_ARRAYLIT) {
+                serr_node(n, "variable `" + n.name + "` is `" + ty_name(n.otype) + "`, but the initializer is an array literal.")
+                continue
+            }
+            type.number mark = n_errors
+            type.ptr<type.ConstVal> cv = const_eval(n.a)
+            when (cv == null) {
+                cur_scope = scope
+                check_expr(n.a)
+                when (n_errors == mark) {
+                    mark = n_errors
+                    cv = const_eval(n.a)
+                }
+            }
+            when (cv == null) {
+                when (n_errors == mark) {
+                    serr_node(n, "the initializer of global `" + n.name + "` is not a compile-time constant.")
+                    note(n, "global initializers must be literal or foldable values in 0.1 (spec §7); use main.ok top-level statements for computed setup.")
+                }
+            }
+            else {
+                when (const_into_type(n.a, cv, n.otype) == false) {
+                    serr_node(n, "variable `" + n.name + "` is `" + ty_name(n.otype) + "`, but the initializer is `" + ty_name(cv.ty) + "`.")
+                }
+                when (n.sym != null) {
+                    n.sym.cval = cv
+                }
+            }
+        }
+        else when (n.kind == parser.N_DEVCOL) {
+            type.ptr<type.Symbol> colsym = scope_find_local(scope, n.name)
+            when (colsym != null and colsym.ns != null) {
+                check_column(n, colsym.ns)
+            }
+        }
+        else when (n.kind == parser.N_DIRECTIVE or n.kind == parser.N_LANGCOL or n.kind == parser.N_STRUCTDECL or n.kind == parser.N_UNIONDECL or n.kind == parser.N_CONSTDECL) {
+            # collected/validated in phase 1
+        }
+        else {
+            # statements: only legal in main.ok (spec §7)
+            when (m.name != "main") {
+                serr_node(n, "top-level statements are only allowed in `main.ok`.")
+                note(n, "source files expose declarations; their code runs when called (spec §6.2).")
+                continue
+            }
+            # main top level runs as the entry function: return = exit code
+            when (m.entry == null) {
+                m.entry = funcinfo_new("__ok_entry", "__ok_entry", T_NUMBER, null, m)
+                m.entry.is_entry = 1
+            }
+            cur_func = m.entry
+            cur_scope = scope
+            check_stmt(n)
+            cur_func = null
+        }
+    }
+    return 0
+}
+
+# ---------------- the driver: sema_run ----------------
+
+function.sema_run() -> number {
+    init_types()
+    root_scope = scope_new(null)
+    cur_mod = null
+    cur_scope = null
+    cur_func = null
+    in_loop = 0
+    n_sites = 0
+
+    type.number errmark = n_errors
+
+    # phase 1: collect symbols, module scopes
+    loop (i from 0 until n_mods) {
+        type.ptr<type.Mod> m = all_mods[i]
+        when (m.state != 1) {
+            continue
+        }
+        when (m.name == "main") {
+            collect_toplevel(m, m.ast, root_scope)
+        }
+        else {
+            type.ptr<type.Scope> mscope = scope_new(root_scope)
+            collect_toplevel(m, m.ast, mscope)
+            # bind the module namespace into root (spec §6.2)
+            type.ptr<type.Symbol> bind = scope_insert(root_scope, m.name, SYM_NS, 0, 0)
+            when (bind.ns != null and bind.ns != mscope) {
+                serr_line(0, 0, "module name `" + m.name + "` collides with another module or a main.ok column.")
+            }
+            bind.ns = mscope
+        }
+    }
+
+    # phase 1.5: register + lay out struct types (fill placeholders in place)
+    loop (i from 0 until n_mods) {
+        type.ptr<type.Mod> m = all_mods[i]
+        when (m.state != 1) {
+            continue
+        }
+        type.ptr<type.Scope> mscope = root_scope
+        when (m.name != "main") {
+            type.ptr<type.Symbol> bs = scope_find_local(root_scope, m.name)
+            when (bs != null and bs.ns != null) {
+                mscope = bs.ns
+            }
+        }
+        collect_structs_in(m, m.ast, mscope)
+    }
+    layout_all_structs()
+
+    # phase 2: check bodies
+    loop (i from 0 until n_mods) {
+        type.ptr<type.Mod> m = all_mods[i]
+        when (m.state != 1) {
+            continue
+        }
+        type.ptr<type.Scope> mscope = root_scope
+        when (m.name != "main") {
+            type.ptr<type.Symbol> bs = scope_find_local(root_scope, m.name)
+            when (bs != null and bs.ns != null) {
+                mscope = bs.ns
+            }
+        }
+        type.number mark = n_errors
+        check_module(m, mscope)
+        when (n_errors > mark) {
+            m.broken = 1
+        }
+    }
+
+    when (n_errors == errmark) {
+        return 1
+    }
+    return 0
+}
+
+# ---- driver-facing accessors ----
+
+function.mod_count() -> number {
+    return n_mods
+}
+
+function.mod_at(number.i) -> type.ptr<type.Mod> {
+    return all_mods[i]
+}
+
+function.set_cur_mod(type.ptr<type.Mod>.m) -> number {
+    cur_mod = m
+    return 0
+}
+
+function.render_all() -> number {
+    # diagnostics to stderr: <file>:<line>:<col>: error|warning|note: <msg>
+    loop (i from 0 until diag_n) {
+        type.text line = diag_file[i]
+        when (diag_line[i] > 0) {
+            line = line + ":" + number.to_text(diag_line[i]) + ":" + number.to_text(diag_col[i])
+        }
+        when (diag_sev[i] == 1) {
+            line = line + ": error: " + diag_msg[i]
+        }
+        else when (diag_sev[i] == 0) {
+            line = line + ": warning: " + diag_msg[i]
+        }
+        else {
+            line = line + ": " + diag_msg[i]
+        }
+        sys.write(2, line + "\n")
+    }
+    when (n_errors > 0) {
+        sys.write(2, "okular: " + number.to_text(n_errors) + " error(s) were reported.\n")
+    }
+    return 0
+}

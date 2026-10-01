@@ -1,0 +1,488 @@
+# elf.ok — the native ELF64 writer, written in Okular (M5).
+#
+# Grows the M4 assembler seed into a full backend output layer: a code
+# segment (R+X: headers, code, rodata), a data segment (RW: initialized
+# globals + zero-fill bss), symbols across both, and two fixup kinds
+# (REL32 for calls/jumps, ABS64 for absolute addresses in code and data).
+# No `as`, no `ld` — the emitted file is the executable.
+
+const.BASE = 4194304          # 0x400000 — the traditional static base
+const.CODE_OFF = 176          # 64 (ehdr) + 56 (phdr) + 56 (phdr)
+const.PAGE = 4096
+
+# ---- growable byte buffers ----
+
+struct.Buf = {
+    type.ptr<type.byte> data
+    type.number len
+    type.number cap
+}.end
+
+function.buf_new() -> type.ptr<type.Buf> {
+    type.ptr<type.Buf> b = alloc<type.Buf>(1)
+    b.data = null
+    b.len = 0
+    b.cap = 0
+    return b
+}
+
+function.buf_reserve(type.ptr<type.Buf>.b, number.need) -> number {
+    when (b.len + need <= b.cap) {
+        return 0
+    }
+    type.number newcap = 256
+    when (b.cap > 0) {
+        newcap = b.cap * 2
+    }
+    loop (b.len + need > newcap) {
+        newcap = newcap * 2
+    }
+    type.ptr<type.byte> nd = alloc<type.byte>(newcap)
+    loop (i from 0 until b.len) {
+        nd[i] = b.data[i]
+    }
+    type.ptr<type.byte> old = b.data
+    b.data = nd
+    b.cap = newcap
+    when (old != null) {
+        release(old)
+    }
+    return 0
+}
+
+function.buf_put(type.ptr<type.Buf>.b, number.v) -> number {
+    buf_reserve(b, 1)
+    b.data[b.len] = number.to_uint8(v)
+    b.len = b.len + 1
+    return 0
+}
+
+function.buf_put32(type.ptr<type.Buf>.b, number.v) -> number {
+    buf_reserve(b, 4)
+    b.data[b.len] = number.to_uint8(v & 255)
+    b.data[b.len + 1] = number.to_uint8((v >> 8) & 255)
+    b.data[b.len + 2] = number.to_uint8((v >> 16) & 255)
+    b.data[b.len + 3] = number.to_uint8((v >> 24) & 255)
+    b.len = b.len + 4
+    return 0
+}
+
+function.buf_put64(type.ptr<type.Buf>.b, number.v) -> number {
+    buf_put32(b, v & 4294967295)
+    buf_put32(b, (v >> 32) & 4294967295)
+    return 0
+}
+
+function.buf_at(type.ptr<type.Buf>.b, number.off) -> number {
+    return b.data[off]
+}
+
+function.buf_wr16_at(type.ptr<type.Buf>.b, number.off, number.v) -> number {
+    b.data[off] = number.to_uint8(v & 255)
+    b.data[off + 1] = number.to_uint8((v >> 8) & 255)
+    return 0
+}
+
+function.buf_wr32_at(type.ptr<type.Buf>.b, number.off, number.v) -> number {
+    b.data[off] = number.to_uint8(v & 255)
+    b.data[off + 1] = number.to_uint8((v >> 8) & 255)
+    b.data[off + 2] = number.to_uint8((v >> 16) & 255)
+    b.data[off + 3] = number.to_uint8((v >> 24) & 255)
+    return 0
+}
+
+function.buf_wr64_at(type.ptr<type.Buf>.b, number.off, number.v) -> number {
+    buf_wr32_at(b, off, v & 4294967295)
+    buf_wr32_at(b, off + 4, (v >> 32) & 4294967295)
+    return 0
+}
+
+# ---- the image under construction ----
+
+type.ptr<type.Buf> code = null       # RX: machine code
+type.ptr<type.Buf> rodata = null     # RX: text literals + trap strings
+type.ptr<type.Buf> dat = null        # RW: initialized globals
+type.number bss_size = 0
+type.number entry_off = 0            # code offset of _start
+
+# ---- symbols ----
+# segment: 0 = code (RX), 1 = rodata (RX), 2 = data (RW)
+
+type.ptr<type.text> sym_name = null
+type.ptr<type.number> sym_seg = null
+type.ptr<type.number> sym_off = null
+type.number nsym = 0
+type.number sym_cap = 0
+
+function.sym_reset() -> number {
+    nsym = 0
+    code = buf_new()
+    rodata = buf_new()
+    dat = buf_new()
+    bss_size = 0
+    entry_off = 0
+    nfx = 0
+    return 0
+}
+
+function.sym_grow() -> number {
+    type.number newcap = 64
+    when (sym_cap > 0) {
+        newcap = sym_cap * 2
+    }
+    type.ptr<type.text> nn = alloc<type.text>(newcap)
+    type.ptr<type.number> ns = alloc<type.number>(newcap)
+    type.ptr<type.number> no = alloc<type.number>(newcap)
+    loop (i from 0 until nsym) {
+        nn[i] = sym_name[i]
+        ns[i] = sym_seg[i]
+        no[i] = sym_off[i]
+    }
+    type.ptr<type.text> on = sym_name
+    type.ptr<type.number> os = sym_seg
+    type.ptr<type.number> oo = sym_off
+    sym_name = nn
+    sym_seg = ns
+    sym_off = no
+    sym_cap = newcap
+    when (on != null) {
+        release(on)
+        release(os)
+        release(oo)
+    }
+    return 0
+}
+
+function.sym_def(text.name, number.seg, number.off) -> number {
+    when (nsym == sym_cap) {
+        sym_grow()
+    }
+    sym_name[nsym] = name
+    sym_seg[nsym] = seg
+    sym_off[nsym] = off
+    nsym = nsym + 1
+    return nsym - 1
+}
+
+# symbol vaddr in the final image
+function.sym_addr(number.id) -> number {
+    type.number seg = sym_seg[id]
+    type.number off = sym_off[id]
+    when (seg == 0) {
+        return BASE + CODE_OFF + off
+    }
+    when (seg == 1) {
+        return BASE + CODE_OFF + code.len + off
+    }
+    # data segment base
+    return data_vaddr() + off
+}
+
+# ---- fixups ----
+# kind 0 = REL32 (call/jmp, in code), kind 1 = ABS64 (code or data)
+
+type.ptr<type.number> fx_kind = null
+type.ptr<type.number> fx_seg = null
+type.ptr<type.number> fx_off = null
+type.ptr<type.number> fx_sym = null
+type.ptr<type.number> fx_add = null
+type.number nfx = 0
+type.number fx_cap = 0
+
+function.fx_grow() -> number {
+    type.number newcap = 256
+    when (fx_cap > 0) {
+        newcap = fx_cap * 2
+    }
+    type.ptr<type.number> nk = alloc<type.number>(newcap)
+    type.ptr<type.number> ns = alloc<type.number>(newcap)
+    type.ptr<type.number> no = alloc<type.number>(newcap)
+    type.ptr<type.number> nt = alloc<type.number>(newcap)
+    type.ptr<type.number> na = alloc<type.number>(newcap)
+    loop (i from 0 until nfx) {
+        nk[i] = fx_kind[i]
+        ns[i] = fx_seg[i]
+        no[i] = fx_off[i]
+        nt[i] = fx_sym[i]
+        na[i] = fx_add[i]
+    }
+    type.ptr<type.number> ok = fx_kind
+    type.ptr<type.number> os = fx_seg
+    type.ptr<type.number> oo = fx_off
+    type.ptr<type.number> ot = fx_sym
+    type.ptr<type.number> oa = fx_add
+    fx_kind = nk
+    fx_seg = ns
+    fx_off = no
+    fx_sym = nt
+    fx_add = na
+    fx_cap = newcap
+    when (ok != null) {
+        release(ok)
+        release(os)
+        release(oo)
+        release(ot)
+        release(oa)
+    }
+    return 0
+}
+
+function.fx_rel32(number.seg, number.off, number.sym) -> number {
+    when (nfx == fx_cap) {
+        fx_grow()
+    }
+    fx_kind[nfx] = 0
+    fx_seg[nfx] = seg
+    fx_off[nfx] = off
+    fx_sym[nfx] = sym
+    fx_add[nfx] = 0
+    nfx = nfx + 1
+    return 0
+}
+
+function.fx_abs64(number.seg, number.off, number.sym, number.addend) -> number {
+    when (nfx == fx_cap) {
+        fx_grow()
+    }
+    fx_kind[nfx] = 1
+    fx_seg[nfx] = seg
+    fx_off[nfx] = off
+    fx_sym[nfx] = sym
+    fx_add[nfx] = addend
+    nfx = nfx + 1
+    return 0
+}
+
+# ---- segment geometry ----
+
+function.align_up(number.v, number.a) -> number {
+    return (v + a - 1) & ~(a - 1)
+}
+
+# RX segment: [ehdr][phdrs][code][rodata]
+function.rx_end() -> number {
+    return CODE_OFF + code.len + rodata.len
+}
+
+function.data_vaddr() -> number {
+    return BASE + align_up(rx_end(), PAGE)
+}
+
+function.data_file_off() -> number {
+    return align_up(rx_end(), PAGE)
+}
+
+# ---- the ELF emitter ----
+
+function.emit_elf(text.path) -> number {
+    type.number rx_filesz = rx_end()
+    type.number dv = data_vaddr()
+    type.number dfo = data_file_off()
+    type.number dfilesz = dat.len
+    type.number dmemsz = dat.len + bss_size
+    type.number total = dfo + dfilesz
+
+    # ---- the file image (headers + code + rodata) ----
+    type.ptr<type.Buf> img = buf_new()
+
+    # ELF64 header
+    buf_put(img, 127)          # EI_MAG0 \x7f
+    buf_put(img, 69)           # 'E'
+    buf_put(img, 76)           # 'L'
+    buf_put(img, 70)           # 'F'
+    buf_put(img, 2)            # EI_CLASS: 64-bit
+    buf_put(img, 1)            # EI_DATA: little endian
+    buf_put(img, 1)            # EI_VERSION
+    buf_put(img, 0)            # EI_OSABI: SYSV
+    loop (i from 8 until 16) {
+        buf_put(img, 0)
+    }
+    buf_put16(img, 2)          # e_type: ET_EXEC
+    buf_put16(img, 62)         # e_machine: x86-64
+    buf_put32(img, 1)          # e_version
+    buf_put64(img, BASE + CODE_OFF + entry_off)   # e_entry
+    buf_put64(img, 64)         # e_phoff
+    buf_put64(img, 0)          # e_shoff
+    buf_put32(img, 0)          # e_flags
+    buf_put16(img, 64)         # e_ehsize
+    buf_put16(img, 56)         # e_phentsize
+    buf_put16(img, 2)          # e_phnum
+    buf_put16(img, 0)          # e_shentsize
+    buf_put16(img, 0)          # e_shnum
+    buf_put16(img, 0)          # e_shstrndx
+
+    # program header 1: R+X at BASE, covers headers+code+rodata
+    buf_put32(img, 1)          # p_type: PT_LOAD
+    buf_put32(img, 5)          # p_flags: R+X
+    buf_put64(img, 0)          # p_offset
+    buf_put64(img, BASE)       # p_vaddr
+    buf_put64(img, BASE)       # p_paddr
+    buf_put64(img, rx_filesz)  # p_filesz
+    buf_put64(img, rx_filesz)  # p_memsz
+    buf_put64(img, PAGE)       # p_align
+
+    # program header 2: RW at page-aligned vaddr, data + bss
+    buf_put32(img, 1)          # p_type: PT_LOAD
+    buf_put32(img, 6)          # p_flags: R+W
+    buf_put64(img, dfo)        # p_offset
+    buf_put64(img, dv)         # p_vaddr
+    buf_put64(img, dv)         # p_paddr
+    buf_put64(img, dfilesz)    # p_filesz
+    buf_put64(img, dmemsz)     # p_memsz
+    buf_put64(img, PAGE)       # p_align
+
+    # code bytes
+    loop (i from 0 until code.len) {
+        buf_put(img, code.data[i])
+    }
+    # rodata bytes
+    loop (i from 0 until rodata.len) {
+        buf_put(img, rodata.data[i])
+    }
+    # pad to the data file offset
+    loop (img.len < dfo) {
+        buf_put(img, 0)
+    }
+    # data bytes
+    loop (i from 0 until dat.len) {
+        buf_put(img, dat.data[i])
+    }
+
+    # ---- apply fixups ----
+    loop (i from 0 until nfx) {
+        type.number kind = fx_kind[i]
+        type.number seg = fx_seg[i]
+        type.number off = fx_off[i]
+        type.number target = sym_addr(fx_sym[i]) + fx_add[i]
+        when (kind == 0) {
+            # rel32 in code: target - (fixup site + 4)
+            type.number site = BASE + CODE_OFF + off
+            type.number rel = target - site - 4
+            buf_wr32_at(img, CODE_OFF + off, rel & 4294967295)
+        }
+        else {
+            # abs64: 8 bytes at the segment position
+            type.number at = 0
+            when (seg == 0) {
+                at = CODE_OFF + off
+            }
+            else when (seg == 1) {
+                at = CODE_OFF + code.len + off
+            }
+            else {
+                at = dfo + off
+            }
+            buf_wr64_at(img, at, target)
+        }
+    }
+
+    # ---- write the file ----
+    type.text blob = text.from_bytes(img.data, img.len)
+    type.number n = fs.save(path, blob)
+    when (n != img.len) {
+        return 1
+    }
+    return 0
+}
+
+function.buf_put16(type.ptr<type.Buf>.b, number.v) -> number {
+    buf_reserve(b, 2)
+    b.data[b.len] = number.to_uint8(v & 255)
+    b.data[b.len + 1] = number.to_uint8((v >> 8) & 255)
+    b.len = b.len + 2
+    return 0
+}
+
+# ---- accessors for the backend (emit.ok) ----
+
+function.code_len() -> number {
+    return code.len
+}
+
+function.rodata_len() -> number {
+    return rodata.len
+}
+
+function.data_len() -> number {
+    return dat.len
+}
+
+function.sym_count() -> number {
+    return nsym
+}
+
+function.sym_name_at(number.i) -> text {
+    return sym_name[i]
+}
+
+function.sym_offset_set(number.id, number.off) -> number {
+    sym_off[id] = off
+    return 0
+}
+
+# append bytes to the rodata buffer; returns the offset where they landed
+function.rodata_append(text.bytes) -> number {
+    type.number off = rodata.len
+    type.number n = text.length(bytes)
+    loop (i from 0 until n) {
+        buf_put(rodata, text.byte_at(bytes, i))
+    }
+    return off
+}
+
+# data buffer helpers for global emission
+function.data_len_now() -> number {
+    return dat.len
+}
+
+function.data_align(number.a) -> number {
+    type.number pad = (a - (dat.len % a)) % a
+    loop (i from 0 until pad) {
+        buf_put(dat, 0)
+    }
+    return 0
+}
+
+function.data_put(number.b) -> number {
+    buf_put(dat, b & 255)
+    return 0
+}
+
+function.data_put32(number.v) -> number {
+    buf_put32(dat, v & 4294967295)
+    return 0
+}
+
+function.data_put64(number.v) -> number {
+    buf_put64(dat, v)
+    return 0
+}
+
+function.data_fx_abs64(number.off, number.sym, number.addend) -> number {
+    return fx_abs64(2, off, sym, addend)
+}
+
+# decimal bits as an integer (for .data emission and I_CONST_DEC):
+# store the double through a ptr<decimal>, read the bytes back through a
+# ptr<byte> at the same address, and assemble the little-endian word —
+# wrapping arithmetic keeps the two's-complement bit pattern exact
+function.pot256(number.i) -> number {
+    type.number w = 1
+    loop (k from 0 until i) {
+        w = w * 256
+    }
+    return w
+}
+
+function.dec_bits(decimal.d) -> number {
+    type.ptr<type.decimal> pd = alloc<type.decimal>(1)
+    pd[0] = d
+    type.ptr<type.byte> pb = number.to_ptr(ptr.to_number(pd))
+    type.number v = 0
+    type.number w = 1
+    loop (i from 0 until 8) {
+        v = v + pb[i] * w
+        w = w * 256
+    }
+    return v
+}

@@ -38,7 +38,7 @@ typedef int            b32;
 typedef _Bool           bool;
 
 #define OUTBUF_BYTES 65536
-#define TEXT_ARENA_BYTES (1 << 20)
+#define TEXT_ARENA_BYTES (16 << 20) /* 0.14: the self-hosted compiler is the heaviest Okular program */
 
 static u8 outbuf[OUTBUF_BYTES];
 static u64 outlen = 0;
@@ -116,6 +116,15 @@ static i64 sys_fstat(int fd, struct linux_stat *buf) {
  * conversion, the allocator, fs/env) is expressible in Okular on top of
  * these. Each wrapper is one syscall plus ABI adaptation; no logic. */
 
+static i64 sys_mkdir(const char *path, int mode) {
+    i64 ret;
+    __asm__ volatile ("syscall"
+                      : "=a"(ret)
+                      : "a"(83L), "D"(path), "S"((u64)(i64)mode)
+                      : "rcx", "r11", "memory");
+    return ret;
+}
+
 static i64 sys_chmod_(const char *path, int mode) {
     i64 ret;
     __asm__ volatile ("syscall"
@@ -162,6 +171,14 @@ u8 *rt_sys_mmap(u64 len) {
 
 void rt_sys_exit(i64 code) {
     sys_exit((int)code);
+}
+
+i64 rt_sys_mkdir(const u8 *path, u64 plen, i64 mode) {
+    char buf[256];
+    if (plen >= sizeof buf) return -36;
+    for (u64 i = 0; i < plen; i++) buf[i] = (char)path[i];
+    buf[plen] = 0;
+    return sys_mkdir(buf, (int)mode);
 }
 
 i64 rt_sys_chmod(const u8 *path, u64 plen, i64 mode) {
@@ -244,7 +261,7 @@ void rt_write_uint(u64 v) {
 
 static u8 *text_take(u64 len) {
     if (arena_used + len > TEXT_ARENA_BYTES)
-        rt_trap("text arena exhausted (1 MiB of text per run)",
+        rt_trap("text arena exhausted (16 MiB of text per run)",
                 62, 71);
     u8 *dst = text_arena + arena_used;
     arena_used += len;
@@ -425,7 +442,7 @@ void rt_print(void) {
 
 void rt_concat(void *out16, const u8 *lp, u64 ll, const u8 *rp, u64 rl) {
     if (arena_used + ll + rl > TEXT_ARENA_BYTES)
-        rt_trap("text arena exhausted (1 MiB of concatenation per run in 0.1)",
+        rt_trap("text arena exhausted (16 MiB of concatenation per run)",
                 62, 71);
     u8 *dst = text_arena + arena_used;
     for (u64 i = 0; i < ll; i++) dst[i] = lp[i];
