@@ -23,14 +23,14 @@ all: build/okular runtime/rt.o
 
 # the Okular-written lexer (M4, docs/roadmap.md): the bootstrap compiler
 # compiles it; --selfhost-lex then uses it as the compiler's tokenizer
-selfhost/lexer/build/output/main: build/okular selfhost/lexer/main.ok selfhost/lexer/src/lexer.ok
+selfhost/lexer/build/output/main: build/okular runtime/rt.o selfhost/lexer/main.ok selfhost/lexer/src/lexer.ok
 	cd selfhost/lexer && ../../build/okular --compile main.ok
 
 selfhost-lex: selfhost/lexer/build/output/main
 
 # the Okular-written parser (M4, docs/roadmap.md): the bootstrap compiler
 # compiles it; --selfhost-parse then uses it as the compiler's parser
-selfhost/parser/build/output/main: build/okular selfhost/parser/main.ok selfhost/parser/src/toks.ok selfhost/parser/src/parser.ok
+selfhost/parser/build/output/main: build/okular runtime/rt.o selfhost/parser/main.ok selfhost/parser/src/toks.ok selfhost/parser/src/parser.ok
 	cd selfhost/parser && ../../build/okular --compile main.ok
 
 selfhost-parse: selfhost/parser/build/output/main
@@ -38,7 +38,7 @@ selfhost-parse: selfhost/parser/build/output/main
 # the Okular-written runtime (M4, docs/roadmap.md): the output formatters,
 # text arena, conversion builtins, heap allocator, and file operations —
 # all in Okular, on the sys.* syscall floor (spec §6.6)
-selfhost/runtime/build/output/main: build/okular selfhost/runtime/main.ok selfhost/runtime/src/rt.ok
+selfhost/runtime/build/output/main: build/okular runtime/rt.o selfhost/runtime/main.ok selfhost/runtime/src/rt.ok
 	cd selfhost/runtime && ../../build/okular --compile main.ok
 
 selfhost-runtime: selfhost/runtime/build/output/main
@@ -46,7 +46,7 @@ selfhost-runtime: selfhost/runtime/build/output/main
 # the integrated assembler seed (M5): emits a native ELF64 executable
 # from Okular — ELF headers, machine code, symbol fixups, chmod — with
 # no `as` and no `ld` anywhere in the chain
-selfhost/assembler/build/output/main: build/okular selfhost/assembler/main.ok selfhost/assembler/src/elf.ok
+selfhost/assembler/build/output/main: build/okular runtime/rt.o selfhost/assembler/main.ok selfhost/assembler/src/elf.ok
 	cd selfhost/assembler && ../../build/okular --compile main.ok
 
 selfhost-assembler: selfhost/assembler/build/output/main
@@ -74,7 +74,7 @@ clean:
 
 # the Okular-written compiler (M5): the complete pipeline — project load,
 # sema, IR, x86-64 emission, native ELF64 — in one Okular program
-selfhost/compiler/build/output/main: build/okular selfhost/compiler/main.ok $(wildcard selfhost/compiler/src/*.ok)
+selfhost/compiler/build/output/main: build/okular runtime/rt.o selfhost/compiler/main.ok $(wildcard selfhost/compiler/src/*.ok)
 	cd selfhost/compiler && ../../build/okular --compile main.ok
 
 selfhost-compiler: selfhost/compiler/build/output/main
