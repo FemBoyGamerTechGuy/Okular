@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build, test, bootstrap chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the bootstrap compiler and all selfhost components
+        run: make selfhost-lex selfhost-parse selfhost-runtime selfhost-assembler selfhost-compiler
+
+      - name: Full test suite (positive / negative / policy / flags / differential)
+        run: bash tools/run_tests.sh
+
+      - name: Bootstrap chain (stage 0 -> 1 -> 2 -> 3, fixed point, self-build differential)
+        run: bash tools/run_bootstrap_chain.sh
+
+  release-package:
+    name: Package and test the real product
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build everything and run the bootstrap chain
+        run: |
+          make
+          bash tools/run_bootstrap_chain.sh
+
+      - name: Package the downloadable compiler and test it end-to-end
+        run: bash tools/package_release.sh
+
+      - name: Upload the compiler artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: okular-linux-x86_64
+          path: build/release/*.tar.gz
+          if-no-files-found: error
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: okular-linux-x86_64-checksums
+          path: build/release/*.sha256
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub release (tags only)
+    runs-on: ubuntu-latest
+    needs: release-package
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download the compiler artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: okular-linux-x86_64
+          path: dist
+
+      - name: Download checksums
+        uses: actions/download-artifact@v4
+        with:
+          name: okular-linux-x86_64-checksums
+          path: dist
+
+      - name: Create the release with the compiler binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          generate_release_notes: true
+          body: |
+            **Okular ${{ github.ref_name }}** — native compiler for linux-x86_64.
+
+            Download `okular-${{ github.ref_name }}-linux-x86_64.tar.gz`,
+            unpack, and compile your first program:
+
+                tar xzf okular-${{ github.ref_name }}-linux-x86_64.tar.gz
+                cd okular-${{ github.ref_name }}-linux-x86_64/examples/hello
+                ../../bin/okular main.ok
+                ./build/output/main
+
+            One native executable. No C compiler, no `as`, no `ld`, no
+            bootstrap required — the compiler emits standalone ELF64
+            binaries directly.

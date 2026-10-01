@@ -14,3 +14,6 @@ tests/tmp/
 # editor/os noise
 *.swp
 .DS_Store
+
+# release staging
+build/release/
