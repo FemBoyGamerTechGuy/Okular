@@ -5,6 +5,24 @@ before the test suite proves it.**
 
 ## Where we are
 
+**Okular 0.16 — the optimizer.** In addition to everything below, 0.16
+gives Okular its first real optimization subsystem: `-O1` runs an IR
+pass pipeline (dead-code elimination with provably-balanced dead-store
+replacement, control-flow simplification, algebraic peephole) and `-O2`
+switches the x86-64 backend to register-cached emission — exact
+liveness from the stack discipline, GP/XMM register classes,
+spill-the-deepest-cached policy, caller-saved flush at calls,
+store-to-load forwarding. Measured: fib(30) ~24% faster, binaries ~6%
+smaller, +11% compile time. Optimization is opt-in: the default build
+and the seed's byte-identical reproduction never depend on it, and the
+differential suite now triple-compiles every positive case at
+-O0/-O1/-O2 (233 -> 503 checks); the compiler self-compiles under -O2
+and that binary passes the whole suite. A latent 0.15 defect was found
+by the new stress tests and fixed: runtime (non-folded)
+`number.to_f32` emitted `cvtsi2sd` instead of `cvtsi2ss`, so any
+variable converted to `f32` produced `0.0` (constants were folded and
+masked it).
+
 **Okular 0.15 — match-style `when`, `f32`, and the standard library.**
 In addition to everything below, 0.15 gives the `when` keyword a second
 reading: `when (subject) { pattern { ... } ... else { ... } }` — equality
@@ -103,23 +121,26 @@ status table.
 pattern { ... } ... }` — literals, constants, `null`, inclusive `lo to hi`
 ranges, comma-separated alternatives, guards, exhaustiveness for `bool`
 subjects, duplicate/empty-range/misplaced-`else` diagnostics
-(`specs/spec-v0.15.md` §10.1). Struct patterns and destructuring remain
+(`specs/spec-v0.16.md` §10.1). Struct patterns and destructuring remain
 designed, not implemented.
 9. ~~**`f32`**~~ **done in 0.15**: a true 32-bit IEEE float — SSE
 single-precision arithmetic/comparisons, 4-byte storage (locals, globals,
 arrays, structs), one-rounding literals, Figueroa-safe bit-exact folding
 (division deliberately unfolded), exact widening to `decimal`, the full
 conversion family, NaN/inf/signed-zero shapes, scientific formatting
-for large magnitudes (`specs/spec-v0.15.md` §4.2).
+for large magnitudes (`specs/spec-v0.16.md` §4.2).
 10. ~~**Constants** (`const`), **type inference** (`type.auto`)~~ **done in 0.8**: `const.name = value` folds and inlines at compile time; `type.auto x = init` infers from the initializer (`specs/spec-v0.11.md` §8.1). ~~Const array lengths~~ **done in 0.14**: `type.array<T, NAME>` with module-visible constant names and dotted module paths (`specs/spec-v0.14.md` §8.4).
 11. ~~**Standard library beginnings**~~ **done in 0.15**: `[libs.use]`
     binds — a library is a module (`libs/`, `deps/`, the compiler's
     `stdlib/`, transitively). First modules: `math`, `text`, `io`,
-    `memory` (`specs/spec-v0.15.md` §6.3). The `oklib` packaged format
+    `memory` (`specs/spec-v0.16.md` §6.3). The `oklib` packaged format
     remains designed.
 12. **ARM64 backend** — second target proves the backend abstraction.
-13. **Optimizer framework** — register allocation, DCE, inlining on the IR;
-    constant folding already exists as the first pass.
+13. ~~**Optimizer framework**~~ **done in 0.16**: `-O1` IR passes (DCE,
+    control-flow simplification, peephole) and `-O2` register-cached
+    emission with spills/reloads and GP/XMM register classes
+    (`specs/spec-v0.16.md` §15). Inlining and cross-block dataflow
+    remain future work.
 14. ~~**Formatter**~~ **done in 0.15**: `okular fmt` — token-based,
     comment-preserving, semantics-preserving (byte-identical binaries
     from formatted sources), `--check` for CI; the repository formats

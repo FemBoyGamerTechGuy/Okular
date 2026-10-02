@@ -743,6 +743,9 @@ function.sym_for_fi(type.ptr<type.FuncInfo>.fi) -> number {
 function.gen_function(type.ptr<type.IrModule>.im, type.ptr<type.IrFunc>.f, number.seq) -> number {
     curf = f
     trap_seq = 0
+    when (trace_emit == 1) {
+        sys.write(2, "emit: " + f.fi.mangled + "\n")
+    }
 
     # slot offsets: locals occupy [rbp-locals_bytes, rbp)
     type.ptr<type.number> offs = alloc<type.number>(f.nslots + 1)
@@ -855,8 +858,18 @@ function.gen_function(type.ptr<type.IrModule>.im, type.ptr<type.IrFunc>.f, numbe
     }
 
     # body
+    ra_reset()
     loop (i from 0 until f.n) {
-        emit_inst(f.insts[i])
+        type.ptr<type.IrInst> nxt = null
+        when (i + 1 < f.n) {
+            nxt = f.insts[i + 1]
+        }
+        emit_inst2(f.insts[i], nxt)
+        when (ra_skip == 1) {
+            # a forwarded store folded the next load into itself
+            ra_skip = 0
+            i = i + 1
+        }
     }
 
     # implicit fall-off return: deterministic rax
@@ -1098,6 +1111,96 @@ function.emit_call(type.ptr<type.IrInst>.in) -> number {
 }
 
 # ---- binary operator emission ----
+# the f32 binop body: b bits in rcx, a bits in rax; result bits to rax
+# (xmm0/xmm1 are consumed as temporaries) — no stack
+function.emit_binop_f32_core(type.ptr<type.IrInst>.in) -> number {
+    # movd xmm1, ecx; movd xmm0, eax
+    put(0x66)
+    put(0x0F)
+    put(0x6E)
+    put(0xC9)
+    put(0x66)
+    put(0x0F)
+    put(0x6E)
+    put(0xC0)
+    when (in.op == parser.OP_ADD or in.op == parser.OP_SUB or in.op == parser.OP_MUL or in.op == parser.OP_DIV) {
+        # addss/subss/mulss/divss xmm0, xmm1
+        put(0xF3)
+        put(0x0F)
+        when (in.op == parser.OP_ADD) {
+            put(0x58)
+        }
+        else when (in.op == parser.OP_SUB) {
+            put(0x5C)
+        }
+        else when (in.op == parser.OP_MUL) {
+            put(0x59)
+        }
+        else {
+            put(0x5E)
+        }
+        put(0xC1)
+        # movd eax, xmm0
+        put(0x66)
+        put(0x0F)
+        put(0x7E)
+        put(0xC0)
+        return 0
+    }
+    # comparisons through ucomiss, with the NaN-aware equality shapes
+    when (in.op == parser.OP_EQ) {
+        # ucomiss xmm0, xmm1; sete al; setnp cl; and al, cl
+        put(0x0F)
+        put(0x2E)
+        put(0xC1)
+        setcc_al(0x4)
+        put(0x0F)
+        put(0x9B)
+        put(0xC1)
+        put(0x22)
+        put(0xC1)
+    }
+    else when (in.op == parser.OP_NEQ) {
+        put(0x0F)
+        put(0x2E)
+        put(0xC1)
+        setcc_al(0x5)
+        put(0x0F)
+        put(0x9A)
+        put(0xC1)
+        put(0x08)
+        put(0xC8)
+    }
+    else when (in.op == parser.OP_LT) {
+        # a < b <=> b > a: ucomiss xmm1, xmm0; seta al
+        put(0x0F)
+        put(0x2E)
+        put(0xC8)
+        setcc_al(0x7)
+    }
+    else when (in.op == parser.OP_LE) {
+        put(0x0F)
+        put(0x2E)
+        put(0xC8)
+        setcc_al(0x3)
+    }
+    else when (in.op == parser.OP_GT) {
+        put(0x0F)
+        put(0x2E)
+        put(0xC1)
+        setcc_al(0x7)
+    }
+    else {
+        # >= : ucomiss xmm0, xmm1; setae al
+        put(0x0F)
+        put(0x2E)
+        put(0xC1)
+        setcc_al(0x3)
+    }
+    movzx_rax_al()
+    return 0
+}
+
 function.emit_binop(type.ptr<type.IrInst>.in) -> number {
     # ---- f32 arithmetic and comparisons (0.15, spec §4.2) ----
     # f32 values travel the machine stack as raw bits in the low half;
@@ -1105,91 +1208,7 @@ function.emit_binop(type.ptr<type.IrInst>.in) -> number {
     when (in.ty == sema.T_F32 and (in.op == parser.OP_ADD or in.op == parser.OP_SUB or in.op == parser.OP_MUL or in.op == parser.OP_DIV or (in.op >= parser.OP_EQ and in.op <= parser.OP_GE))) {
         pop_rcx()  # b bits
         pop_rax()  # a bits
-        # movd xmm1, ecx; movd xmm0, eax
-        put(0x66)
-        put(0x0F)
-        put(0x6E)
-        put(0xC9)
-        put(0x66)
-        put(0x0F)
-        put(0x6E)
-        put(0xC0)
-        when (in.op == parser.OP_ADD or in.op == parser.OP_SUB or in.op == parser.OP_MUL or in.op == parser.OP_DIV) {
-            # addss/subss/mulss/divss xmm0, xmm1
-            put(0xF3)
-            put(0x0F)
-            when (in.op == parser.OP_ADD) {
-                put(0x58)
-            }
-            else when (in.op == parser.OP_SUB) {
-                put(0x5C)
-            }
-            else when (in.op == parser.OP_MUL) {
-                put(0x59)
-            }
-            else {
-                put(0x5E)
-            }
-            put(0xC1)
-            # movd eax, xmm0; push
-            put(0x66)
-            put(0x0F)
-            put(0x7E)
-            put(0xC0)
-            push_rax()
-            return 0
-        }
-        # comparisons through ucomiss, with the NaN-aware equality shapes
-        when (in.op == parser.OP_EQ) {
-            # ucomiss xmm0, xmm1; sete al; setnp cl; and al, cl
-            put(0x0F)
-            put(0x2E)
-            put(0xC1)
-            setcc_al(0x4)
-            put(0x0F)
-            put(0x9B)
-            put(0xC1)
-            put(0x22)
-            put(0xC1)
-        }
-        else when (in.op == parser.OP_NEQ) {
-            put(0x0F)
-            put(0x2E)
-            put(0xC1)
-            setcc_al(0x5)
-            put(0x0F)
-            put(0x9A)
-            put(0xC1)
-            put(0x08)
-            put(0xC8)
-        }
-        else when (in.op == parser.OP_LT) {
-            # a < b <=> b > a: ucomiss xmm1, xmm0; seta al
-            put(0x0F)
-            put(0x2E)
-            put(0xC8)
-            setcc_al(0x7)
-        }
-        else when (in.op == parser.OP_LE) {
-            put(0x0F)
-            put(0x2E)
-            put(0xC8)
-            setcc_al(0x3)
-        }
-        else when (in.op == parser.OP_GT) {
-            put(0x0F)
-            put(0x2E)
-            put(0xC1)
-            setcc_al(0x7)
-        }
-        else {
-            # >= : ucomiss xmm0, xmm1; setae al
-            put(0x0F)
-            put(0x2E)
-            put(0xC1)
-            setcc_al(0x3)
-        }
-        movzx_rax_al()
+        emit_binop_f32_core(in)
         push_rax()
         return 0
     }
@@ -1260,88 +1279,7 @@ function.emit_binop(type.ptr<type.IrInst>.in) -> number {
         put(0x10)
         put(0xC8)
         pop_xmm0()  # left -> xmm0
-        when (in.op == parser.OP_ADD) {
-            # addsd xmm0, xmm1
-            put(0xF2)
-            put(0x0F)
-            put(0x58)
-            put(0xC1)
-        }
-        else when (in.op == parser.OP_SUB) {
-            put(0xF2)
-            put(0x0F)
-            put(0x5C)
-            put(0xC1)
-        }
-        else when (in.op == parser.OP_MUL) {
-            put(0xF2)
-            put(0x0F)
-            put(0x59)
-            put(0xC1)
-        }
-        else when (in.op == parser.OP_DIV) {
-            put(0xF2)
-            put(0x0F)
-            put(0x5E)
-            put(0xC1)
-        }
-        else {
-            # comparisons through ucomisd
-            when (in.op == parser.OP_EQ) {
-                # ucomisd xmm0, xmm1; sete al; setnp cl; and al, cl
-                put(0x66)
-                put(0x0F)
-                put(0x2E)
-                put(0xC1)
-                setcc_al(0x4)
-                put(0x0F)
-                put(0x9B)
-                put(0xC1)
-                put(0x22)
-                put(0xC1)
-            }
-            else when (in.op == parser.OP_NEQ) {
-                put(0x66)
-                put(0x0F)
-                put(0x2E)
-                put(0xC1)
-                setcc_al(0x5)
-                put(0x0F)
-                put(0x9A)
-                put(0xC1)
-                put(0x08)
-                put(0xC8)
-            }
-            else when (in.op == parser.OP_LT) {
-                # a < b <=> b > a: ucomisd xmm1, xmm0; seta al
-                put(0x66)
-                put(0x0F)
-                put(0x2E)
-                put(0xC8)
-                setcc_al(0x7)
-            }
-            else when (in.op == parser.OP_LE) {
-                put(0x66)
-                put(0x0F)
-                put(0x2E)
-                put(0xC8)
-                setcc_al(0x3)
-            }
-            else when (in.op == parser.OP_GT) {
-                put(0x66)
-                put(0x0F)
-                put(0x2E)
-                put(0xC1)
-                setcc_al(0x7)
-            }
-            else when (in.op == parser.OP_GE) {
-                put(0x66)
-                put(0x0F)
-                put(0x2E)
-                put(0xC1)
-                setcc_al(0x3)
-            }
-        }
+        emit_binop_dec_ops(in)
         when (in.op <= parser.OP_MOD) {
             push_xmm0()
         }
@@ -1353,6 +1291,103 @@ function.emit_binop(type.ptr<type.IrInst>.in) -> number {
     }
 
     # integer / bool
+    pop_rcx()
+    pop_rax()
+    emit_binop_int_core(in)
+    push_rax()
+    return 0
+}
+
+# the decimal binop body: right in xmm1, left in xmm0; arithmetic leaves
+# the result in xmm0, comparisons zero-extend al into rax — no stack
+function.emit_binop_dec_ops(type.ptr<type.IrInst>.in) -> number {
+    when (in.op == parser.OP_ADD) {
+        # addsd xmm0, xmm1
+        put(0xF2)
+        put(0x0F)
+        put(0x58)
+        put(0xC1)
+    }
+    else when (in.op == parser.OP_SUB) {
+        put(0xF2)
+        put(0x0F)
+        put(0x5C)
+        put(0xC1)
+    }
+    else when (in.op == parser.OP_MUL) {
+        put(0xF2)
+        put(0x0F)
+        put(0x59)
+        put(0xC1)
+    }
+    else when (in.op == parser.OP_DIV) {
+        put(0xF2)
+        put(0x0F)
+        put(0x5E)
+        put(0xC1)
+    }
+    else {
+        # comparisons through ucomisd
+        when (in.op == parser.OP_EQ) {
+            # ucomisd xmm0, xmm1; sete al; setnp cl; and al, cl
+            put(0x66)
+            put(0x0F)
+            put(0x2E)
+            put(0xC1)
+            setcc_al(0x4)
+            put(0x0F)
+            put(0x9B)
+            put(0xC1)
+            put(0x22)
+            put(0xC1)
+        }
+        else when (in.op == parser.OP_NEQ) {
+            put(0x66)
+            put(0x0F)
+            put(0x2E)
+            put(0xC1)
+            setcc_al(0x5)
+            put(0x0F)
+            put(0x9A)
+            put(0xC1)
+            put(0x08)
+            put(0xC8)
+        }
+        else when (in.op == parser.OP_LT) {
+            # a < b <=> b > a: ucomisd xmm1, xmm0; seta al
+            put(0x66)
+            put(0x0F)
+            put(0x2E)
+            put(0xC8)
+            setcc_al(0x7)
+        }
+        else when (in.op == parser.OP_LE) {
+            put(0x66)
+            put(0x0F)
+            put(0x2E)
+            put(0xC8)
+            setcc_al(0x3)
+        }
+        else when (in.op == parser.OP_GT) {
+            put(0x66)
+            put(0x0F)
+            put(0x2E)
+            put(0xC1)
+            setcc_al(0x7)
+        }
+        else when (in.op == parser.OP_GE) {
+            put(0x66)
+            put(0x0F)
+            put(0x2E)
+            put(0xC1)
+            setcc_al(0x3)
+        }
+    }
+    return 0
+}
+
+# the integer binop body: b in rcx, a in rax, result to rax (no stack)
+function.emit_binop_int_core(type.ptr<type.IrInst>.in) -> number {
     type.number is_bool = 0
     when (in.ty == sema.T_BOOL) {
         is_bool = 1
@@ -1365,8 +1400,6 @@ function.emit_binop(type.ptr<type.IrInst>.in) -> number {
     when (in.op <= parser.OP_MOD or in.op >= parser.OP_BAND) {
         is_intop = 1
     }
-    pop_rcx()
-    pop_rax()
     when (in.op == parser.OP_ADD) {
         add_rr(R_RAX, R_RCX)
     }
@@ -1528,7 +1561,6 @@ function.emit_binop(type.ptr<type.IrInst>.in) -> number {
     when (is_intop == 1 and is_bool == 0) {
         emit_reencode(in.ty)
     }
-    push_rax()
     return 0
 }
 
@@ -1737,7 +1769,7 @@ function.emit_inst(type.ptr<type.IrInst>.in) -> number {
             else when (src == sema.T_BOOL) {
                 # cvtsi2ss xmm0, rax; movd eax, xmm0
                 pop_rax()
-                put(0xF2)
+                put(0xF3)
                 put(0x48)
                 put(0x0F)
                 put(0x2A)
@@ -1790,7 +1822,7 @@ function.emit_inst(type.ptr<type.IrInst>.in) -> number {
             else {
                 # signed integers: cvtsi2ss xmm0, rax; movd eax, xmm0
                 pop_rax()
-                put(0xF2)
+                put(0xF3)
                 put(0x48)
                 put(0x0F)
                 put(0x2A)
@@ -2353,6 +2385,12 @@ type.number cur_scratch = 0
 
 # set when emission hit an unresolvable symbol; the driver fails the build
 type.number emit_failed = 0
+type.number trace_emit = 0
+
+function.set_trace_emit(number.t) -> number {
+    trace_emit = t
+    return 0
+}
 
 function.emit_failed_flag() -> number {
     return emit_failed
@@ -2817,5 +2855,1413 @@ function.emit_start(number.entry_sym) -> number {
     call_sym(rt_sym("rt_exit"))
     # hlt (never reached)
     put(0xF4)
+    return 0
+}
+
+# =========================================================================
+# Register allocation (0.16, -O2): the virtual operand stack.
+#
+# The IR is a stack machine; the classic backend lowers every value
+# through push/pop on the machine stack. This layer keeps the top of the
+# operand stack in registers instead:
+#
+#   * every operand-stack value is a tracked UNIT (8 bytes; a text pair
+#     is two adjacent units: len below, ptr on top);
+#   * a unit lives in a GP register (rax rcx rdx rsi rdi r8-r11 — never
+#     rsp/rbp/rbx), an XMM register (decimals), or on the machine stack;
+#   * INVARIANT: the machine stack always holds the operand stack's
+#     deepest units in order (a prefix), and registers cache a suffix —
+#     the top values, which a stack machine consumes soonest. Spilling
+#     therefore evicts the deepest cached unit (push), which is exactly
+#     the value used furthest in the future;
+#   * consumers pop the top units into the specific registers each op
+#     needs (ra_need_gp/ra_need_xmm), which is where interference is
+#     resolved by moves;
+#   * labels, jumps, calls, and any instruction the cached paths do not
+#     cover flush everything to the machine stack (ra_flush), so the
+#     classic code always sees the stack shape it was written for.
+#
+# Liveness is exact (a unit's lifetime is production -> consumption),
+# interference is the set of simultaneously-live units, spills/reloads
+# are real machine-stack traffic, caller-saved registers are flushed
+# around calls, and register classes (GP vs XMM) are separate pools.
+# The default build (-O0) never runs this code.
+# =========================================================================
+type.number regmode = 0
+
+function.set_regmode(number.m) -> number {
+    regmode = m
+    return 0
+}
+
+# GP allocatable registers, in allocation-preference order (never rsp,
+# rbp, or rbx — rbx is the call-alignment anchor and callee-saved).
+const.GP_N = 9
+
+function.gp_at(number.k) -> number {
+    when (k == 0) { return R_RAX }
+    else when (k == 1) { return R_RCX }
+    else when (k == 2) { return R_RDX }
+    else when (k == 3) { return R_RSI }
+    else when (k == 4) { return R_RDI }
+    else when (k == 5) { return R_R8 }
+    else when (k == 6) { return R_R9 }
+    else when (k == 7) { return R_R10 }
+    return R_R11
+}
+
+# virtual stack state: vs_loc[u] = -1 (machine stack) | GP reg | 100+xmm;
+# vs_kind[u]: 0 = plain GP, 1 = GP pair low half (len), 2 = GP pair high
+# half (ptr), 3 = XMM. Units 0..vs_m-1 are stack-resident (the prefix);
+# units vs_m..vs_n-1 are register-resident (the cached suffix).
+type.ptr<type.number> vs_loc = null
+type.ptr<type.number> vs_kind = null
+type.number vs_n = 0
+type.number vs_m = 0
+type.number vs_cap = 0
+type.ptr<type.number> gp_owner = null
+type.ptr<type.number> xmm_owner = null
+# pins: registers holding CONSUMED-but-still-pending operand values (set
+# by ra_need_*, cleared by produce or at instruction end). A pinned
+# register is unowned but very much alive — never allocate or relocate
+# into one mid-instruction.
+type.ptr<type.number> gp_pin = null
+type.ptr<type.number> xmm_pin = null
+
+function.ra_reset() -> number {
+    vs_n = 0
+    vs_m = 0
+    when (gp_owner == null) {
+        gp_owner = alloc<type.number>(16)
+        xmm_owner = alloc<type.number>(16)
+        gp_pin = alloc<type.number>(16)
+        xmm_pin = alloc<type.number>(16)
+    }
+    loop (i from 0 until 12) {
+        gp_owner[i] =-1
+        gp_pin[i] = 0
+    }
+    loop (i from 0 until 8) {
+        xmm_owner[i] =-1
+        xmm_pin[i] = 0
+    }
+    return 0
+}
+
+function.ra_unpin_all() -> number {
+    loop (i from 0 until 12) {
+        gp_pin[i] = 0
+    }
+    loop (i from 0 until 8) {
+        xmm_pin[i] = 0
+    }
+    return 0
+}
+
+function.ra_reserve(number.need) -> number {
+    when (need <= vs_cap) {
+        return 0
+    }
+    type.number newcap = 64
+    when (vs_cap > 0) {
+        newcap = vs_cap * 2
+    }
+    loop (newcap < need) {
+        newcap = newcap * 2
+    }
+    type.ptr<type.number> nl = alloc<type.number>(newcap)
+    type.ptr<type.number> nk = alloc<type.number>(newcap)
+    loop (i from 0 until vs_n) {
+        nl[i] = vs_loc[i]
+        nk[i] = vs_kind[i]
+    }
+    type.ptr<type.number> old = vs_loc
+    type.ptr<type.number> oldk = vs_kind
+    vs_loc = nl
+    vs_kind = nk
+    vs_cap = newcap
+    when (old != null) {
+        release(old)
+    }
+    when (oldk != null) {
+        release(oldk)
+    }
+    return 0
+}
+
+# movq xmmX, rY (bits)
+function.movq_xmm_r(number.x, number.r) -> number {
+    put(0x66)
+    when (r >= 8) {
+        put(0x49)
+    }
+    else {
+        put(0x48)
+    }
+    put(0x0F)
+    put(0x6E)
+    put(0xC0 | ((x & 7) << 3) | (r & 7))
+    return 0
+}
+
+# write register-resident unit u onto the machine stack (top position)
+function.ra_push_unit(number.u) -> number {
+    type.number r = vs_loc[u]
+    when (r >= 100) {
+        # sub rsp, 8; movsd [rsp], xmmX
+        put(0x48)
+        put(0x83)
+        put(0xEC)
+        put(0x08)
+        put(0xF2)
+        put(0x0F)
+        put(0x11)
+        put(0x04 | (((r - 100) & 7) << 3))
+        put(0x24)
+        xmm_owner[r - 100] =-1
+    }
+    else {
+        push_reg(r)
+        gp_owner[r] =-1
+    }
+    vs_loc[u] =-1
+    return 0
+}
+
+# spill the deepest cached unit(s) — a pair's halves always travel together
+function.ra_spill_boundary() -> number {
+    when (vs_m >= vs_n) {
+        return 0
+    }
+    type.number k = vs_kind[vs_m]
+    ra_push_unit(vs_m)
+    when (k == 1) {
+        ra_push_unit(vs_m + 1)
+        vs_m = vs_m + 2
+    }
+    else {
+        vs_m = vs_m + 1
+    }
+    return 0
+}
+
+function.ra_flush() -> number {
+    loop (u from vs_m until vs_n) {
+        ra_push_unit(u)
+    }
+    vs_m = vs_n
+    return 0
+}
+
+function.ra_get_gp() -> number {
+    # find a free, un-pinned GP register and RESERVE it (-2): consecutive
+    # gets must never return the same register before their producers run
+    loop (true) {
+        loop (k from 0 until GP_N) {
+            type.number r = gp_at(k)
+            when (gp_owner[r] ==-1 and gp_pin[r] == 0) {
+                gp_owner[r] =-2
+                return r
+            }
+        }
+        # every GP register is owned by a live suffix unit: spill the
+        # deepest cached unit and retry (there is always one to spill)
+        when (vs_m >= vs_n) {
+            return R_RAX
+        }
+        ra_spill_boundary()
+    }
+    return R_RAX
+}
+
+function.ra_get_xmm() -> number {
+    loop (true) {
+        loop (x from 0 until 8) {
+            when (xmm_owner[x] ==-1 and xmm_pin[x] == 0) {
+                xmm_owner[x] =-2
+                return x
+            }
+        }
+        # all XMM registers owned: keep spilling the boundary until an
+        # XMM-class unit spills (a GP unit spilling frees a GP register,
+        # which does not help the XMM pool)
+        when (vs_m >= vs_n) {
+            return 0
+        }
+        ra_spill_boundary()
+    }
+    return 0
+}
+
+# make a specific register free without losing the value it holds
+function.ra_evict_gp(number.r) -> number {
+    when (gp_owner[r] ==-1 or gp_owner[r] ==-2) {
+        return 0
+    }
+    type.number u = gp_owner[r]
+    type.number r2 = ra_get_gp()
+    when (r2 == r) {
+        return 0
+    }
+    # the spill inside ra_get_gp may have spilled u itself
+    when (gp_owner[r] != u) {
+        gp_owner[r2] =-1
+        return 0
+    }
+    mov_rr(r2, r)
+    gp_owner[r2] = u
+    vs_loc[u] = r2
+    gp_owner[r] =-1
+    return 0
+}
+
+function.ra_evict_xmm(number.x) -> number {
+    when (xmm_owner[x] ==-1 or xmm_owner[x] ==-2) {
+        return 0
+    }
+    type.number u = xmm_owner[x]
+    type.number x2 = ra_get_xmm()
+    when (x2 == x) {
+        return 0
+    }
+    when (xmm_owner[x] != u) {
+        xmm_owner[x2] =-1
+        return 0
+    }
+    # movsd xmmX2, xmmX
+    put(0xF2)
+    put(0x0F)
+    put(0x10)
+    put(0xC0 | ((x2 & 7) << 3) | (x & 7))
+    xmm_owner[x2] = u
+    vs_loc[u] = 100 + x2
+    xmm_owner[x] =-1
+    return 0
+}
+
+# consume the top unit into a specific GP register (value ends up in r)
+function.ra_need_gp(number.r) -> number {
+    type.number u = vs_n - 1
+    when (vs_loc[u] != r) {
+        ra_evict_gp(r)
+    }
+    type.number loc = vs_loc[u]
+    when (loc == r) {
+        # already in place
+    }
+    else when (loc >= 0) {
+        mov_rr(r, loc)
+        gp_owner[loc] =-1
+    }
+    else {
+        pop_reg(r)
+    }
+    gp_owner[r] =-1
+    gp_pin[r] = 1
+    vs_n = vs_n - 1
+    when (vs_m > vs_n) {
+        vs_m = vs_n
+    }
+    return 0
+}
+
+# consume the top unit into a specific XMM register
+function.ra_need_xmm(number.x) -> number {
+    type.number u = vs_n - 1
+    when (vs_loc[u] != 100 + x) {
+        ra_evict_xmm(x)
+    }
+    type.number loc = vs_loc[u]
+    when (loc == 100 + x) {
+        # already in place
+    }
+    else when (loc >= 100) {
+        # movsd xmmX, xmmLOC
+        put(0xF2)
+        put(0x0F)
+        put(0x10)
+        put(0xC0 | ((x & 7) << 3) | ((loc - 100) & 7))
+        xmm_owner[loc - 100] =-1
+    }
+    else {
+        # movsd xmmX, [rsp]; add rsp, 8
+        put(0xF2)
+        put(0x0F)
+        put(0x10)
+        put(0x04 | ((x & 7) << 3))
+        put(0x24)
+        put(0x48)
+        put(0x83)
+        put(0xC4)
+        put(0x08)
+    }
+    xmm_owner[x] =-1
+    xmm_pin[x] = 1
+    vs_n = vs_n - 1
+    when (vs_m > vs_n) {
+        vs_m = vs_n
+    }
+    return 0
+}
+
+# producers: the caller has placed the value in a free register
+function.ra_produce_gp(number.r) -> number {
+    ra_reserve(vs_n + 1)
+    vs_loc[vs_n] = r
+    vs_kind[vs_n] = 0
+    gp_owner[r] = vs_n
+    gp_pin[r] = 0
+    vs_n = vs_n + 1
+    return 0
+}
+
+function.ra_produce_xmm(number.x) -> number {
+    ra_reserve(vs_n + 1)
+    vs_loc[vs_n] = 100 + x
+    vs_kind[vs_n] = 3
+    xmm_owner[x] = vs_n
+    xmm_pin[x] = 0
+    vs_n = vs_n + 1
+    return 0
+}
+
+# a text pair: len in r_len (deeper unit), ptr in r_ptr (top unit)
+function.ra_produce_pair(number.r_ptr, number.r_len) -> number {
+    ra_reserve(vs_n + 2)
+    vs_loc[vs_n] = r_len
+    vs_kind[vs_n] = 1
+    gp_owner[r_len] = vs_n
+    gp_pin[r_len] = 0
+    vs_loc[vs_n + 1] = r_ptr
+    vs_kind[vs_n + 1] = 2
+    gp_owner[r_ptr] = vs_n + 1
+    gp_pin[r_ptr] = 0
+    vs_n = vs_n + 2
+    return 0
+}
+
+# consume a text pair: ptr (top) into r_ptr, len into r_len
+function.ra_need_pair(number.r_ptr, number.r_len) -> number {
+    ra_need_gp(r_ptr)
+    ra_need_gp(r_len)
+    return 0
+}
+
+# drop the top unit (bookkeeping + machine-stack adjustment)
+function.ra_drop_top() -> number {
+    when (vs_n == 0) {
+        return 0
+    }
+    type.number loc = vs_loc[vs_n - 1]
+    when (loc ==-1) {
+        # add rsp, 8
+        put(0x48)
+        put(0x83)
+        put(0xC4)
+        put(0x08)
+    }
+    else {
+        when (loc >= 100) {
+            xmm_owner[loc - 100] =-1
+        }
+        else {
+            gp_owner[loc] =-1
+        }
+    }
+    vs_n = vs_n - 1
+    when (vs_m > vs_n) {
+        vs_m = vs_n
+    }
+    return 0
+}
+
+# ---- the fallback effect model ------------------------------------------
+# Instructions the cached paths do not cover run classically after a
+# flush; ra_track then replays their stack effect on the virtual stack so
+# the cached paths stay in sync. pops/pushes are in 8-byte units and
+# mirror the classic emitters exactly.
+function.ra_pops(type.ptr<type.IrInst>.in) -> number {
+    type.number k = in.kind
+    when (k == ir.I_CONST_INT or k == ir.I_CONST_DEC or k == ir.I_CONST_BOOL) {
+        return 0
+    }
+    when (k == ir.I_CONST_TEXT) {
+        return 0
+    }
+    when (k == ir.I_LOAD_LOCAL or k == ir.I_LOAD_GLOBAL or k == ir.I_ADDR_LOCAL or k == ir.I_ADDR_GLOBAL) {
+        return 0
+    }
+    when (k == ir.I_CONV) {
+        when (in.ty == sema.T_TEXT or in.ty2 == sema.T_TEXT) {
+            return 2
+        }
+        return 1
+    }
+    when (k == ir.I_BINOP) {
+        when (in.ty == sema.T_TEXT) {
+            return 4
+        }
+        return 2
+    }
+    when (k == ir.I_UNOP) {
+        return 1
+    }
+    when (k == ir.I_TEXT_LEN) {
+        return 2
+    }
+    when (k == ir.I_TEXT_BYTE) {
+        return 3
+    }
+    when (k == ir.I_TEXT_SLICE) {
+        return 4
+    }
+    when (k == ir.I_TEXT_FROMBYTES) {
+        return 2
+    }
+    when (k == ir.I_FS_READ) {
+        return 2
+    }
+    when (k == ir.I_FS_WRITE) {
+        return 4
+    }
+    when (k == ir.I_FS_EXISTS) {
+        return 2
+    }
+    when (k == ir.I_ENV_ARG) {
+        return 1
+    }
+    when (k == ir.I_SYSOP) {
+        when (in.i == 2) {
+            return 4
+        }
+        when (in.i == 0 or in.i == 1 or in.i == 4 or in.i == 7 or in.i == 8 or in.i == 9) {
+            return 3
+        }
+        return 1
+    }
+    when (k == ir.I_STORE_LOCAL or k == ir.I_STORE_GLOBAL or k == ir.I_POP or k == ir.I_WRITE) {
+        when (in.ty == sema.T_TEXT) {
+            return 2
+        }
+        return 1
+    }
+    when (k == ir.I_JMPF) {
+        return 1
+    }
+    when (k == ir.I_INDEX) {
+        return 2
+    }
+    when (k == ir.I_LOAD_AT) {
+        return 1
+    }
+    when (k == ir.I_STORE_AT) {
+        when (in.ty == sema.T_TEXT) {
+            return 3
+        }
+        return 2
+    }
+    when (k == ir.I_COPY) {
+        return 2
+    }
+    when (k == ir.I_ALLOC) {
+        return 1
+    }
+    when (k == ir.I_RELEASE) {
+        return 1
+    }
+    when (k == ir.I_PTRCHK or k == ir.I_ADDOFF) {
+        return 1
+    }
+    when (k == ir.I_PTR_SCALE or k == ir.I_PTR_DIFF) {
+        return 2
+    }
+    when (k == ir.I_CALL) {
+        type.ptr<type.FuncInfo> fi = in.finfo
+        type.number p = 0
+        loop (a from 0 until in.nargs) {
+            type.ptr<type.Ty> t = sema.T_NUMBER
+            when (a < fi.nparams) {
+                t = fi.ptypes[a]
+            }
+            p = p + 1
+            when (t == sema.T_TEXT) {
+                p = p + 1
+            }
+        }
+        return p
+    }
+    when (k == ir.I_RETURN) {
+        when (in.ty != null and in.ty != sema.T_VOID) {
+            when (in.ty == sema.T_TEXT) {
+                return 2
+            }
+            return 1
+        }
+        return 0
+    }
+    return 0
+}
+
+function.ra_pushes(type.ptr<type.IrInst>.in) -> number {
+    type.number k = in.kind
+    when (k == ir.I_CONST_INT or k == ir.I_CONST_DEC or k == ir.I_CONST_BOOL) {
+        return 1
+    }
+    when (k == ir.I_CONST_TEXT) {
+        return 2
+    }
+    when (k == ir.I_LOAD_LOCAL or k == ir.I_LOAD_GLOBAL or k == ir.I_ADDR_LOCAL or k == ir.I_ADDR_GLOBAL) {
+        when (in.ty == sema.T_TEXT) {
+            return 2
+        }
+        return 1
+    }
+    when (k == ir.I_CONV) {
+        when (in.ty2 == sema.T_TEXT) {
+            return 2
+        }
+        return 1
+    }
+    when (k == ir.I_BINOP) {
+        when (in.ty == sema.T_TEXT and in.op == parser.OP_ADD) {
+            return 2
+        }
+        return 1
+    }
+    when (k == ir.I_UNOP) {
+        return 1
+    }
+    when (k == ir.I_TEXT_LEN or k == ir.I_TEXT_BYTE) {
+        return 1
+    }
+    when (k == ir.I_TEXT_SLICE or k == ir.I_TEXT_FROMBYTES) {
+        return 2
+    }
+    when (k == ir.I_FS_READ) {
+        return 2
+    }
+    when (k == ir.I_FS_WRITE or k == ir.I_FS_EXISTS or k == ir.I_ENV_ARGC) {
+        return 1
+    }
+    when (k == ir.I_ENV_ARG) {
+        # env.arg returns a text pair
+        return 2
+    }
+    when (k == ir.I_SYSOP) {
+        return 1
+    }
+    when (k == ir.I_INDEX or k == ir.I_ALLOC or k == ir.I_PTRCHK or k == ir.I_PTR_SCALE or k == ir.I_PTR_DIFF or k == ir.I_ADDOFF) {
+        return 1
+    }
+    when (k == ir.I_LOAD_AT) {
+        when (in.ty == sema.T_TEXT) {
+            return 2
+        }
+        return 1
+    }
+    when (k == ir.I_CALL) {
+        type.ptr<type.Ty> ret = in.finfo.ret
+        when (ret == null or ret == sema.T_VOID) {
+            return 0
+        }
+        when (ret == sema.T_TEXT) {
+            return 2
+        }
+        return 1
+    }
+    return 0
+}
+
+function.ra_track(type.ptr<type.IrInst>.in) -> number {
+    # runs after a flushed classic emission: consume what it popped,
+    # record what it pushed (stack-resident, correctly classed)
+    type.number p = ra_pops(in)
+    when (p > vs_n) {
+        p = vs_n
+    }
+    vs_n = vs_n - p
+    when (vs_m > vs_n) {
+        vs_m = vs_n
+    }
+    type.number q = ra_pushes(in)
+    type.number k = in.kind
+    when (q == 2) {
+        # a text pair result (len below, ptr on top)
+        ra_reserve(vs_n + 2)
+        vs_loc[vs_n] =-1
+        vs_kind[vs_n] = 1
+        vs_loc[vs_n + 1] =-1
+        vs_kind[vs_n + 1] = 2
+        vs_n = vs_n + 2
+        vs_m = vs_n
+        return 0
+    }
+    when (q == 1) {
+        ra_reserve(vs_n + 1)
+        vs_loc[vs_n] =-1
+        vs_kind[vs_n] = 0
+        when (k == ir.I_CONST_DEC) {
+            vs_kind[vs_n] = 3
+        }
+        else when (k == ir.I_CONV and in.ty2 == sema.T_DECIMAL) {
+            vs_kind[vs_n] = 3
+        }
+        else when (k == ir.I_UNOP and in.ty == sema.T_DECIMAL) {
+            vs_kind[vs_n] = 3
+        }
+        else when ((k == ir.I_LOAD_LOCAL or k == ir.I_LOAD_GLOBAL) and in.ty == sema.T_DECIMAL) {
+            vs_kind[vs_n] = 3
+        }
+        vs_n = vs_n + 1
+        vs_m = vs_n
+    }
+    return 0
+}
+
+# ---- the cached emission paths -------------------------------------------
+# ra_emit returns 1 when it fully emitted the instruction through the
+# register allocator, 0 when the caller should flush and run the classic
+# path. Every path below is provably free of calls, syscalls, and stores
+# other than the operand's own (trap paths call exit-only runtime traps,
+# whose clobbering is unobservable).
+function.ra_emit(type.ptr<type.IrInst>.in, type.ptr<type.IrInst>.nxt) -> number {
+    type.number k = in.kind
+
+    when (k == ir.I_CONST_INT or k == ir.I_CONST_BOOL) {
+        type.number v = in.i
+        when (k == ir.I_CONST_BOOL) {
+            v = in.b
+        }
+        type.number r = ra_get_gp()
+        mov_r_imm(r, v)
+        ra_produce_gp(r)
+        return 1
+    }
+
+    when (k == ir.I_CONST_TEXT) {
+        type.number rp = ra_get_gp()
+        type.number rl = ra_get_gp()
+        mov_r_sym(rp, txt_sym[in.text_idx], 0)
+        mov_r_imm(rl, txt_len[in.text_idx])
+        ra_produce_pair(rp, rl)
+        return 1
+    }
+
+    when (k == ir.I_CONST_DEC) {
+        when (in.ty == sema.T_F32) {
+            ra_evict_gp(R_RAX)
+            ra_evict_xmm(0)
+            mov_r_imm(R_RAX, elf.dec_bits(in.d))
+            movq_xmm0_rax()
+            # cvtsd2ss xmm0, xmm0; movd eax, xmm0
+            put(0xF2)
+            put(0x0F)
+            put(0x5A)
+            put(0xC0)
+            put(0x66)
+            put(0x0F)
+            put(0x7E)
+            put(0xC0)
+            ra_produce_gp(R_RAX)
+            return 1
+        }
+        ra_evict_gp(R_RAX)
+        ra_evict_xmm(0)
+        mov_r_imm(R_RAX, elf.dec_bits(in.d))
+        movq_xmm0_rax()
+        ra_produce_xmm(0)
+        return 1
+    }
+
+    when (k == ir.I_LOAD_LOCAL) {
+        type.number off = fn_offset(in.slot)
+        when (in.ty == sema.T_TEXT) {
+            type.number rp = ra_get_gp()
+            type.number rl = ra_get_gp()
+            load_rbp(rp,-off)
+            load_rbp(rl,-off + 8)
+            ra_produce_pair(rp, rl)
+        }
+        else when (in.ty == sema.T_DECIMAL) {
+            # decimals are XMM-class units: load the raw bits through a GP
+            type.number r = ra_get_gp()
+            type.number x = ra_get_xmm()
+            load_rbp(r,-off)
+            movq_xmm_r(x, r)
+            ra_produce_xmm(x)
+        }
+        else {
+            type.number r = ra_get_gp()
+            load_rbp(r,-off)
+            ra_produce_gp(r)
+        }
+        return 1
+    }
+
+    when (k == ir.I_STORE_LOCAL) {
+        type.number off = fn_offset(in.slot)
+        # store-to-load forwarding: keep the value cached and FOLD the
+        # reload away — the driver skips the load instruction entirely
+        type.number fwd = 0
+        when (nxt != null and nxt.kind == ir.I_LOAD_LOCAL and nxt.slot == in.slot and nxt.ty == in.ty) {
+            fwd = 1
+            ra_skip = 1
+        }
+        when (in.ty == sema.T_TEXT) {
+            ra_need_pair(R_RAX, R_RDX)
+            store_rbp(R_RAX,-off)
+            store_rbp(R_RDX,-off + 8)
+            when (fwd == 1) {
+                ra_produce_pair(R_RAX, R_RDX)
+            }
+        }
+        else when (in.ty == sema.T_DECIMAL) {
+            # the value's bits ride rax to memory
+            ra_need_xmm(0)
+            ra_evict_gp(R_RAX)
+            movq_rax_xmm0()
+            store_rbp(R_RAX,-off)
+            when (fwd == 1) {
+                ra_produce_xmm(0)
+            }
+        }
+        else {
+            ra_need_gp(R_RAX)
+            store_rbp(R_RAX,-off)
+            when (fwd == 1) {
+                ra_produce_gp(R_RAX)
+            }
+        }
+        return 1
+    }
+
+    when (k == ir.I_LOAD_GLOBAL) {
+        type.ptr<type.Symbol> s = in.sym
+        when (in.ty == sema.T_TEXT) {
+            type.number rc = ra_get_gp()
+            type.number rp = ra_get_gp()
+            type.number rl = ra_get_gp()
+            mov_r_sym(rc, sym_by_name(s.mangled), 0)
+            load_ind(rp, rc)
+            load_ind8(rl, rc, 8)
+            ra_produce_pair(rp, rl)
+        }
+        else when (in.ty == sema.T_DECIMAL) {
+            type.number x = ra_get_xmm()
+            ra_evict_gp(R_RAX)
+            mov_r_sym(R_RAX, sym_by_name(s.mangled), 0)
+            load_at_rax(in.ty)
+            movq_xmm_r(x, R_RAX)
+            ra_produce_xmm(x)
+        }
+        else {
+            ra_evict_gp(R_RAX)
+            mov_r_sym(R_RAX, sym_by_name(s.mangled), 0)
+            load_at_rax(in.ty)
+            ra_produce_gp(R_RAX)
+        }
+        return 1
+    }
+
+    when (k == ir.I_STORE_GLOBAL) {
+        type.ptr<type.Symbol> s = in.sym
+        type.number fwd = 0
+        when (nxt != null and nxt.kind == ir.I_LOAD_GLOBAL and nxt.sym == in.sym and nxt.ty == in.ty) {
+            fwd = 1
+            ra_skip = 1
+        }
+        when (in.ty == sema.T_TEXT) {
+            ra_need_pair(R_RAX, R_RDX)
+            ra_evict_gp(R_RCX)
+            mov_r_sym(R_RCX, sym_by_name(s.mangled), 0)
+            store_ind(R_RCX, R_RAX)
+            store_ind8(R_RCX, 8, R_RDX)
+            when (fwd == 1) {
+                ra_produce_pair(R_RAX, R_RDX)
+            }
+        }
+        else when (in.ty == sema.T_DECIMAL) {
+            ra_need_xmm(0)
+            ra_evict_gp(R_RAX)
+            ra_evict_gp(R_RCX)
+            movq_rax_xmm0()
+            mov_r_sym(R_RCX, sym_by_name(s.mangled), 0)
+            store_rax_rcx(in.ty)
+            when (fwd == 1) {
+                ra_produce_xmm(0)
+            }
+        }
+        else {
+            ra_need_gp(R_RAX)
+            ra_evict_gp(R_RCX)
+            mov_r_sym(R_RCX, sym_by_name(s.mangled), 0)
+            store_rax_rcx(in.ty)
+            when (fwd == 1) {
+                ra_produce_gp(R_RAX)
+            }
+        }
+        return 1
+    }
+
+    when (k == ir.I_ADDR_LOCAL) {
+        type.number base = fn_offset(in.slot)
+        type.number disp = in.i - base
+        type.number r = ra_get_gp()
+        when (disp == 0) {
+            mov_rr(r, R_RBP)
+        }
+        else {
+            lea_rbp(r, disp)
+        }
+        ra_produce_gp(r)
+        return 1
+    }
+
+    when (k == ir.I_ADDR_GLOBAL) {
+        type.ptr<type.Symbol> sym = in.sym
+        type.number r = ra_get_gp()
+        mov_r_sym(r, sym_by_name(sym.mangled), in.i)
+        ra_produce_gp(r)
+        return 1
+    }
+
+    when (k == ir.I_BINOP) {
+        type.ptr<type.Ty> t = in.ty
+        # f32: b bits in rcx, a bits in rax, xmm0/xmm1 as temporaries
+        when (t == sema.T_F32 and (in.op == parser.OP_ADD or in.op == parser.OP_SUB or in.op == parser.OP_MUL or in.op == parser.OP_DIV or (in.op >= parser.OP_EQ and in.op <= parser.OP_GE))) {
+            ra_evict_xmm(0)
+            ra_evict_xmm(1)
+            ra_need_gp(R_RCX)
+            ra_need_gp(R_RAX)
+            emit_binop_f32_core(in)
+            ra_produce_gp(R_RAX)
+            return 1
+        }
+        when (t == sema.T_DECIMAL) {
+            ra_need_xmm(1)
+            ra_need_xmm(0)
+            when (in.op >= parser.OP_EQ) {
+                ra_evict_gp(R_RAX)
+            }
+            emit_binop_dec_ops(in)
+            when (in.op <= parser.OP_MOD) {
+                ra_produce_xmm(0)
+            }
+            else {
+                movzx_rax_al()
+                ra_produce_gp(R_RAX)
+            }
+            return 1
+        }
+        when (t == sema.T_TEXT) {
+            return 0
+        }
+        when (t != null and sema.is_ptr(t) and (in.op == parser.OP_ADD or in.op == parser.OP_SUB)) {
+            type.number esz = sema.ty_bytes(t.elem)
+            ra_need_gp(R_RCX)
+            ra_need_gp(R_RAX)
+            imul_r_imm(R_RCX, esz)
+            when (in.op == parser.OP_ADD) {
+                add_rr(R_RAX, R_RCX)
+            }
+            else {
+                sub_rr(R_RAX, R_RCX)
+            }
+            ra_produce_gp(R_RAX)
+            return 1
+        }
+        # integer / bool: div and mod clobber rdx in the normal path
+        when (in.op == parser.OP_DIV or in.op == parser.OP_MOD) {
+            ra_evict_gp(R_RDX)
+        }
+        ra_need_gp(R_RCX)
+        ra_need_gp(R_RAX)
+        emit_binop_int_core(in)
+        ra_produce_gp(R_RAX)
+        return 1
+    }
+
+    when (k == ir.I_UNOP) {
+        when (in.uop == parser.UN_NEG and in.ty == sema.T_F32) {
+            ra_need_gp(R_RAX)
+            # xor eax, 0x80000000
+            put(0x35)
+            put(0x00)
+            put(0x00)
+            put(0x00)
+            put(0x80)
+            ra_produce_gp(R_RAX)
+            return 1
+        }
+        when (in.uop == parser.UN_NEG and in.ty == sema.T_DECIMAL) {
+            ra_need_xmm(0)
+            ra_evict_gp(R_RAX)
+            ra_evict_gp(R_RCX)
+            movq_rax_xmm0()
+            mov_r_imm(R_RCX, 0x8000000000000000)
+            xor_rr(R_RAX, R_RCX)
+            movq_xmm0_rax()
+            ra_produce_xmm(0)
+            return 1
+        }
+        when (in.uop == parser.UN_NEG) {
+            ra_need_gp(R_RAX)
+            # neg rax
+            put(0x48)
+            put(0xF7)
+            put(0xD8)
+            emit_reencode(in.ty)
+            ra_produce_gp(R_RAX)
+            return 1
+        }
+        when (in.uop == parser.UN_BNOT) {
+            ra_need_gp(R_RAX)
+            put(0x48)
+            put(0xF7)
+            put(0xD0)
+            emit_reencode(in.ty)
+            ra_produce_gp(R_RAX)
+            return 1
+        }
+        # logical not
+        ra_need_gp(R_RAX)
+        # xor eax, 1
+        put(0x83)
+        put(0xF0)
+        put(0x01)
+        ra_produce_gp(R_RAX)
+        return 1
+    }
+
+    when (k == ir.I_CONV) {
+        type.ptr<type.Ty> src = in.ty
+        type.ptr<type.Ty> dst = in.ty2
+        when (src == dst) {
+            return 1
+        }
+        when (src == sema.T_TEXT or dst == sema.T_TEXT) {
+            return 0
+        }
+        # int / bool / ptr / null sources: integer-family conversions
+        # (pointers and null reinterpret as the integer bit pattern,
+        # exactly like the classic path's identity fallthrough)
+        when (sema.is_integer(src) or src == sema.T_BOOL or sema.is_ptr(src) or src == sema.T_NULL) {
+            when (dst == sema.T_DECIMAL) {
+                ra_need_gp(R_RAX)
+                ra_evict_xmm(0)
+                when (src == sema.T_UINT64) {
+                    # exact uint64 -> double: x/2*2 + x&1 (rcx, rdx temps)
+                    ra_evict_gp(R_RCX)
+                    ra_evict_gp(R_RDX)
+                    mov_rr(R_RCX, R_RAX)
+                    mov_r_imm(R_RDX, 1)
+                    and_rr(R_RCX, R_RDX)
+                    # shr rax, 1
+                    put(0x48)
+                    put(0xD1)
+                    put(0xE8)
+                    # cvtsi2sd xmm0, rax; addsd xmm0, xmm0
+                    put(0xF2)
+                    put(0x48)
+                    put(0x0F)
+                    put(0x2A)
+                    put(0xC0)
+                    put(0xF2)
+                    put(0x0F)
+                    put(0x58)
+                    put(0xC0)
+                    # cvtsi2sd xmm1, rcx; addsd xmm0, xmm1
+                    put(0xF2)
+                    put(0x48)
+                    put(0x0F)
+                    put(0x2A)
+                    put(0xC9)
+                    put(0xF2)
+                    put(0x0F)
+                    put(0x58)
+                    put(0xC1)
+                }
+                else {
+                    # cvtsi2sd xmm0, rax
+                    put(0xF2)
+                    put(0x48)
+                    put(0x0F)
+                    put(0x2A)
+                    put(0xC0)
+                }
+                ra_produce_xmm(0)
+                return 1
+            }
+            when (dst == sema.T_F32) {
+                ra_need_gp(R_RAX)
+                ra_evict_xmm(0)
+                when (src == sema.T_UINT64) {
+                    ra_evict_gp(R_RCX)
+                    ra_evict_gp(R_RDX)
+                    mov_rr(R_RCX, R_RAX)
+                    mov_r_imm(R_RDX, 1)
+                    and_rr(R_RCX, R_RDX)
+                    put(0x48)
+                    put(0xD1)
+                    put(0xE8)
+                    # the exact uint64 -> f64 dance (x/2*2 + x&1)
+                    # cvtsi2sd xmm0, rax; addsd xmm0, xmm0
+                    put(0xF2)
+                    put(0x48)
+                    put(0x0F)
+                    put(0x2A)
+                    put(0xC0)
+                    put(0xF2)
+                    put(0x0F)
+                    put(0x58)
+                    put(0xC0)
+                    # cvtsi2sd xmm1, rcx; addsd xmm0, xmm1
+                    put(0xF2)
+                    put(0x48)
+                    put(0x0F)
+                    put(0x2A)
+                    put(0xC9)
+                    put(0xF2)
+                    put(0x0F)
+                    put(0x58)
+                    put(0xC1)
+                    # cvtsd2ss xmm0, xmm0 (the one rounding to single)
+                    put(0xF2)
+                    put(0x0F)
+                    put(0x5A)
+                    put(0xC0)
+                }
+                else {
+                    # cvtsi2ss xmm0, rax
+                    put(0xF3)
+                    put(0x48)
+                    put(0x0F)
+                    put(0x2A)
+                    put(0xC0)
+                }
+                # movd eax, xmm0
+                put(0x66)
+                put(0x0F)
+                put(0x7E)
+                put(0xC0)
+                ra_produce_gp(R_RAX)
+                return 1
+            }
+            ra_need_gp(R_RAX)
+            emit_reencode(dst)
+            ra_produce_gp(R_RAX)
+            return 1
+        }
+        when (src == sema.T_DECIMAL) {
+            when (dst == sema.T_F32) {
+                ra_need_xmm(0)
+                ra_evict_gp(R_RAX)
+                # cvtsd2ss xmm0, xmm0; movd eax, xmm0
+                put(0xF2)
+                put(0x0F)
+                put(0x5A)
+                put(0xC0)
+                put(0x66)
+                put(0x0F)
+                put(0x7E)
+                put(0xC0)
+                ra_produce_gp(R_RAX)
+                return 1
+            }
+            ra_need_xmm(0)
+            ra_evict_gp(R_RAX)
+            # cvttsd2si rax, xmm0
+            put(0xF2)
+            put(0x48)
+            put(0x0F)
+            put(0x2C)
+            put(0xC0)
+            emit_reencode(dst)
+            ra_produce_gp(R_RAX)
+            return 1
+        }
+        # src == f32
+        when (dst == sema.T_DECIMAL) {
+            ra_need_gp(R_RAX)
+            ra_evict_xmm(0)
+            # movd xmm0, eax; cvtss2sd xmm0, xmm0
+            put(0x66)
+            put(0x0F)
+            put(0x6E)
+            put(0xC0)
+            put(0xF3)
+            put(0x0F)
+            put(0x5A)
+            put(0xC0)
+            ra_produce_xmm(0)
+            return 1
+        }
+        ra_need_gp(R_RAX)
+        ra_evict_xmm(0)
+        # movd xmm0, eax; cvttss2si rax, xmm0
+        put(0x66)
+        put(0x0F)
+        put(0x6E)
+        put(0xC0)
+        put(0xF3)
+        put(0x48)
+        put(0x0F)
+        put(0x2C)
+        put(0xC0)
+        emit_reencode(dst)
+        ra_produce_gp(R_RAX)
+        return 1
+    }
+
+    when (k == ir.I_POP) {
+        when (in.ty == sema.T_TEXT) {
+            ra_drop_top()
+        }
+        ra_drop_top()
+        return 1
+    }
+
+    when (k == ir.I_JMPF) {
+        ra_need_gp(R_RAX)
+        ra_flush()
+        test_rr(R_RAX, R_RAX)
+        jcc_lbl(CC_E, in.label)
+        return 1
+    }
+
+    when (k == ir.I_JMP) {
+        ra_flush()
+        jmp_lbl(in.label)
+        return 1
+    }
+
+    when (k == ir.I_LABEL) {
+        ra_flush()
+        label_here(in.label)
+        return 1
+    }
+
+    when (k == ir.I_RETURN) {
+        when (in.ty != null and (sema.is_integer(in.ty) or in.ty == sema.T_BOOL or sema.is_ptr(in.ty) or in.ty == sema.T_NULL or in.ty == sema.T_F32)) {
+            ra_need_gp(R_RAX)
+        }
+        else when (in.ty == sema.T_DECIMAL) {
+            ra_need_xmm(0)
+            ra_evict_gp(R_RAX)
+            movq_rax_xmm0()
+        }
+        else when (in.ty == sema.T_TEXT) {
+            ra_need_pair(R_RAX, R_RDX)
+        }
+        else {
+            # xor eax, eax
+            put(0x31)
+            put(0xC0)
+        }
+        put(0xC9)  # leave
+        put(0xC3)  # ret
+        return 1
+    }
+
+    when (k == ir.I_CALL) {
+        ra_flush()
+        emit_call(in)
+        # emit_call consumed the argument units from the machine stack
+        type.number p = ra_pops(in)
+        when (p > vs_n) {
+            p = vs_n
+        }
+        vs_n = vs_n - p
+        when (vs_m > vs_n) {
+            vs_m = vs_n
+        }
+        # adopt the pushed result as stack-resident units
+        type.ptr<type.Ty> ret = in.finfo.ret
+        when (ret == sema.T_TEXT) {
+            ra_reserve(vs_n + 2)
+            vs_loc[vs_n] =-1
+            vs_kind[vs_n] = 1
+            vs_loc[vs_n + 1] =-1
+            vs_kind[vs_n + 1] = 2
+            vs_n = vs_n + 2
+        }
+        else when (ret != null and ret != sema.T_VOID) {
+            ra_reserve(vs_n + 1)
+            vs_loc[vs_n] =-1
+            vs_kind[vs_n] = 0
+            when (ret == sema.T_DECIMAL) {
+                vs_kind[vs_n] = 3
+            }
+            vs_n = vs_n + 1
+        }
+        # everything tracked now lives on the machine stack: the prefix
+        # covers the whole virtual stack
+        vs_m = vs_n
+        return 1
+    }
+
+    when (k == ir.I_ADDOFF) {
+        ra_need_gp(R_RAX)
+        when (in.i != 0) {
+            # add rax, imm
+            put(0x48)
+            when (in.i <= 127) {
+                put(0x83)
+                put(0xC0)
+                put(in.i)
+            }
+            else {
+                put(0x81)
+                put(0xC0)
+                put32(in.i)
+            }
+        }
+        ra_produce_gp(R_RAX)
+        return 1
+    }
+
+    when (k == ir.I_PTR_SCALE) {
+        type.number esz = 8
+        when (in.ty != null and in.ty.elem != null) {
+            esz = sema.ty_bytes(in.ty.elem)
+        }
+        ra_need_gp(R_RCX)
+        ra_need_gp(R_RAX)
+        when (esz == 1) {
+            add_rr(R_RAX, R_RCX)
+        }
+        else when (esz == 2 or esz == 4 or esz == 8) {
+            lea_rax_rcx_scaled(esz)
+        }
+        else {
+            imul_r_imm(R_RCX, esz)
+            add_rr(R_RAX, R_RCX)
+        }
+        ra_produce_gp(R_RAX)
+        return 1
+    }
+
+    when (k == ir.I_PTRCHK) {
+        type.number pnk = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        ra_need_gp(R_RAX)
+        test_rr(R_RAX, R_RAX)
+        jcc_lbl(CC_NE, pnk)
+        call_raw(rt_sym("null_trap"))
+        label_here(pnk)
+        ra_produce_gp(R_RAX)
+        return 1
+    }
+
+    when (k == ir.I_PTR_DIFF) {
+        type.number esz = 8
+        when (in.ty != null and in.ty.elem != null) {
+            esz = sema.ty_bytes(in.ty.elem)
+        }
+        ra_evict_gp(R_RDX)
+        ra_need_gp(R_RCX)
+        ra_need_gp(R_RAX)
+        sub_rr(R_RAX, R_RCX)
+        # cqo; mov rcx, esz; idiv rcx
+        put(0x48)
+        put(0x99)
+        mov_rcx_imm(esz)
+        put(0x48)
+        put(0xF7)
+        put(0xF9)
+        ra_produce_gp(R_RAX)
+        return 1
+    }
+
+    when (k == ir.I_TEXT_LEN) {
+        ra_need_pair(R_RAX, R_RDX)
+        mov_rr(R_RAX, R_RDX)
+        ra_produce_gp(R_RAX)
+        return 1
+    }
+
+    when (k == ir.I_LOAD_AT) {
+        when (in.ty == sema.T_TEXT) {
+            ra_need_gp(R_RAX)
+            ra_evict_gp(R_RDX)
+            # mov rdx, [rax+8]; mov rax, [rax]
+            load_ind8(R_RDX, R_RAX, 8)
+            load_ind(R_RAX, R_RAX)
+            ra_produce_pair(R_RAX, R_RDX)
+            return 1
+        }
+        when (in.ty == sema.T_DECIMAL) {
+            # the bits come back through rax into an XMM unit
+            ra_need_gp(R_RAX)
+            type.number x = ra_get_xmm()
+            load_at_rax(in.ty)
+            movq_xmm_r(x, R_RAX)
+            ra_produce_xmm(x)
+            return 1
+        }
+        ra_need_gp(R_RAX)
+        load_at_rax(in.ty)
+        ra_produce_gp(R_RAX)
+        return 1
+    }
+
+    when (k == ir.I_STORE_AT) {
+        when (in.ty == sema.T_TEXT) {
+            ra_need_pair(R_RAX, R_RDX)
+            ra_need_gp(R_RCX)
+            store_ind(R_RCX, R_RAX)
+            store_ind8(R_RCX, 8, R_RDX)
+            return 1
+        }
+        when (in.ty == sema.T_DECIMAL) {
+            # decimal member: consume the value and the address first,
+            # then let the bits ride rax to memory
+            ra_need_xmm(0)
+            ra_need_gp(R_RCX)
+            ra_evict_gp(R_RAX)
+            movq_rax_xmm0()
+            store_rax_rcx(in.ty)
+            return 1
+        }
+        ra_need_gp(R_RAX)
+        ra_need_gp(R_RCX)
+        store_rax_rcx(in.ty)
+        return 1
+    }
+
+    return 0
+}
+
+# ---- the optimizing instruction dispatcher ----
+type.number ra_skip = 0
+
+function.ra_dump_state(text.tag) -> number {
+    type.text s2 = tag + " n=" + number.to_text(vs_n) + " m=" + number.to_text(vs_m) + " ["
+    loop (i from 0 until vs_n) {
+        when (i > 0) {
+            s2 = s2 + " "
+        }
+        s2 = s2 + number.to_text(vs_loc[i])
+    }
+    sys.write(2, s2 + "]\n")
+    return 0
+}
+
+function.emit_inst2(type.ptr<type.IrInst>.in, type.ptr<type.IrInst>.nxt) -> number {
+    when (regmode == 1) {
+        when (trace_emit == 1) {
+            ra_dump_state("  k" + number.to_text(in.kind))
+        }
+        ra_unpin_all()
+        ra_skip = 0
+        when (ra_emit(in, nxt) == 1) {
+            return 0
+        }
+        ra_flush()
+        emit_inst(in)
+        ra_track(in)
+        return 0
+    }
+    emit_inst(in)
     return 0
 }

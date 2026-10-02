@@ -1,0 +1,46 @@
+type.text=1
+
+# unreachable code and dead stores must never change observable behavior
+function.f(number.x) -> number {
+    when (x > 0) {
+        return 1
+    }
+    else {
+        return 2
+    }
+    write("unreachable")
+    print
+    return 99
+}
+
+function.main() -> number {
+    type.number x = 0
+    x = 5
+    x = 6
+    x = 7
+    write(x)
+    print
+    write(f(1))
+    print
+    write(f(-1))
+    print
+    loop (i from 0 until 3) {
+        when (i == 1) {
+            continue
+        }
+        write(i)
+        print
+    }
+    write(1 + 0)
+    print
+    write(0 * 12345)
+    print
+    when (2 > 1 and 3 > 2) {
+        write("shortcircuit-ok")
+        print
+    }
+    return 0
+}
+
+type.number i = 0
+main()

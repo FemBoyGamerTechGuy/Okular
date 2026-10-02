@@ -70,8 +70,24 @@ Okular is a natively compiled, general-purpose systems language:
   without being a clone of any of them.
 
 Executables are freestanding: no C library, no interpreter, no VM —
-Okular's own backend emits x86-64 assembly, and the output depends on
-nothing but the kernel.
+Okular's own backend emits x86-64 machine code directly into a native
+ELF image, and the output depends on nothing but the kernel.
+
+### Optimizing
+
+```
+$ ./build/okular main.ok -O2          # dead-code elimination, peephole,
+                                      # control-flow simplification, and
+                                      # register-cached code generation
+```
+
+`-O1` runs the IR pass pipeline; `-O2` additionally keeps the operand
+stack's top values in registers instead of round-tripping through
+memory. Measured: fib(30) runs ~24% faster, binaries ~6% smaller.
+Optimization is semantics-preserving by contract — every test case in
+the repository is verified to behave identically at `-O0`, `-O1`, and
+`-O2`, and the compiler itself compiles under `-O2` and passes the
+whole suite that way.
 
 ## Quick start
 
@@ -106,7 +122,7 @@ build/        build artifacts
 
 * [Getting started](docs/getting-started.md) — build, compile, run
 * [Language basics](docs/language-basics.md) — a tour of Okular 0.12
-* [Specification v0.15](specs/spec-v0.15.md) — the definition, with an
+* [Specification v0.16](specs/spec-v0.16.md) — the definition, with an
   implementation status table that says exactly what works
 * [Architecture](docs/architecture.md) — how the bootstrap compiler is
   built and how it will self-host

@@ -1,0 +1,49 @@
+type.text=1
+
+# pointer/struct/array traffic through the register allocator
+struct.Pt = {
+    type.number x
+    type.number y
+}.end
+
+function.main() -> number {
+    type.array<type.number, 8> xs = { 0, 0, 0, 0, 0, 0, 0, 0 }
+    type.number i = 0
+    loop (i from 0 until 8) {
+        xs[i] = i * i
+    }
+    type.number s = 0
+    loop (i from 0 until 8) {
+        s = s + xs[i]
+    }
+    write(s)
+    print
+    type.ptr<type.Pt> p = alloc<type.Pt>(3)
+    p[0].x = 1
+    p[0].y = 2
+    p[1].x = 3
+    p[1].y = 4
+    p[2].x = 5
+    p[2].y = 6
+    type.number t = 0
+    loop (i from 0 until 3) {
+        t = t + p[i].x * 10 + p[i].y
+    }
+    write(t)
+    print
+    type.ptr<type.number> q = alloc<type.number>(4)
+    q[0] = 10
+    q[1] = 20
+    q[2] = 30
+    q[3] = 40
+    write(q[0] + q[1] + q[2] + q[3])
+    print
+    release(p)
+    release(q)
+    type.text msg = "sums"
+    write(msg + "-done")
+    print
+    return 0
+}
+
+main()

@@ -1,0 +1,35 @@
+type.text=1
+
+# regression (0.16): number.to_f32 of NON-constant values emitted
+# cvtsi2sd instead of cvtsi2ss — the double's low word (zero for small
+# integers) became the f32 bits, so every runtime int->f32 conversion
+# returned 0.0. Constants were folded at compile time and masked it.
+
+function.main() -> number {
+    type.number i = 0
+    loop (i from 0 until 5) {
+        write(f32.to_text(number.to_f32(i)))
+        print
+    }
+    type.number k = 7
+    write(f32.to_text(number.to_f32(k)))
+    print
+    type.uint64 u = 12
+    write(f32.to_text(uint64.to_f32(u)))
+    print
+    type.bool b = true
+    write(f32.to_text(bool.to_f32(b)))
+    print
+    type.number n = -3
+    write(f32.to_text(number.to_f32(n)))
+    print
+    type.f32 acc = 0.0
+    loop (i from 0 until 10) {
+        acc = acc + 0.5 + number.to_f32(i)
+    }
+    write(f32.to_text(acc))
+    print
+    return 0
+}
+
+main()

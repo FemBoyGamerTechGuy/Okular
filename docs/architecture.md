@@ -1,6 +1,6 @@
 # Okular Compiler — Architecture
 
-**Version:** 0.14
+**Version:** 0.16
 **Applies to:** `selfhost/compiler` (the Okular implementation)
 
 > The compiler is written in Okular and compiles itself. The C bootstrap
@@ -31,9 +31,14 @@
             [ir]     per required module: AST -> stack-machine IR
                       (function list, instruction list, constant folding)
                 |
+            [opt]    -O1: IR pass pipeline — dead-code elimination,
+                      control-flow simplification, algebraic peephole
+                |
             [emit]   per IR function: x86-64 machine code — prologue,
-                      stack-machine pushes/pops, calls with the rbx
-                      alignment discipline, inline syscalls, trap sites
+                      calls with the rbx alignment discipline, inline
+                      syscalls, trap sites; -O2: register-cached
+                      evaluation (the operand stack's top units live in
+                      registers), -O0: classic stack-machine pushes/pops
                 |
             [elf]    one R+X PT_LOAD image: headers + code + rodata +
                       data (+bss), ABS64/REL32 fixups, entry stub,
@@ -52,6 +57,7 @@
 | `parser.ok` | the complete grammar: expressions with the precedence ladder, statements, functions, structs/unions, columns, directives, error recovery |
 | `sema.ok` | the type checker: collect (symbols, module scopes, struct layout) + check (every expression/statement rule), constant evaluation, diagnostics with the optional-source downgrade policy |
 | `ir.ok` | IR construction (stack-machine form), constant folding, `--dump-ir` |
+| `opt.ok` | the optimizer (0.16): the `-O1` pass pipeline — DCE, jump simplification, peephole; pass statistics |
 | `emit.ok` | the x86-64 backend: every IR instruction, frame layout, call discipline, inline syscalls, trap sequences, label backpatching |
 | `elf.ok` | native ELF64 emission: segments, symbols, fixups, entry |
 | `rt.ok` | the runtime compiled into every program: output formatters, text arena, conversions, the free-list heap allocator, file operations — on the `sys.*` syscall floor |
@@ -90,16 +96,37 @@
   seed. If the new sources use a feature the old seed lacks, bridge by
   stubbing the use once, building, restoring, and re-running.
 
-## 5. Targets
+## 5. The optimizer (0.16)
+
+* `-O1` (`opt.ok`): reachability-based DCE (dead stores to non-address-
+  taken locals become pops — the operand stack stays balanced), dead
+  pure computations, constant-condition branch folding, jump threading,
+  jump-to-next removal, dead labels, identity/zero peephole. Every
+  rewrite is stack-neutral and trap-neutral.
+* `-O2` (`emit.ok`): register-cached emission. The operand stack is
+  tracked in 8-byte units; the machine stack holds the deepest units
+  and registers cache the top (spilling the deepest cached unit evicts
+  the value used furthest in the future). Consumers pop into the exact
+  registers each op needs; GP (9 regs) and XMM (8 regs, `decimal`)
+  are separate classes; calls flush (caller-saved); store-to-load
+  forwarding folds reloads. Uncovered instructions flush and run the
+  classic path — correctness by construction. Measured: fib(30) ~24%
+  faster, binaries ~6% smaller, +11% compile time.
+* The default build is -O0: the seed's byte-identical self-reproduction
+  never depends on optimizer behavior. The differential suite triple-
+  compiles every positive case at -O0/-O1/-O2 (503 checks); the compiler
+  self-compiles under -O2 and passes the suite.
+
+## 6. Targets
 
 * Implemented: x86-64 Linux (System V kernel syscall ABI).
 * Planned: ARM64 as the second backend — proving the emitter abstraction.
 
-## 6. Testing
+## 7. Testing
 
-* `tools/run_selfhost_tests.sh` — 191 cases: positive (compile + run +
-  exact stdout/exit), negative (exact diagnostic patterns), policy
-  (optional-source semantics incl. `--strict`).
+* `tools/run_selfhost_tests.sh` — 503 checks: positive (compile + run +
+  exact stdout/exit — at -O0, -O1, AND -O2), negative (exact diagnostic
+  patterns), policy (optional-source semantics incl. `--strict`).
 * `tools/run_selfbuild_check.sh` — the acceptance gate: seed
   self-reproduction + the full suite.
 * CI (`.github/workflows/ci.yml`) runs the gate, then packages and

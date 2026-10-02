@@ -1,0 +1,544 @@
+# opt.ok — the optimizer framework (0.16).
+#
+# A real pass pipeline over the typed stack IR: every pass transforms an
+# IrFunc's instruction list in place, is independently testable, and runs
+# under an optimization level chosen by the driver:
+#
+#   -O1   opt_dce + opt_jumps + opt_peephole (IR-level transformations)
+#   -O2   -O1 + register-cached emission (emit.ok's allocator)
+#
+# Constant folding (ir.ok's ir_fold) remains the zeroth pass and always
+# runs. The framework contract for every pass below:
+#   * the operand-stack depth before/after any surviving instruction is
+#     unchanged — a pass either deletes stack-neutral instruction groups,
+#     replaces an instruction with one of identical stack effect, or
+#     rewrites a jump target; the stack machine never desynchronizes;
+#   * traps, calls, syscalls, and stores are never reordered across each
+#     other — dead code is removed only where no observable behavior can
+#     differ;
+#   * label ids stay stable (labels may become unreferenced; the emitter
+#     tolerates sparse label ids by construction).
+# ---- levels ----
+type.number opt_level = 0
+type.number opt_stats = 0
+
+# ---- statistics (reported with --opt-stats) ----
+type.number stat_dce = 0
+type.number stat_dce_stores = 0
+type.number stat_jump_fold = 0
+type.number stat_jump_thread = 0
+type.number stat_jump_del = 0
+type.number stat_label_del = 0
+type.number stat_peep = 0
+
+function.reset_stats() -> number {
+    stat_dce = 0
+    stat_dce_stores = 0
+    stat_jump_fold = 0
+    stat_jump_thread = 0
+    stat_jump_del = 0
+    stat_label_del = 0
+    stat_peep = 0
+    return 0
+}
+
+function.report() -> number {
+    sys.write(2, "opt: dce removed " + number.to_text(stat_dce) + " insts, converted " + number.to_text(stat_dce_stores) + " dead stores\n")
+    sys.write(2, "opt: jumps folded " + number.to_text(stat_jump_fold) + ", threaded " + number.to_text(stat_jump_thread) + ", deleted " + number.to_text(stat_jump_del) + ", labels deleted " + number.to_text(stat_label_del) + "\n")
+    sys.write(2, "opt: peephole simplified " + number.to_text(stat_peep) + " patterns\n")
+    return 0
+}
+
+# ---- the pass driver ----
+function.optimize(type.ptr<type.ptr<type.IrModule>>.mods, number.nmods, number.level) -> number {
+    opt_level = level
+    reset_stats()
+    loop (mi from 0 until nmods) {
+        type.ptr<type.IrModule> im = mods[mi]
+        loop (fi from 0 until im.nfuncs) {
+            type.ptr<type.IrFunc> f = im.funcs[fi]
+            # the pipeline: fold (ir.ok) already ran during construction.
+            # Each sweep exposes more for the next: threading shortens jumps,
+            # peephole deletes instructions, dce then reaps what died.
+            opt_dce(f)
+            opt_jumps(f)
+            opt_peephole(f)
+            opt_jumps(f)
+            opt_dce(f)
+        }
+    }
+    when (opt_stats == 1) {
+        report()
+    }
+    return 0
+}
+
+# ---- shared: compact the live instructions to the front of the array ----
+function.compact(type.ptr<type.IrFunc>.f, type.ptr<type.number>.dead) -> number {
+    type.number on = 0
+    loop (i from 0 until f.n) {
+        when (dead[i] == 0) {
+            f.insts[on] = f.insts[i]
+            on = on + 1
+        }
+    }
+    f.n = on
+    return 0
+}
+
+# ---- pass 1: dead-code elimination ----
+#
+# Three rules, all provably unobservable:
+#   a) unreachable instructions (control can never reach them);
+#   b) a store to a local that is provably overwritten or never read
+#      before any possible intervening read — converted to a POP so the
+#      operand stack stays balanced (the memory write is what dies);
+#   c) a pure computation whose value is immediately discarded.
+function.opt_dce(type.ptr<type.IrFunc>.f) -> number {
+    type.number n = f.n
+    when (n == 0) {
+        return 0
+    }
+
+    # ---- (a) reachability over the instruction array ----
+    type.ptr<type.number> lmap = alloc<type.number>(f.nlabels + 1)
+    loop (i from 0 until f.nlabels) {
+        lmap[i] =-1
+    }
+    loop (i from 0 until n) {
+        when (f.insts[i].kind == ir.I_LABEL) {
+            lmap[f.insts[i].label] = i
+        }
+    }
+    type.ptr<type.number> reach = alloc<type.number>(n + 1)
+    loop (i from 0 until n) {
+        reach[i] = 0
+    }
+    type.ptr<type.number> wl = alloc<type.number>(n + 2)
+    type.number nwl = 0
+    wl[0] = 0
+    nwl = 1
+    reach[0] = 1
+    loop (nwl > 0) {
+        type.number start = wl[nwl - 1]
+        nwl = nwl - 1
+        type.number i = start
+        loop (i < n) {
+            when (i != start and reach[i] == 1) {
+                break
+            }
+            reach[i] = 1
+            type.number k = f.insts[i].kind
+            when (k == ir.I_JMP) {
+                type.number t = lmap[f.insts[i].label]
+                when (t >= 0 and reach[t] == 0) {
+                    wl[nwl] = t
+                    nwl = nwl + 1
+                    reach[t] = 1
+                }
+                break
+            }
+            when (k == ir.I_RETURN) {
+                break
+            }
+            when (k == ir.I_JMPF) {
+                type.number t = lmap[f.insts[i].label]
+                when (t >= 0 and reach[t] == 0) {
+                    wl[nwl] = t
+                    nwl = nwl + 1
+                    reach[t] = 1
+                }
+            }
+            i = i + 1
+        }
+    }
+    type.number removed = 0
+    loop (i from 0 until n) {
+        when (reach[i] == 0) {
+            removed = removed + 1
+        }
+    }
+    when (removed > 0) {
+        type.number on = 0
+        loop (i from 0 until n) {
+            when (reach[i] == 1) {
+                f.insts[on] = f.insts[i]
+                on = on + 1
+            }
+        }
+        f.n = on
+        n = on
+        stat_dce = stat_dce + removed
+    }
+
+    # ---- (b) dead stores to locals ----
+    # A slot whose address is taken anywhere in the function can be
+    # observed through a pointer: excluded up front. For the rest, a store
+    # is dead when the same slot is stored again, or the function ends,
+    # before any load of it and before any control-flow instruction (a
+    # label admits a path that reads the slot later; a jump admits a path
+    # around the second store).
+    type.number nslots = f.nslots
+    when (nslots > 0) {
+        type.ptr<type.number> esc = alloc<type.number>(nslots + 1)
+        loop (i from 0 until nslots) {
+            esc[i] = 0
+        }
+        loop (i from 0 until n) {
+            when (f.insts[i].kind == ir.I_ADDR_LOCAL) {
+                when (f.insts[i].slot < nslots) {
+                    esc[f.insts[i].slot] = 1
+                }
+            }
+        }
+        loop (i from 0 until n) {
+            type.ptr<type.IrInst> s = f.insts[i]
+            when (s.kind != ir.I_STORE_LOCAL) {
+                continue
+            }
+            when (esc[s.slot] == 1) {
+                continue
+            }
+            type.number j = i + 1
+            type.number deadstore = 0
+            loop (j < n) {
+                type.ptr<type.IrInst> w = f.insts[j]
+                when (w.kind == ir.I_STORE_LOCAL and w.slot == s.slot) {
+                    # overwritten before any read: the earlier write dies
+                    deadstore = 1
+                    break
+                }
+                when (w.kind == ir.I_LOAD_LOCAL and w.slot == s.slot) {
+                    break
+                }
+                when (w.kind == ir.I_LABEL or w.kind == ir.I_JMP or w.kind == ir.I_JMPF or w.kind == ir.I_RETURN) {
+                    # control may join here or leave: stop proving
+                    break
+                }
+                j = j + 1
+            }
+            # j == n: the function ends without reading the slot
+            when (j == n) {
+                deadstore = 1
+            }
+            when (deadstore == 1) {
+                # keep the pop, lose the memory write
+                s.kind = ir.I_POP
+                stat_dce_stores = stat_dce_stores + 1
+            }
+        }
+    }
+
+    # ---- (c) pure computation immediately discarded ----
+    # [pure producer][POP] with matching widths: both go. Producers here
+    # push exactly one value and cannot trap, call, or write memory.
+    type.ptr<type.number> dead = alloc<type.number>(n + 1)
+    loop (i from 0 until n) {
+        dead[i] = 0
+    }
+    type.number pe = 0
+    loop (i from 0 until n - 1) {
+        when (dead[i] == 1) {
+            continue
+        }
+        type.ptr<type.IrInst> p = f.insts[i]
+        type.ptr<type.IrInst> q = f.insts[i + 1]
+        when (q.kind != ir.I_POP) {
+            continue
+        }
+        type.number pure = 0
+        when (p.kind == ir.I_CONST_INT or p.kind == ir.I_CONST_BOOL or p.kind == ir.I_CONST_DEC or p.kind == ir.I_TEXT_LEN) {
+            pure = 1
+        }
+        else when (p.kind == ir.I_LOAD_LOCAL or p.kind == ir.I_LOAD_GLOBAL or p.kind == ir.I_ADDR_LOCAL or p.kind == ir.I_ADDR_GLOBAL) {
+            pure = 1
+        }
+        when (pure == 0) {
+            continue
+        }
+        # width agreement: text producers must pair with text pops
+        type.number ptext = 0
+        when (p.kind == ir.I_CONST_TEXT or p.ty == sema.T_TEXT) {
+            ptext = 1
+        }
+        type.number qtext = 0
+        when (q.ty == sema.T_TEXT) {
+            qtext = 1
+        }
+        when (ptext != qtext) {
+            continue
+        }
+        dead[i] = 1
+        dead[i + 1] = 1
+        pe = pe + 1
+        i = i + 1
+    }
+    when (pe > 0) {
+        compact(f, dead)
+        stat_dce = stat_dce + 2 * pe
+    }
+    return 0
+}
+
+# ---- pass 2: control-flow simplification ----
+#
+#   * a constant condition folds its JMPF away (never/always taken);
+#   * a jump to the label that immediately follows is deleted (JMPF
+#     becomes the POP that keeps the stack balanced);
+#   * jump-to-jump chains are threaded to their final target;
+#   * labels nothing references are deleted.
+function.opt_jumps(type.ptr<type.IrFunc>.f) -> number {
+    type.number n = f.n
+    when (n == 0) {
+        return 0
+    }
+
+    # ---- constant-condition JMPF ----
+    type.ptr<type.number> dead = alloc<type.number>(n + 1)
+    loop (i from 0 until n) {
+        dead[i] = 0
+    }
+    type.number folded = 0
+    loop (i from 0 until n - 1) {
+        when (dead[i] == 1) {
+            continue
+        }
+        type.ptr<type.IrInst> a = f.insts[i]
+        type.ptr<type.IrInst> b = f.insts[i + 1]
+        when (a.kind != ir.I_CONST_BOOL or b.kind != ir.I_JMPF) {
+            continue
+        }
+        when (a.b == 1) {
+            # condition true: the jump is never taken
+            dead[i] = 1
+            dead[i + 1] = 1
+            folded = folded + 1
+        }
+        else {
+            # condition false: the jump is always taken
+            dead[i] = 1
+            b.kind = ir.I_JMP
+            folded = folded + 1
+        }
+        i = i + 1
+    }
+    when (folded > 0) {
+        compact(f, dead)
+        n = f.n
+        stat_jump_fold = stat_jump_fold + folded
+    }
+
+    # ---- iterate: jump-to-next, threading, dead labels ----
+    type.number rounds = 0
+    loop (rounds < 8) {
+        rounds = rounds + 1
+        type.number changed = 0
+        n = f.n
+        when (n == 0) {
+            break
+        }
+
+        # label positions
+        type.ptr<type.number> lmap = alloc<type.number>(f.nlabels + 1)
+        loop (i from 0 until f.nlabels) {
+            lmap[i] =-1
+        }
+        loop (i from 0 until n) {
+            when (f.insts[i].kind == ir.I_LABEL) {
+                lmap[f.insts[i].label] = i
+            }
+        }
+
+        # jump threading: retarget through LABEL; JMP chains
+        loop (i from 0 until n) {
+            type.ptr<type.IrInst> j = f.insts[i]
+            when (j.kind != ir.I_JMP and j.kind != ir.I_JMPF) {
+                continue
+            }
+            type.number t = lmap[j.label]
+            when (t < 0 or t + 1 >= n) {
+                continue
+            }
+            type.ptr<type.IrInst> nxt = f.insts[t + 1]
+            when (nxt.kind == ir.I_JMP and nxt.label != j.label) {
+                j.label = nxt.label
+                changed = changed + 1
+                stat_jump_thread = stat_jump_thread + 1
+            }
+        }
+
+        # jump-to-next-label deletion
+        type.ptr<type.number> dead2 = alloc<type.number>(n + 1)
+        loop (i from 0 until n) {
+            dead2[i] = 0
+        }
+        type.number del = 0
+        loop (i from 0 until n - 1) {
+            type.ptr<type.IrInst> j = f.insts[i]
+            type.ptr<type.IrInst> nxt = f.insts[i + 1]
+            when (j.kind == ir.I_JMP and nxt.kind == ir.I_LABEL and nxt.label == j.label) {
+                dead2[i] = 1
+                del = del + 1
+                stat_jump_del = stat_jump_del + 1
+            }
+            else when (j.kind == ir.I_JMPF and nxt.kind == ir.I_LABEL and nxt.label == j.label) {
+                # the pop replaces the test: stack stays balanced
+                j.kind = ir.I_POP
+                j.ty = sema.T_BOOL
+                del = del + 1
+                stat_jump_del = stat_jump_del + 1
+            }
+        }
+        when (del > 0) {
+            compact(f, dead2)
+            changed = changed + del
+            n = f.n
+        }
+
+        # unreferenced labels
+        type.ptr<type.number> refs = alloc<type.number>(f.nlabels + 1)
+        loop (i from 0 until f.nlabels) {
+            refs[i] = 0
+        }
+        loop (i from 0 until n) {
+            type.number k = f.insts[i].kind
+            when (k == ir.I_JMP or k == ir.I_JMPF) {
+                refs[f.insts[i].label] = refs[f.insts[i].label] + 1
+            }
+        }
+        type.ptr<type.number> dead3 = alloc<type.number>(n + 1)
+        loop (i from 0 until n) {
+            dead3[i] = 0
+        }
+        type.number ldel = 0
+        loop (i from 0 until n) {
+            type.ptr<type.IrInst> lb = f.insts[i]
+            when (lb.kind == ir.I_LABEL) {
+                when (refs[lb.label] == 0) {
+                    dead3[i] = 1
+                    ldel = ldel + 1
+                }
+            }
+        }
+        when (ldel > 0) {
+            compact(f, dead3)
+            changed = changed + ldel
+            stat_label_del = stat_label_del + ldel
+            n = f.n
+        }
+
+        when (changed == 0) {
+            break
+        }
+    }
+    return 0
+}
+
+# ---- pass 3: algebraic peephole on the stack IR ----
+#
+# Recognizes one-instruction-lookback patterns (the constant is on top of
+# the stack = the binop's second operand):
+#   x + 0, x | 0, x ^ 0, x - 0, x * 1, x / 1      -> x        (both insts die)
+#   p ; 0 ; x * 0, p ; 0 ; x & 0                  -> 0        (p pure: dies too)
+#   p ; 1 ; x % 1                                 -> 0
+#   not not x                                     -> x
+# Every rewrite is stack-neutral and trap-neutral.
+function.opt_peephole(type.ptr<type.IrFunc>.f) -> number {
+    type.number n = f.n
+    when (n < 2) {
+        return 0
+    }
+    type.ptr<type.number> dead = alloc<type.number>(n + 1)
+    loop (i from 0 until n) {
+        dead[i] = 0
+    }
+    type.number hits = 0
+
+    loop (i from 0 until n - 1) {
+        when (dead[i] == 1) {
+            continue
+        }
+        type.ptr<type.IrInst> a = f.insts[i]
+        type.ptr<type.IrInst> b = f.insts[i + 1]
+
+        # not not x -> x
+        when (a.kind == ir.I_UNOP and b.kind == ir.I_UNOP and a.uop == parser.UN_NOT and b.uop == parser.UN_NOT) {
+            dead[i] = 1
+            dead[i + 1] = 1
+            hits = hits + 1
+            i = i + 1
+            continue
+        }
+
+        when (a.kind != ir.I_CONST_INT or b.kind != ir.I_BINOP) {
+            continue
+        }
+        # only integer/pointer arithmetic reaches here with CONST_INT
+        when (b.op == parser.OP_ADD or b.op == parser.OP_BOR or b.op == parser.OP_XOR or b.op == parser.OP_SUB) {
+            when (a.i == 0) {
+                dead[i] = 1
+                dead[i + 1] = 1
+                hits = hits + 1
+                i = i + 1
+                continue
+            }
+        }
+        when (b.op == parser.OP_MUL or b.op == parser.OP_DIV) {
+            when (a.i == 1) {
+                dead[i] = 1
+                dead[i + 1] = 1
+                hits = hits + 1
+                i = i + 1
+                continue
+            }
+        }
+        when (a.i == 0 and (b.op == parser.OP_MUL or b.op == parser.OP_BAND)) {
+            # [p][0][*|&] -> [0]: the operand below must be a pure single
+            # value of the same width so deleting it is unobservable
+            when (i > 0 and dead[i - 1] == 0) {
+                type.ptr<type.IrInst> p = f.insts[i - 1]
+                type.number pure = 0
+                when (p.kind == ir.I_CONST_INT or p.kind == ir.I_CONST_BOOL or p.kind == ir.I_CONST_DEC or p.kind == ir.I_TEXT_LEN) {
+                    pure = 1
+                }
+                else when (p.kind == ir.I_LOAD_LOCAL or p.kind == ir.I_LOAD_GLOBAL or p.kind == ir.I_ADDR_LOCAL or p.kind == ir.I_ADDR_GLOBAL) {
+                    pure = 1
+                }
+                when (pure == 1 and p.ty != sema.T_TEXT) {
+                    dead[i - 1] = 1
+                    dead[i + 1] = 1
+                    hits = hits + 1
+                    i = i + 1
+                    continue
+                }
+            }
+        }
+        when (a.i == 1 and b.op == parser.OP_MOD) {
+            # [p][1][%] -> [0]
+            when (i > 0 and dead[i - 1] == 0) {
+                type.ptr<type.IrInst> p = f.insts[i - 1]
+                type.number pure = 0
+                when (p.kind == ir.I_CONST_INT or p.kind == ir.I_CONST_BOOL or p.kind == ir.I_CONST_DEC or p.kind == ir.I_TEXT_LEN) {
+                    pure = 1
+                }
+                else when (p.kind == ir.I_LOAD_LOCAL or p.kind == ir.I_LOAD_GLOBAL or p.kind == ir.I_ADDR_LOCAL or p.kind == ir.I_ADDR_GLOBAL) {
+                    pure = 1
+                }
+                when (pure == 1 and p.ty != sema.T_TEXT) {
+                    dead[i - 1] = 1
+                    dead[i + 1] = 1
+                    a.i = 0
+                    hits = hits + 1
+                    i = i + 1
+                    continue
+                }
+            }
+        }
+    }
+
+    when (hits > 0) {
+        compact(f, dead)
+        stat_peep = stat_peep + hits
+    }
+    return 0
+}

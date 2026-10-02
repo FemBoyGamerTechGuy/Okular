@@ -1,0 +1,34 @@
+type.text=1
+
+# register-pressure stress: 12 live locals, deep expression trees, spills
+function.main() -> number {
+    type.number a = 1
+    type.number b = 2
+    type.number c = 3
+    type.number d = 4
+    type.number e = 5
+    type.number f = 6
+    type.number g = 7
+    type.number h = 8
+    type.number i = 9
+    type.number j = 10
+    type.number k = 11
+    type.number l = 12
+    write(a + b + c + d + e + f + g + h + i + j + k + l)
+    print
+    write((a + b) * (c + d) - (e + f) * (g + h) + (i + j) * (k + l))
+    print
+    write((((a + 1) * 2 + 3) * 4 + 5) * 6 + (((b + 1) * 2 + 3) * 4 + 5) * 7)
+    print
+    a = a + b * c - d / 2
+    b = a + 1
+    c = b + a
+    d = a + b + c
+    write(a)
+    print
+    write(b + c + d)
+    print
+    return 0
+}
+
+main()

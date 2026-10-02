@@ -17,6 +17,11 @@ fi
 pass=0; fail=0
 failed_cases=()
 
+# The optimizer differential (0.16): every positive case must behave
+# IDENTICALLY when compiled with -O1 and -O2 — optimization must never
+# change observable program behavior.
+OPT_LEVELS="${OPT_LEVELS:--O1 -O2}"
+
 for dir in "$CASES/positive"/*/; do
     [ -d "$dir" ] || continue
     name="$(basename "$dir")"
@@ -67,7 +72,44 @@ for dir in "$CASES/positive"/*/; do
         failed_cases+=("positive/$name behavior")
         echo "  FAIL behavior: $name (exit $pexit)"
         diff "$dir/stdout.txt" "$out" 2>/dev/null | head -4
+        continue
     fi
+
+    # optimized re-compiles of the same case
+    for lvl in $OPT_LEVELS; do
+        (cd "$work" && timeout 60 $OKC "$entry" $lvl --out ./main_bin) >"$cout" 2>&1
+        cexit=$?
+        if [ "$cexit" -ne 0 ]; then
+            fail=$((fail + 1))
+            failed_cases+=("positive/$name $lvl compile ($cexit)")
+            echo "  FAIL compile $lvl: $name ($cexit)"
+            sed 's/^/    okc: /' "$cout" | head -6
+            continue
+        fi
+        out2="$TMP/$name.$lvl.out"
+        (cd "$work" && timeout 30 ./main_bin "${local_args[@]}") >"$out2" 2>/dev/null
+        pexit2=$?
+        if [ -f "$work/exec_after" ]; then
+            after="$(cat "$work/exec_after")"
+            (cd "$work" && timeout 30 "./$after") >>"$out2" 2>/dev/null
+            pexit2=$?
+        fi
+        ok2=1
+        if [ -f "$dir/stdout.txt" ]; then
+            diff -q "$dir/stdout.txt" "$out2" >/dev/null || ok2=0
+        fi
+        if [ -f "$dir/exit.txt" ]; then
+            [ "$pexit2" -eq "$(cat "$dir/exit.txt")" ] || ok2=0
+        fi
+        if [ "$ok2" -eq 1 ]; then
+            pass=$((pass + 1))
+        else
+            fail=$((fail + 1))
+            failed_cases+=("positive/$name $lvl behavior")
+            echo "  FAIL behavior $lvl: $name (exit $pexit2)"
+            diff "$dir/stdout.txt" "$out2" 2>/dev/null | head -4
+        fi
+    done
 done
 
 # negative cases: must fail with the same diagnostics

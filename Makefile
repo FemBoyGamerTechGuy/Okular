@@ -7,7 +7,9 @@
 #                     to the seed when the sources match it.
 #   make test         the acceptance gate: the seed must reproduce itself
 #                     byte-for-bit, and the compiler must pass the full
-#                     191-case differential suite (positive / negative / policy).
+#                     differential suite (positive / negative / policy;
+#                     every positive case is also re-verified at -O1 and
+#                     -O2 — optimization must not change behavior).
 #   make release      package + end-to-end test the downloadable compiler.
 #   make update-seed  after editing compiler sources: rebuild to the new fixed
 #                     point, verify, and install it as bin/okular.

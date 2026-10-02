@@ -1,0 +1,40 @@
+type.text=1
+
+# mixed calls: recursion, nested calls, text args, multi-arg pressure
+function.add3(number.a, number.b, number.c) -> number {
+    return a + b * c
+}
+
+function.fact(number.n) -> number {
+    when (n <= 1) {
+        return 1
+    }
+    return n * fact(n - 1)
+}
+
+function.greet(text.name) -> text {
+    return "hello " + name + "!"
+}
+
+function.main() -> number {
+    write(add3(1, 2, 3))
+    print
+    write(add3(add3(1, 2, 3), add3(4, 5, 6), add3(7, 8, 9)))
+    print
+    write(fact(10))
+    print
+    write(greet("okular"))
+    print
+    write(greet(greet("x")))
+    print
+    type.number i = 0
+    type.number acc = 0
+    loop (i from 1 until 8) {
+        acc = acc + add3(i, i + 1, fact(i))
+    }
+    write(acc)
+    print
+    return 0
+}
+
+main()

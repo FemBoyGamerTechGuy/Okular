@@ -16,6 +16,7 @@ type.text=1
     "parser",
     "sema",
     "ir",
+    "opt",
     "emit",
     "elf",
     "fmt",
@@ -68,6 +69,7 @@ function.strip_quotes(text.sp) -> text {
 type.number dump_ir_flag = 0
 type.number strict_mode = 0
 type.number warn_mode = 0
+type.number opt_level_flag = 0
 
 # ---- the used-module collection (prescan over the token buffer) ----
 type.ptr<type.text> uses = null
@@ -551,7 +553,7 @@ function.main() -> number {
         return run_fmt(argc)
     }
     when (argc < 2) {
-        sys.write(2, "usage: okc <main.ok> [--out <path>] [--dump-ir] [-s | --strict] [-w | --warnings]\n")
+        sys.write(2, "usage: okc <main.ok> [--out <path>] [--dump-ir] [-O1 | -O2] [--opt-stats] [-s | --strict] [-w | --warnings]\n")
         return 2
     }
     type.text main_path = env.arg(1)
@@ -575,6 +577,18 @@ function.main() -> number {
         }
         else when (a == "-w" or a == "--warnings") {
             warn_mode = 1
+        }
+        else when (a == "-O" or a == "-O1") {
+            opt_level_flag = 1
+        }
+        else when (a == "-O2") {
+            opt_level_flag = 2
+        }
+        else when (a == "--opt-stats") {
+            opt.opt_stats = 1
+        }
+        else when (a == "--trace-emit") {
+            emit.set_trace_emit(1)
         }
         else {
             sys.write(2, "okc: unknown flag `" + a + "`.\n")
@@ -614,6 +628,17 @@ function.main() -> number {
     }
 
     build_ir()
+
+    # the optimizer (spec §15): -O1 runs the IR pass pipeline, -O2 also
+    # switches the backend to register-cached emission. The default build
+    # (no -O) is the plain stack machine — the bootstrap seed and `make`
+    # reproduction path never depend on optimizer behavior.
+    when (opt_level_flag > 0) {
+        opt.optimize(irmods, n_irmods, opt_level_flag)
+    }
+    when (opt_level_flag >= 2) {
+        emit.set_regmode(1)
+    }
 
     when (dump_ir_flag == 1) {
         loop (i from 0 until n_irmods) {

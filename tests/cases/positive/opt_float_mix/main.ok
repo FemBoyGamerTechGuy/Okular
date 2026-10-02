@@ -1,0 +1,48 @@
+type.text=1
+
+# mixed decimal/f32/integer arithmetic under -O2 register classes
+function.main() -> number {
+    type.decimal d1 = 1.5
+    type.decimal d2 = 2.25
+    type.f32 f1 = 0.5
+    type.f32 f2 = 1.5
+    type.number n = 3
+    write(decimal.to_text(d1 + d2 * 2.0))
+    print
+    write(decimal.to_text((d1 + d2) * (d1 - d2)))
+    print
+    write(f32.to_text(f1 + f2 * 2.0))
+    print
+    write(f32.to_text((f1 + f2) * (f1 - f2)))
+    print
+    write(decimal.to_text(d1 * number.to_decimal(n)))
+    print
+    type.decimal acc = 0.0
+    type.number i = 0
+    loop (i from 0 until 10) {
+        acc = acc + d1 + number.to_decimal(i)
+    }
+    write(decimal.to_text(acc))
+    print
+    type.f32 facc = 0.0
+    loop (i from 0 until 10) {
+        facc = facc + f1 + number.to_f32(i)
+    }
+    write(f32.to_text(facc))
+    print
+    when (d1 < d2 and f1 < f2) {
+        write("compare-ok")
+        print
+    }
+    when (d1 > d2 or f1 > f2) {
+        write("wrong")
+        print
+    }
+    else {
+        write("or-ok")
+        print
+    }
+    return 0
+}
+
+main()

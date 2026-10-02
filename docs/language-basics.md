@@ -1,7 +1,7 @@
-# Okular Language Basics (0.15)
+# Okular Language Basics (0.16)
 
-A tour of what Okular 0.15 does today. The specification
-(`specs/spec-v0.15.md`) is the source of truth; this page is the friendly
+A tour of what Okular 0.16 does today. The specification
+(`specs/spec-v0.16.md`) is the source of truth; this page is the friendly
 version. Everything shown here compiles and runs with the bootstrap
 compiler.
 
@@ -140,7 +140,7 @@ when (score) {
   subject) satisfies the function return analysis like a full
   `when`/`else` chain.
 * Text compares for equality only: `"a" < "z"` is a compile error, not a
-  silent false. See `specs/spec-v0.15.md` §10.1.
+  silent false. See `specs/spec-v0.16.md` §10.1.
 
 ## `f32` — single-precision floats (0.15)
 
@@ -177,7 +177,7 @@ type.f32 p = text.to_f32("4.25")        # parse + one rounding
 * Match-style `when` accepts `f32` subjects with equality patterns
   (`1.5 { ... } else { ... }`).
 
-See `specs/spec-v0.15.md` §4.2.
+See `specs/spec-v0.16.md` §4.2.
 
 ## Output
 
@@ -324,7 +324,7 @@ type.array<type.number, 5> copy = {0, 0, 0, 0, 0}
 copy = scores           # whole-array copy
 ```
 
-See `specs/spec-v0.15.md` §8.4 for the complete rules.
+See `specs/spec-v0.16.md` §8.4 for the complete rules.
 
 ## Structs
 
@@ -347,12 +347,12 @@ Structs copy by value (assignment, parameters); `value.field` reads
 fields — on variables, through namespaces, on array elements, and on
 pointers (auto-dereferenced and null-checked). Nesting, arrays of
 structs, structs on the heap (`alloc<type.Rect>(2)`), and
-self-referential `ptr` fields all work. See `specs/spec-v0.15.md` §8.3.
+self-referential `ptr` fields all work. See `specs/spec-v0.16.md` §8.3.
 
 ## Unions
 
 One storage, several member views — the reinterpretation type
-(0.7, `specs/spec-v0.15.md` §8.5):
+(0.7, `specs/spec-v0.16.md` §8.5):
 
 ```ok
 union.Word = {
@@ -386,7 +386,7 @@ write(fs.exists("out.txt"))             # true
 `fs.read` loads a whole file into the immutable text arena; `fs.save`
 writes text (create/truncate) and returns the byte count; `fs.exists`
 probes. Failures are fatal traps (exit 77) naming the path — never silent
-empty text. See `specs/spec-v0.15.md` §6.4.
+empty text. See `specs/spec-v0.16.md` §6.4.
 
 ## Bitwise operations (0.11)
 
@@ -412,7 +412,7 @@ ones. A shift count outside `[0, width)` is a bug, not a wrap: constants
 fail to compile, runtime counts trap fatally (exit 72). Prefix `&` is
 still address-of; infix `&` is bitwise AND — parse position decides, and
 `type.ptr<type.ptr<type.number>>` still parses (the `>>` closes both type arguments).
-See `specs/spec-v0.15.md` §9.
+See `specs/spec-v0.16.md` §9.
 
 ## Program arguments (0.12)
 
@@ -427,7 +427,7 @@ loop (i from 1 until n) {
 `env.arg_count()` returns the argument count as the kernel reported it;
 `env.arg(i)` returns argument `i` copied into the text arena. Out-of-range
 indices are fatal bounds traps (exit 70) naming the index and count. See
-`specs/spec-v0.15.md` §6.5.
+`specs/spec-v0.16.md` §6.5.
 
 ## Text operations (0.9)
 
@@ -441,7 +441,7 @@ type.text word = text.slice(s, 0, 5)   # "hello" — end-exclusive, O(1)
 `text.length` counts bytes; `text.byte_at` reads one bounds-checked byte;
 `text.slice(s, from, to)` is the substring `[from, to)` sharing the
 original's immutable bytes — pointer arithmetic, not a copy. All three
-fold at compile time when their operands do. See `specs/spec-v0.15.md` §4.5.
+fold at compile time when their operands do. See `specs/spec-v0.16.md` §4.5.
 
 ## Constants and type.auto (0.8)
 
@@ -459,7 +459,7 @@ load. They work at file and column scope, fold into other constants and
 global initializers, and reject assignment. `type.auto` infers a
 declaration's type from its initializer (locals, globals, column
 members); literals and `null` cannot drive inference, and params/returns/
-members stay explicit. See `specs/spec-v0.15.md` §8.1.
+members stay explicit. See `specs/spec-v0.16.md` §8.1.
 
 ## The standard library (0.15)
 
@@ -505,6 +505,6 @@ project's `src/` modules win over same-named libraries.
 
 Dynamic-length arrays, FFI, threads, aliases, struct-pattern matching
 (destructuring), and visibility modifiers are all **designed** (see
-`specs/spec-v0.15.md` §20 and `docs/roadmap.md`) and **not implemented**.
+`specs/spec-v0.16.md` §20 and `docs/roadmap.md`) and **not implemented**.
 The compiler says so plainly
 when you use a reserved construct — it never pretends.
