@@ -71,7 +71,7 @@ jobs:
       # lets this aarch64 host run it for the one bootstrap step. Everything
       # produced for arm64 afterwards runs NATIVELY — the results below are
       # real hardware executions, not emulations.
-      - name: Install qemu-user (bootstrap only: the seed is x86-64)
+      - name: "Install qemu-user (bootstrap only — the seed is x86-64)"
         run: sudo apt-get update && sudo apt-get install -y qemu-user-static
 
       - name: Cross-build the ARM64 compiler (seed under qemu)
