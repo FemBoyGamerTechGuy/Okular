@@ -313,7 +313,10 @@ class Emu:
                         base = os.readlink('/proc/self/fd/%d' % dirfd)
                         fname = base + '/' + fname
                     st = os.stat(fname)
-                # aarch64 struct stat: dev@0 ino@8 mode@16 nlink@20 uid@24 gid@28 rdev@32 pad@40 size@48
+                # aarch64 struct stat (asm-generic, LP64) — the REAL kernel
+                # layout, which the compiler must match: dev@0 ino@8
+                # mode@16 nlink@20 uid@24 gid@28 rdev@32 size@40
+                # blksize@48 pad@52 blocks@56
                 self.write(statp + 0, struct.pack('<Q', st.st_dev & 0xFFFFFFFFFFFFFFFF))
                 self.write(statp + 8, struct.pack('<Q', st.st_ino & 0xFFFFFFFFFFFFFFFF))
                 self.write(statp + 16, struct.pack('<I', st.st_mode))
@@ -321,7 +324,9 @@ class Emu:
                 self.write(statp + 24, struct.pack('<I', st.st_uid))
                 self.write(statp + 28, struct.pack('<I', st.st_gid))
                 self.write(statp + 32, struct.pack('<Q', st.st_rdev & 0xFFFFFFFFFFFFFFFF))
-                self.write(statp + 48, struct.pack('<q', st.st_size))
+                self.write(statp + 40, struct.pack('<q', st.st_size))
+                self.write(statp + 48, struct.pack('<i', st.st_blksize))
+                self.write(statp + 52, struct.pack('<i', 0))
                 self.x[0] = 0
             except OSError as e:
                 self.x[0] = (-(e.errno or 2)) & 0xFFFFFFFFFFFFFFFF

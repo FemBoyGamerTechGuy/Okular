@@ -53,6 +53,7 @@ jobs:
           mkdir -p build/selfarm/hello
           printf 'type.text=1\n\nwrite("self-compiled on ARM64")\nprint\n' > build/selfarm/hello/main.ok
           cd build/selfarm/hello
+          echo "self-cross: the emulated aarch64 compiler compiles hello (~8 min)..."
           timeout 1800 python3 ../../../tools/emu64.py ../../../build/okular-arm64 main.ok --out ./hello
           OUT="$(./hello)"
           if [ "$OUT" != "self-compiled on ARM64" ]; then
@@ -75,12 +76,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y qemu-user-static
 
       - name: Cross-build the ARM64 compiler (seed under qemu)
-        run: make arm64
+        run: timeout 1800 make arm64
 
       - name: ARM64 self-compilation fixed point on real hardware
         run: |
           mkdir -p build/armfix
-          (cd selfhost/compiler && ../../build/okular-arm64 main.ok --target arm64 --out ../../build/armfix/okular-arm64)
+          echo "native fixed point: compiling the compiler with itself (aarch64)..."
+          timeout 900 bash -c 'cd selfhost/compiler && ../../build/okular-arm64 main.ok --target arm64 --out ../../build/armfix/okular-arm64'
+          echo "native fixed point: compile done, comparing bytes..."
           cmp build/okular-arm64 build/armfix/okular-arm64
           echo "arm64 fixed point on native hardware: byte-identical self-compilation"
 
@@ -88,7 +91,7 @@ jobs:
       # natively AND executed natively — stdout and exit codes must match
       # the x86-64 expectations exactly.
       - name: Full ARM64 differential suite (native compile + native execution)
-        run: OKC=$PWD/build/okular-arm64 ARM64_RUN=native bash tools/run_arm64_tests.sh
+        run: timeout 1800 env OKC=$PWD/build/okular-arm64 ARM64_RUN=native bash tools/run_arm64_tests.sh
 
       - name: The ARM64 compiler as a product, natively
         run: |

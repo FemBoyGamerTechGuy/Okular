@@ -2111,7 +2111,11 @@ function.a_emit_sysop(type.ptr<type.IrInst>.in) -> number {
     }
     when (in.i == 4) {
         # sys.size(fd): newfstatat(fd, "", buf, AT_EMPTY_PATH) — the
-        # aarch64 kernel has no plain fstat; st_size at offset 48
+        # aarch64 kernel has no plain fstat. The asm-generic struct stat
+        # puts st_size at offset 40 (dev@0 ino@8 mode@16 nlink@20
+        # uid@24 gid@28 rdev@32 size@40 blksize@48) — NOT x86-64's 48:
+        # the first native-runner run caught the wrong offset (every
+        # file appeared to be st_blksize = 4096 bytes)
         a_pop(AX0)
         a_str_b(31, AX29, 0)
         a_add_i(AX1, AX29, 0)
@@ -2129,7 +2133,7 @@ function.a_emit_sysop(type.ptr<type.IrInst>.in) -> number {
         a_movn(AX0, 0)
         a_b(ldone)
         a_label_here(lok)
-        a_ldr_x(AX0, AX2, 48)
+        a_ldr_x(AX0, AX2, 40)
         a_label_here(ldone)
         a_push(AX0)
         return 0

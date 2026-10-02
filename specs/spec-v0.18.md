@@ -66,7 +66,12 @@ no C compiler, no `as`, no `ld` anywhere in the repository
 > by the ARM64 differential before they could ever ship: a mis-aligned
 > outgoing-argument area (scaled STR/LDR immediates truncate non-multiple-
 > of-8 frame offsets), `sys.open` passing mode where flags belong, and
-> `fstatat` emitted in a three-argument form real kernels reject.
+> `fstatat` emitted in a three-argument form real kernels reject. A
+> fourth — the aarch64 `struct stat` layout (st_size at offset 40,
+> asm-generic; the port had copied x86-64's 48, so every file appeared
+> to be `st_blksize` = 4096 bytes on real hardware) — was caught by the
+> FIRST native aarch64 CI run; the emulator now models the real kernel
+> layout so the differential guards it too.
 >
 > 0.16 adds **the optimizer** (§15): `-O1` runs a pass pipeline over the
 > typed stack IR — dead-code elimination (unreachable instructions, dead
@@ -1958,7 +1963,12 @@ the conversion family (`T.to_U`): the source type names the operation.
   differential before they could ever ship: a mis-aligned outgoing-
   argument area (scaled STR/LDR immediates truncate non-multiple-of-8
   frame offsets), `sys.open` passing mode where flags belong, and
-  `fstatat` emitted in a three-argument form real kernels reject.
+  `fstatat` emitted in a three-argument form real kernels reject. A
+  fourth — the aarch64 `struct stat` st_size offset (40, not x86-64's
+  48; on real hardware every file stat'd as 4096 bytes) — was caught
+  by the first native `ubuntu-24.04-arm` CI run and fixed; the
+  emulator now models the real kernel layout so the emulated
+  differential regression-guards the ABI.
 
 ### 0.16
 
