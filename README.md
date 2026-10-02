@@ -3,11 +3,12 @@
 A simple, fast programming language designed for building large
 applications with minimal code.
 
-**Status:** Okular 0.15 — milestones M5, M6, and M7 are **done**:
-**the compiler is written in Okular and compiles itself.** One native
-executable (`selfhost/compiler`, ~14k lines of Okular) contains the
-complete pipeline — tokenizer, parser, semantic analysis, IR with
-constant folding, x86-64 code generation, and native ELF64 emission.
+**Status:** Okular 0.17 — milestones M5, M6, and M7 are **done**:
+**the compiler is written in Okular and compiles itself — on two CPU
+architectures.** One native executable (`selfhost/compiler`, ~16k lines
+of Okular) contains the complete pipeline — tokenizer, parser, semantic
+analysis, IR with constant folding and an optimization pass framework,
+**two native backends (x86-64 and ARM64)**, and direct ELF64 emission.
 `make` builds it with the committed native seed (`bin/okular`):
 **no C compiler, no `as`, no `ld`** anywhere in the repository, and the
 build is proven deterministic (the seed reproduces itself byte-for-bit
@@ -27,6 +28,11 @@ operations** with range-checked shifts, **short-circuit `and`/`or`**,
 library** (`[libs.use]` binding `math`/`text`/`io`/`memory` — spec §6.3),
 and the raw syscall floor (`sys.*` — write/read/open/close/size/
 mmap/exit/chmod/mkdir/getdents) that the runtime itself rides on.
+
+Since 0.17 the same compiler targets **two architectures**: x86-64
+Linux and ARM64 (aarch64) Linux, with cross-compilation in both
+directions (`--target arm64` / `--target x86-64`) and releases for both
+(`okular-linux-x86_64` and `okular-linux-arm64`).
 
 ```ok
 type.text=1
@@ -70,8 +76,9 @@ Okular is a natively compiled, general-purpose systems language:
   without being a clone of any of them.
 
 Executables are freestanding: no C library, no interpreter, no VM —
-Okular's own backend emits x86-64 machine code directly into a native
-ELF image, and the output depends on nothing but the kernel.
+Okular's own backends emit x86-64 and aarch64 machine code directly
+into native ELF images, and the output depends on nothing but the
+kernel.
 
 ### Optimizing
 
@@ -88,6 +95,24 @@ Optimization is semantics-preserving by contract — every test case in
 the repository is verified to behave identically at `-O0`, `-O1`, and
 `-O2`, and the compiler itself compiles under `-O2` and passes the
 whole suite that way.
+
+### Cross-compiling
+
+```
+$ ./build/okular main.ok --target arm64    # a native linux-aarch64
+                                           # executable, from any host
+$ ./build/okular main.ok --target x86-64   # the explicit default
+```
+
+The ARM64 backend (`selfhost/compiler/src/arm.ok`) shares the whole
+front half of the compiler and the runtime source with x86-64 — only
+the instruction selection, frames, fixups, and syscall numbers differ.
+It is verified three ways, all executing real programs: every positive
+test case re-compiled for arm64 and run (under `tools/emu64.py`, the
+aarch64 user-mode emulator shipping with the repository, or natively on
+the ARM64 CI runners), and the self-cross-compilation test — the
+compiler itself compiled to aarch64 and run to compile programs. `make
+arm64` cross-builds the whole compiler for aarch64.
 
 ## Quick start
 
@@ -107,13 +132,14 @@ okular!
 bin/          okular — the committed native seed compiler (self-built,
               byte-reproducible from selfhost/compiler sources)
 selfhost/     the compiler written in Okular (toks, parser, sema, ir,
-              emit, elf, rt, and the M3/M4 component lineage)
+              opt, emit, arm, elf, rt, and the M3/M4 component lineage)
 specs/        the language specification (versioned, honest status table)
 stdlib/       the standard library (math, text, io, memory)
 docs/         getting started, language basics, architecture, roadmap
 examples/     runnable Okular programs (HelloProject = full project)
 tests/        the test suite (positive / negative / policy)
 tools/        run_selfbuild_check.sh, run_selfhost_tests.sh,
+              run_arm64_tests.sh + emu64.py (aarch64 emulator),
               update_seed.sh, package_release.sh
 build/        build artifacts
 ```
@@ -122,7 +148,7 @@ build/        build artifacts
 
 * [Getting started](docs/getting-started.md) — build, compile, run
 * [Language basics](docs/language-basics.md) — a tour of Okular 0.12
-* [Specification v0.16](specs/spec-v0.16.md) — the definition, with an
+* [Specification v0.17](specs/spec-v0.17.md) — the definition, with an
   implementation status table that says exactly what works
 * [Architecture](docs/architecture.md) — how the bootstrap compiler is
   built and how it will self-host
@@ -133,8 +159,10 @@ build/        build artifacts
 ```console
 $ make test
 selfbuild: seed self-reproduction byte-identical ...
-selfhost differential: passed 233   failed 0
+selfhost differential: passed 503   failed 0
 ALL SELFHOST TESTS PASSED
+arm64 differential: passed 264   failed 0
+ALL ARM64 TESTS PASSED (compiled with --target arm64, executed under tools/emu64.py)
 ```
 
 ## Formatting

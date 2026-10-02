@@ -1,0 +1,2300 @@
+# arm.ok — the ARM64 (AArch64) native backend (0.17).
+#
+# The second target: the same typed stack IR, the same Okular Internal
+# ABI semantics (args in the first six registers, decimal as raw bits in
+# a register, text as a (ptr,len) pair behind one register, arrays
+# caller-copied), lowered to AArch64 machine code — fixed 4-byte
+# instructions, NZCV condition codes, sp kept 16-byte aligned by giving
+# every operand-stack slot 16 bytes (push = sub+str, pop = ldr+add).
+#
+# The classic stack machine only (no register-cached mode): -O2 on this
+# target falls back to the -O1 IR passes. Absolute addresses materialize
+# as movz/movk chains patched by the ABS64_ARM fixup; branches and calls
+# use the REL26 fixup; ELF images carry e_machine = EM_AARCH64 (183).
+#
+# Registers: x0-x5 arguments/results, x9-x17 scratch (the stack machine
+# stages values through x0/x1/x2 like the x86 rax/rcx/rdx discipline),
+# x29 = frame base (bottom of the frame, positive offsets), x30 = LR.
+# ---- condition codes (NZCV selectors) ----
+const.A_EQ = 0
+const.A_NE = 1
+const.A_CS = 2
+const.A_CC = 3
+const.A_MI = 4
+const.A_PL = 5
+const.A_VS = 6
+const.A_VC = 7
+const.A_LO = 3
+const.A_HI = 8
+const.A_LS = 9
+const.A_HS = 2
+const.A_GE = 10
+const.A_LT = 11
+const.A_GT = 12
+const.A_LE = 13
+
+# ---- registers ----
+const.AX0 = 0
+const.AX1 = 1
+const.AX2 = 2
+const.AX3 = 3
+const.AX4 = 4
+const.AX5 = 5
+const.AX8 = 8
+const.AX9 = 9
+const.AX10 = 10
+const.AX11 = 11
+const.AX12 = 12
+const.AX29 = 29
+const.AX30 = 30
+const.ASP = 31
+const.AXZR = 31
+
+# ---- word emission ----
+function.a_put(number.w) -> number {
+    elf.buf_put32(elf.code, w & 4294967295)
+    return 0
+}
+
+function.a_code_len() -> number {
+    return elf.code_len()
+}
+
+# ---- local labels with imm26 backpatching (mirrors emit.ok) ----
+type.ptr<type.number> a_lbl_pos = null
+type.number a_lbl_n = 0
+type.number a_lbl_cap = 0
+type.ptr<type.number> a_jsite_lbl = null
+type.ptr<type.number> a_jsite_at = null
+type.ptr<type.number> a_jsite_kind = null
+type.number a_n_jsite = 0
+type.number a_jsite_cap = 0
+
+const.A_TRAP_BASE = 1000000
+
+function.a_label_reserve(number.n) -> number {
+    when (n > a_lbl_cap) {
+        type.number newcap = 16
+        when (a_lbl_cap > 0) {
+            newcap = a_lbl_cap * 2
+        }
+        loop (n > newcap) {
+            newcap = newcap * 2
+        }
+        type.ptr<type.number> np = alloc<type.number>(newcap)
+        loop (i from 0 until a_lbl_n) {
+            np[i] = a_lbl_pos[i]
+        }
+        type.ptr<type.number> old = a_lbl_pos
+        a_lbl_pos = np
+        a_lbl_cap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    loop (i from a_lbl_n until n) {
+        a_lbl_pos[i] =-1
+    }
+    when (n > a_lbl_n) {
+        a_lbl_n = n
+    }
+    return 0
+}
+
+function.a_trap_lbl(number.n) -> number {
+    return A_TRAP_BASE + n
+}
+
+function.a_label_here(number.lbl) -> number {
+    a_label_reserve(lbl + 1)
+    a_lbl_pos[lbl] = a_code_len()
+    return 0
+}
+
+function.a_jmp_site_at(number.lbl, number.at) -> number {
+    # default kind 0: b / b.cond / bl (imm26 at bits 25:0)
+    return a_jmp_site_kind(lbl, at, 0)
+}
+
+function.a_jmp_site_kind(number.lbl, number.at, number.kind) -> number {
+    when (a_n_jsite == a_jsite_cap) {
+        type.number newcap = 32
+        when (a_jsite_cap > 0) {
+            newcap = a_jsite_cap * 2
+        }
+        type.ptr<type.number> nl = alloc<type.number>(newcap)
+        type.ptr<type.number> na = alloc<type.number>(newcap)
+        type.ptr<type.number> nk = alloc<type.number>(newcap)
+        loop (i from 0 until a_n_jsite) {
+            nl[i] = a_jsite_lbl[i]
+            na[i] = a_jsite_at[i]
+            nk[i] = a_jsite_kind[i]
+        }
+        type.ptr<type.number> ol = a_jsite_lbl
+        type.ptr<type.number> oa = a_jsite_at
+        type.ptr<type.number> ok2 = a_jsite_kind
+        a_jsite_lbl = nl
+        a_jsite_at = na
+        a_jsite_kind = nk
+        a_jsite_cap = newcap
+        when (ol != null) {
+            release(ol)
+            release(oa)
+            release(ok2)
+        }
+    }
+    a_jsite_lbl[a_n_jsite] = lbl
+    a_jsite_at[a_n_jsite] = at
+    a_jsite_kind[a_n_jsite] = kind
+    a_n_jsite = a_n_jsite + 1
+    return 0
+}
+
+function.a_patch_jumps() -> number {
+    loop (i from 0 until a_n_jsite) {
+        type.number lbl = a_jsite_lbl[i]
+        type.number at = a_jsite_at[i]
+        type.number kind = a_jsite_kind[i]
+        type.number target = a_lbl_pos[lbl]
+        type.number rel = (target - at - 4) / 4
+        type.number word = elf.buf_rd32_at(elf.code, at)
+        when (kind == 1) {
+            # cbz/cbnz: imm19 at bits 23:5, register at 4:0
+            word = (word & 4278190080) | ((rel & 524287) << 5) | (word & 31)
+        }
+        else when (kind == 2) {
+            # b.cond: imm19 at bits 23:5, bit 4 = 0, cond at 3:0
+            word = (word & 4278190111) | ((rel & 524287) << 5)
+        }
+        else {
+            # b / bl: imm26 at bits 25:0
+            word = (word & 4261412864) | (rel & 67108863)
+        }
+        elf.buf_wr32_at(elf.code, at, word)
+    }
+    a_n_jsite = 0
+    return 0
+}
+
+# ---- primitive encoders ----
+# MOVZ Xd, #imm16, LSL #hw*16
+function.a_movz(number.rd, number.imm16, number.hw) -> number {
+    a_put(0xD2800000 + (hw << 21) + ((imm16 & 65535) << 5) + rd)
+    return 0
+}
+
+# MOVK Xd, #imm16, LSL #hw*16
+function.a_movk(number.rd, number.imm16, number.hw) -> number {
+    a_put(0xF2800000 + (hw << 21) + ((imm16 & 65535) << 5) + rd)
+    return 0
+}
+
+# materialize an arbitrary 64-bit immediate (positive patterns only; the
+# compiler's numbers are wrapping two's-complement, and bit patterns are
+# built with the same movz/movk chain the fixup uses)
+function.a_mov_imm(number.rd, number.v) -> number {
+    type.number w0 = v & 65535
+    type.number w1 = (v >> 16) & 65535
+    type.number w2 = (v >> 32) & 65535
+    type.number w3 = (v >> 48) & 65535
+    a_movz(rd, w0, 0)
+    when (w1 != 0 or w2 != 0 or w3 != 0) {
+        a_movk(rd, w1, 1)
+    }
+    when (w2 != 0 or w3 != 0) {
+        a_movk(rd, w2, 2)
+    }
+    when (w3 != 0) {
+        a_movk(rd, w3, 3)
+    }
+    return 0
+}
+
+# MOV Xd, Xm (ORR Xd, XZR, Xm)
+function.a_mov(number.rd, number.rm) -> number {
+    a_put(0xAA0003E0 + (rm << 16) + rd)
+    return 0
+}
+
+# ADD Xd, Xn, Xm
+function.a_add(number.rd, number.rn, number.rm) -> number {
+    a_put(0x8B000000 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+# SUB Xd, Xn, Xm
+function.a_sub(number.rd, number.rn, number.rm) -> number {
+    a_put(0xCB000000 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+# ADDS Xd, Xn, Xm (flags)
+function.a_adds(number.rd, number.rn, number.rm) -> number {
+    a_put(0xAB000000 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+# SUBS Xd, Xn, Xm (flags)
+function.a_subs(number.rd, number.rn, number.rm) -> number {
+    a_put(0xEB000000 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+# CMP Xn, Xm (SUBS XZR, Xn, Xm)
+function.a_cmp(number.rn, number.rm) -> number {
+    a_subs(31, rn, rm)
+    return 0
+}
+
+# ADD Xd, Xn, #imm12 (imm <= 4095)
+function.a_add_i(number.rd, number.rn, number.imm12) -> number {
+    a_put(0x91000000 + ((imm12 & 4095) << 10) + (rn << 5) + rd)
+    return 0
+}
+
+# SUB Xd, Xn, #imm12
+function.a_sub_i(number.rd, number.rn, number.imm12) -> number {
+    a_put(0xD1000000 + ((imm12 & 4095) << 10) + (rn << 5) + rd)
+    return 0
+}
+
+# SUBS Xd, Xn, #imm12
+function.a_subs_i(number.rd, number.rn, number.imm12) -> number {
+    a_put(0xF1000000 + ((imm12 & 4095) << 10) + (rn << 5) + rd)
+    return 0
+}
+
+# CMP Xn, #imm12 (SUBS XZR, Xn, #imm12)
+function.a_cmp_i(number.rn, number.imm12) -> number {
+    a_subs_i(31, rn, imm12)
+    return 0
+}
+
+# AND/ORR/EOR Xd, Xn, Xm
+function.a_and(number.rd, number.rn, number.rm) -> number {
+    a_put(0x8A000000 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+function.a_or(number.rd, number.rn, number.rm) -> number {
+    a_put(0xAA000000 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+function.a_eor(number.rd, number.rn, number.rm) -> number {
+    a_put(0xCA000000 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+# MVN Xd, Xm (ORN Xd, XZR, Xm)
+function.a_mvn(number.rd, number.rm) -> number {
+    a_put(0xAA2003E0 + (rm << 16) + rd)
+    return 0
+}
+
+# NEG Xd, Xm (SUB Xd, XZR, Xm)
+function.a_neg(number.rd, number.rm) -> number {
+    a_sub(rd, 31, rm)
+    return 0
+}
+
+# MUL Xd, Xn, Xm (MADD Xd, Xn, Xm, XZR)
+function.a_mul(number.rd, number.rn, number.rm) -> number {
+    a_put(0x9B007C00 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+# MSUB Xd, Xn, Xm, Xa
+function.a_msub(number.rd, number.rn, number.rm, number.ra) -> number {
+    a_put(0x9B008000 + (rm << 16) + (ra << 10) + (rn << 5) + rd)
+    return 0
+}
+
+# SDIV / UDIV Xd, Xn, Xm
+function.a_sdiv(number.rd, number.rn, number.rm) -> number {
+    a_put(0x9AC00C00 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+function.a_udiv(number.rd, number.rn, number.rm) -> number {
+    a_put(0x9AC00800 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+# LSLV/LSRV/ASRV Xd, Xn, Xm
+function.a_lslv(number.rd, number.rn, number.rm) -> number {
+    a_put(0x9AC02000 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+function.a_lsrv(number.rd, number.rn, number.rm) -> number {
+    a_put(0x9AC02400 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+function.a_asrv(number.rd, number.rn, number.rm) -> number {
+    a_put(0x9AC02800 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+# CSET Xd, cc (CSINC Xd, XZR, XZR, ~cc)
+function.a_cset(number.rd, number.cc) -> number {
+    a_put(0x9A800400 + (31 << 16) + (((cc ^ 1) & 15) << 12) + (31 << 5) + rd)
+    return 0
+}
+
+# ---- branches ----
+function.a_b(number.lbl) -> number {
+    type.number at = a_code_len()
+    a_put(0x14000000)
+    a_jmp_site_at(lbl, at)
+    return 0
+}
+
+function.a_bcc(number.cc, number.lbl) -> number {
+    # b.cond: imm19 at bits 23:5 (bit 4 fixed 0), cond at 3:0
+    type.number at = a_code_len()
+    a_put(0x54000000 + (cc & 15))
+    a_jmp_site_kind(lbl, at, 2)
+    return 0
+}
+
+function.a_bls(number.lbl) -> number {
+    a_bcc(A_LS, lbl)
+    return 0
+}
+
+function.a_bvs(number.lbl) -> number {
+    a_bcc(A_VS, lbl)
+    return 0
+}
+
+function.a_bpl(number.lbl) -> number {
+    a_bcc(A_PL, lbl)
+    return 0
+}
+
+function.a_ble(number.lbl) -> number {
+    a_bcc(A_LE, lbl)
+    return 0
+}
+
+function.a_bl_lbl(number.lbl) -> number {
+    type.number at = a_code_len()
+    a_put(0x94000000)
+    a_jmp_site_at(lbl, at)
+    return 0
+}
+
+function.a_cbz(number.rt, number.lbl) -> number {
+    type.number at = a_code_len()
+    a_put(0xB4000000 + rt)
+    a_jmp_site_kind(lbl, at, 1)
+    return 0
+}
+
+function.a_cbnz(number.rt, number.lbl) -> number {
+    type.number at = a_code_len()
+    a_put(0xB5000000 + rt)
+    a_jmp_site_kind(lbl, at, 1)
+    return 0
+}
+
+function.a_bl_sym(number.sym) -> number {
+    type.number at = a_code_len()
+    a_put(0x94000000)
+    elf.fx_rel26(0, at, sym)
+    return 0
+}
+
+function.a_ret() -> number {
+    a_put(0xD65F03C0)
+    return 0
+}
+
+function.a_svc() -> number {
+    a_put(0xD4000001)
+    return 0
+}
+
+# ---- loads/stores (unsigned offset, scaled) ----
+# STR Xt, [Xn, #imm] (imm multiple of 8, <= 32760)
+function.a_str_x(number.rt, number.rn, number.off) -> number {
+    a_put(0xF9000000 + (((off / 8) & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+function.a_ldr_x(number.rt, number.rn, number.off) -> number {
+    a_put(0xF9400000 + (((off / 8) & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+# STR Wt, [Xn, #imm] (multiple of 4, <= 16380)
+function.a_str_w(number.rt, number.rn, number.off) -> number {
+    a_put(0xB9000000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+function.a_ldr_w(number.rt, number.rn, number.off) -> number {
+    a_put(0xB9400000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+# STRH / LDRH (multiple of 2)
+function.a_str_h(number.rt, number.rn, number.off) -> number {
+    a_put(0x79000000 + (((off / 2) & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+function.a_ldr_h(number.rt, number.rn, number.off) -> number {
+    a_put(0x79400000 + (((off / 2) & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+# STRB / LDRB (any byte offset)
+function.a_str_b(number.rt, number.rn, number.off) -> number {
+    a_put(0x39000000 + ((off & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+function.a_ldr_b(number.rt, number.rn, number.off) -> number {
+    a_put(0x39400000 + ((off & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+# sign-extending loads
+function.a_ldrsb_x(number.rt, number.rn, number.off) -> number {
+    a_put(0x39800000 + ((off & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+function.a_ldrsb_w(number.rt, number.rn, number.off) -> number {
+    a_put(0x39C00000 + ((off & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+function.a_ldrsh_x(number.rt, number.rn, number.off) -> number {
+    a_put(0x79800000 + (((off / 2) & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+function.a_ldrsh_w(number.rt, number.rn, number.off) -> number {
+    a_put(0x79C00000 + (((off / 2) & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+function.a_ldrsw_x(number.rt, number.rn, number.off) -> number {
+    a_put(0xB9800000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+# register-offset byte load: LDRB Wt, [Xn, Xm]
+function.a_ldr_b_reg(number.rt, number.rn, number.rm) -> number {
+    a_put(0x38606800 + (rm << 16) + (rn << 5) + rt)
+    return 0
+}
+
+# SIMD loads/stores: STR Dt, [Xn, #off] / LDR Dt (64-bit SIMD slot)
+function.a_str_d(number.rt, number.rn, number.off) -> number {
+    a_put(0xFD000000 + (((off / 8) & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+function.a_ldr_d(number.rt, number.rn, number.off) -> number {
+    a_put(0xFD400000 + (((off / 8) & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+function.a_str_s(number.rt, number.rn, number.off) -> number {
+    a_put(0xBD000000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+function.a_ldr_s(number.rt, number.rn, number.off) -> number {
+    a_put(0xBD400000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+    return 0
+}
+
+# ---- SIMD data processing ----
+function.a_fmov_dd(number.rd, number.rn) -> number {
+    a_put(0x1E604000 + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fmov_ss(number.rd, number.rn) -> number {
+    a_put(0x1E204000 + (rn << 5) + rd)
+    return 0
+}
+
+# FMOV Dd, Xn / FMOV Xd, Dn
+function.a_fmov_d_x(number.rd, number.rn) -> number {
+    a_put(0x9E670000 + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fmov_x_d(number.rd, number.rn) -> number {
+    a_put(0x9E660000 + (rn << 5) + rd)
+    return 0
+}
+
+# FMOV Sd, Wn / FMOV Wd, Sn
+function.a_fmov_s_w(number.rd, number.rn) -> number {
+    a_put(0x1E270000 + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fmov_w_s(number.rd, number.rn) -> number {
+    a_put(0x1E260000 + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fadd_d(number.rd, number.rn, number.rm) -> number {
+    a_put(0x1E602800 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fsub_d(number.rd, number.rn, number.rm) -> number {
+    a_put(0x1E603800 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fmul_d(number.rd, number.rn, number.rm) -> number {
+    a_put(0x1E600800 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fdiv_d(number.rd, number.rn, number.rm) -> number {
+    a_put(0x1E601800 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fadd_s(number.rd, number.rn, number.rm) -> number {
+    a_put(0x1E202800 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fsub_s(number.rd, number.rn, number.rm) -> number {
+    a_put(0x1E203800 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fmul_s(number.rd, number.rn, number.rm) -> number {
+    a_put(0x1E200800 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fdiv_s(number.rd, number.rn, number.rm) -> number {
+    a_put(0x1E201800 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fneg_d(number.rd, number.rn) -> number {
+    a_put(0x1E614000 + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fneg_s(number.rd, number.rn) -> number {
+    a_put(0x1E214000 + (rn << 5) + rd)
+    return 0
+}
+
+# FCVT Sd, Dn (double -> single) / FCVT Dd, Sn
+function.a_fcvt_s_d(number.rd, number.rn) -> number {
+    a_put(0x1E624000 + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fcvt_d_s(number.rd, number.rn) -> number {
+    a_put(0x1E22C000 + (rn << 5) + rd)
+    return 0
+}
+
+# SCVTF Dd, Xn (signed int -> double)
+function.a_scvtf_d_x(number.rd, number.rn) -> number {
+    a_put(0x9E620000 + (rn << 5) + rd)
+    return 0
+}
+
+# SCVTF Sd, Xn
+function.a_scvtf_s_x(number.rd, number.rn) -> number {
+    a_put(0x9E220000 + (rn << 5) + rd)
+    return 0
+}
+
+# SCVTF Dd, Wn
+function.a_scvtf_d_w(number.rd, number.rn) -> number {
+    a_put(0x1E620000 + (rn << 5) + rd)
+    return 0
+}
+
+# SCVTF Sd, Wn
+function.a_scvtf_s_w(number.rd, number.rn) -> number {
+    a_put(0x1E220000 + (rn << 5) + rd)
+    return 0
+}
+
+# UCVTF Dd, Xn / UCVTF Sd, Xn
+function.a_ucvtf_d_x(number.rd, number.rn) -> number {
+    a_put(0x9E630000 + (rn << 5) + rd)
+    return 0
+}
+
+function.a_ucvtf_s_x(number.rd, number.rn) -> number {
+    a_put(0x9E230000 + (rn << 5) + rd)
+    return 0
+}
+
+# FCVTZS Xd, Dn / FCVTZS Xd, Sn (truncate double/single -> signed int)
+function.a_fcvtzs_x_d(number.rd, number.rn) -> number {
+    a_put(0x9E780000 + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fcvtzs_x_s(number.rd, number.rn) -> number {
+    a_put(0x9E380000 + (rn << 5) + rd)
+    return 0
+}
+
+# FCVTZS Wd, Dn / Wd, Sn
+function.a_fcvtzs_w_d(number.rd, number.rn) -> number {
+    a_put(0x1E780000 + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fcvtzs_w_s(number.rd, number.rn) -> number {
+    a_put(0x1E380000 + (rn << 5) + rd)
+    return 0
+}
+
+# FCVTZU Xd, Dn / Xd, Sn
+function.a_fcvtzu_x_d(number.rd, number.rn) -> number {
+    a_put(0x9E790000 + (rn << 5) + rd)
+    return 0
+}
+
+function.a_fcvtzu_x_s(number.rd, number.rn) -> number {
+    a_put(0x9E390000 + (rn << 5) + rd)
+    return 0
+}
+
+# FCMP Dn, Dm / FCMP Sn, Sm
+function.a_fcmp_d(number.rn, number.rm) -> number {
+    a_put(0x1E602000 + (rm << 16) + (rn << 5))
+    return 0
+}
+
+function.a_fcmp_s(number.rn, number.rm) -> number {
+    a_put(0x1E202000 + (rm << 16) + (rn << 5))
+    return 0
+}
+
+# ---- absolute address of a symbol into a register ----
+function.a_sym_addr(number.rd, number.sym, number.addend) -> number {
+    type.number at = a_code_len()
+    a_movz(rd, 0, 0)
+    a_movk(rd, 0, 1)
+    a_movk(rd, 0, 2)
+    a_movk(rd, 0, 3)
+    elf.fx_abs64_arm(0, at, sym, addend)
+    return 0
+}
+
+# ---- per-function state ----
+type.ptr<type.IrFunc> a_curf = null
+type.ptr<type.number> a_foffs = null
+type.number a_locals_bytes = 0
+type.number a_locals_base = 0
+type.number a_oa = 0
+type.number a_arr_base = 0
+type.number a_frame = 0
+type.number a_trap_seq = 0
+
+const.A_SYS_EXTRA = 400
+
+function.a_local_off(number.slot) -> number {
+    # x29 sits at the frame bottom; local slots run downward from the top
+    return a_locals_base + (a_locals_bytes - a_foffs[slot])
+}
+
+# ---- stack machine: every slot is 16 bytes (sp stays 16-aligned) ----
+function.a_push(number.rt) -> number {
+    a_sub_i(31, 31, 16)
+    a_str_x(rt, 31, 0)
+    return 0
+}
+
+function.a_pop(number.rt) -> number {
+    a_ldr_x(rt, 31, 0)
+    a_add_i(31, 31, 16)
+    return 0
+}
+
+function.a_push_pair(number.rptr, number.rlen) -> number {
+    a_sub_i(31, 31, 16)
+    a_str_x(rptr, 31, 0)
+    a_str_x(rlen, 31, 8)
+    return 0
+}
+
+function.a_pop_pair(number.rptr, number.rlen) -> number {
+    a_ldr_x(rptr, 31, 0)
+    a_ldr_x(rlen, 31, 8)
+    a_add_i(31, 31, 16)
+    return 0
+}
+
+# push/pop a decimal (raw bits through x0/d0)
+function.a_push_d0() -> number {
+    a_fmov_x_d(AX0, 0)
+    a_push(AX0)
+    return 0
+}
+
+function.a_pop_d0() -> number {
+    a_pop(AX0)
+    a_fmov_d_x(0, AX0)
+    return 0
+}
+
+# ---- rt call helper ----
+function.a_call_rt(text.fn) -> number {
+    a_bl_sym(emit.rt_sym(fn))
+    return 0
+}
+
+# ---- width helpers (mirror the x86 load_at_rax / store_rax_rcx) ----
+function.a_load_at_x0(type.ptr<type.Ty>.t) -> number {
+    type.number k = 0
+    when (t != null and t.form == sema.F_SCALAR) {
+        k = t.scalar
+    }
+    when (t == sema.T_BOOL or k == sema.S_UINT8) {
+        a_ldr_b_w0()
+        return 0
+    }
+    when (k == sema.S_INT8) {
+        a_ldrsb_x(0, 0, 0)
+        return 0
+    }
+    when (k == sema.S_UINT16) {
+        a_ldr_h(0, 0, 0)
+        return 0
+    }
+    when (k == sema.S_INT16) {
+        a_ldrsh_x(0, 0, 0)
+        return 0
+    }
+    when (k == sema.S_UINT32 or k == sema.S_F32) {
+        a_ldr_w(0, 0, 0)
+        return 0
+    }
+    when (k == sema.S_INT32) {
+        a_ldrsw_x(0, 0, 0)
+        return 0
+    }
+    a_ldr_x(0, 0, 0)
+    return 0
+}
+
+# ldrb w0, [x0]
+function.a_ldr_b_w0() -> number {
+    a_ldr_b(0, 0, 0)
+    return 0
+}
+
+function.a_store_x1_at_x0(type.ptr<type.Ty>.t) -> number {
+    # value in x1, address in x0 (mirror of store_rax_rcx)
+    type.number k = 0
+    when (t != null and t.form == sema.F_SCALAR) {
+        k = t.scalar
+    }
+    when (t == sema.T_BOOL or k == sema.S_UINT8 or k == sema.S_INT8) {
+        a_str_b(1, 0, 0)
+        return 0
+    }
+    when (k == sema.S_UINT16 or k == sema.S_INT16) {
+        a_str_h(1, 0, 0)
+        return 0
+    }
+    when (k == sema.S_UINT32 or k == sema.S_INT32 or k == sema.S_F32) {
+        a_str_w(1, 0, 0)
+        return 0
+    }
+    a_str_x(1, 0, 0)
+    return 0
+}
+
+# wrap x0 to a type's width (shl then sar/shr by 64-bits), count in x9
+function.a_reencode(type.ptr<type.Ty>.t) -> number {
+    when (t == null) {
+        return 0
+    }
+    when (sema.is_integer(t) == false) {
+        return 0
+    }
+    type.number bits = sema.ty_bits(t)
+    when (bits >= 64) {
+        return 0
+    }
+    type.number sh = 64 - bits
+    a_mov_imm(AX9, sh)
+    a_lslv(0, 0, 9)
+    when (sema.ty_signed(t)) {
+        a_asrv(0, 0, 9)
+    }
+    else {
+        a_lsrv(0, 0, 9)
+    }
+    return 0
+}
+
+# ---- byte copy: dst x2, src x1, len x3 (clobbers x1..x4) ----
+function.a_copy_bytes() -> number {
+    type.number lloop = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    type.number ldone = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    a_cbz(AX3, ldone)
+    a_label_here(lloop)
+    a_ldr_b(4, 1, 0)
+    a_str_b(4, 2, 0)
+    a_add_i(AX1, AX1, 1)
+    a_add_i(AX2, AX2, 1)
+    a_sub_i(AX3, AX3, 1)
+    a_cbnz(AX3, lloop)
+    a_label_here(ldone)
+    return 0
+}
+
+# ---- MOVN (for negative immediates like AT_FDCWD) ----
+function.a_movn(number.rd, number.imm16) -> number {
+    a_put(0x92800000 + ((imm16 & 65535) << 5) + rd)
+    return 0
+}
+
+# ---- function generation ----
+function.a_slot_bytes(type.ptr<type.IrSlot>.s) -> number {
+    type.number b = sema.ty_bytes(s.ty)
+    return (b + 7) &-8
+}
+
+function.a_gen_function(type.ptr<type.IrFunc>.f, number.seq) -> number {
+    a_curf = f
+    a_trap_seq = 0
+    when (emit.trace_emit == 1) {
+        sys.write(2, "arm-emit: " + f.fi.mangled + "\n")
+    }
+
+    type.ptr<type.number> offs = alloc<type.number>(f.nslots + 1)
+    a_foffs = offs
+    type.number off = 0
+    loop (i from 0 until f.nslots) {
+        off = off + a_slot_bytes(f.slots[i])
+        offs[i] = off
+    }
+    a_locals_bytes = off
+
+    # array-arg scratch: largest total of array bytes any single call passes
+    type.number scratch = 0
+    loop (i from 0 until f.n) {
+        type.ptr<type.IrInst> inst = f.insts[i]
+        when (inst.kind != ir.I_CALL) {
+            continue
+        }
+        type.ptr<type.FuncInfo> cfi = inst.finfo
+        type.number need = 0
+        type.number lim = inst.nargs
+        when (lim > cfi.nparams) {
+            lim = cfi.nparams
+        }
+        loop (k from 0 until lim) {
+            type.ptr<type.Ty> pt = cfi.ptypes[k]
+            when (pt.form == sema.F_ARRAY or sema.is_record(pt)) {
+                need = need + sema.ty_bytes(pt)
+            }
+        }
+        when (need > scratch) {
+            scratch = need
+        }
+    }
+
+    # syscall scratch (path buffer + struct stat) in any function with sysops
+    type.number sys_extra = 0
+    loop (i from 0 until f.n) {
+        type.ptr<type.IrInst> inst = f.insts[i]
+        when (inst.kind == ir.I_SYSOP and (inst.i == 2 or inst.i == 4 or inst.i == 7 or inst.i == 8)) {
+            sys_extra = A_SYS_EXTRA
+        }
+    }
+
+    # frame layout from x29 (the frame bottom): sys scratch, array scratch,
+    # outgoing arg area (6 x 16), locals
+    a_arr_base = A_SYS_EXTRA
+    when (sys_extra == 0) {
+        a_arr_base = 0
+    }
+    # the outgoing area is 16-aligned: STR/LDR X-form immediates are
+    # scaled by 8, so a scratch like int8[5] (5 bytes) would otherwise
+    # truncate a_oa to a wrong offset in every a_str_x/a_ldr_x user
+    a_oa = (a_arr_base + scratch + 15) &-16
+    a_locals_base = a_oa + 96
+    type.number frame = a_locals_base + a_locals_bytes
+    frame = (frame + 15) &-16
+    a_frame = frame
+
+    # the function's symbol position was registered in the shared pre-pass
+    emit.sym_set_off(emit.sym_by_name(f.fi.mangled), a_code_len())
+
+    # prologue: stp x29, x30, [sp, #-16]!
+    a_put(0xA9BF7BFD)
+    # sub sp, sp, #frame (chunked for big frames)
+    type.number rem = frame
+    loop (rem > 4095) {
+        a_sub_i(31, 31, 4095)
+        rem = rem - 4095
+    }
+    a_sub_i(31, 31, rem)
+    # mov x29, sp
+    a_put(0x910003FD)
+
+    # parameters: save x0-x5 to the stack, then adopt each into its slot
+    type.number nparams = f.fi.nparams
+    when (nparams > 0) {
+        a_sub_i(31, 31, 48)
+        a_str_x(AX0, 31, 0)
+        a_str_x(AX1, 31, 8)
+        a_str_x(AX2, 31, 16)
+        a_str_x(AX3, 31, 24)
+        a_str_x(AX4, 31, 32)
+        a_str_x(AX5, 31, 40)
+        loop (k from 0 until nparams) {
+            when (k >= 6) {
+                break
+            }
+            type.number lo = a_local_off(k)
+            type.ptr<type.Ty> pt = f.fi.ptypes[k]
+            when (pt.form == sema.F_ARRAY or sema.is_record(pt)) {
+                # the register holds the caller's copy: adopt by value
+                a_ldr_x(AX2, 31, k * 8)
+                a_add_i(AX1, AX29, lo)
+                a_mov_imm(AX3, sema.ty_bytes(pt))
+                a_copy_bytes_param()
+            }
+            else when (pt == sema.T_TEXT) {
+                # the register holds the address of a (ptr,len) pair
+                a_ldr_x(AX9, 31, k * 8)
+                a_ldr_x(AX0, AX9, 0)
+                a_ldr_x(AX1, AX9, 8)
+                a_str_x(AX0, AX29, lo)
+                a_str_x(AX1, AX29, lo + 8)
+            }
+            else {
+                a_ldr_x(AX9, 31, k * 8)
+                a_str_x(AX9, AX29, lo)
+            }
+        }
+        a_add_i(31, 31, 48)
+    }
+
+    # body
+    loop (i from 0 until f.n) {
+        a_emit_inst(f.insts[i])
+    }
+
+    # implicit fall-off return: deterministic x0
+    a_movz(AX0, 0, 0)
+    a_epilogue()
+    a_patch_jumps()
+    return 0
+}
+
+# copy with dst=x1, src=x2, len=x3 (param adoption variant: src already x2)
+function.a_copy_bytes_param() -> number {
+    # shift: dst x1, src x2, len x3 — reuse a_copy_bytes with swapped roles
+    type.number lloop = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    type.number ldone = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    a_cbz(AX3, ldone)
+    a_label_here(lloop)
+    a_ldr_b(4, 2, 0)
+    a_str_b(4, 1, 0)
+    a_add_i(AX1, AX1, 1)
+    a_add_i(AX2, AX2, 1)
+    a_sub_i(AX3, AX3, 1)
+    a_cbnz(AX3, lloop)
+    a_label_here(ldone)
+    return 0
+}
+
+function.a_epilogue() -> number {
+    # restore sp = x29 + frame (chunked), then pop the frame pair and ret
+    type.number rem = a_frame
+    when (rem <= 4095) {
+        a_add_i(31, AX29, rem)
+    }
+    else {
+        a_add_i(31, AX29, 4095)
+        rem = rem - 4095
+        loop (rem > 4095) {
+            a_add_i(31, 31, 4095)
+            rem = rem - 4095
+        }
+        a_add_i(31, 31, rem)
+    }
+    a_put(0xA8C17BFD)
+    a_ret()
+    return 0
+}
+
+# ---- the instruction dispatch (classic stack machine) ----
+function.a_emit_inst(type.ptr<type.IrInst>.in) -> number {
+    when (in.kind == ir.I_CONST_INT) {
+        a_mov_imm(AX0, in.i)
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_CONST_BOOL) {
+        a_movz(AX0, in.b, 0)
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_CONST_DEC) {
+        when (in.ty == sema.T_F32) {
+            # one rounding: f64 bits -> d0 -> cvt to s0 -> bits in w0
+            a_mov_imm(AX0, elf.dec_bits(in.d))
+            a_fmov_d_x(0, AX0)
+            a_fcvt_s_d(0, 0)
+            a_fmov_w_s(AX0, 0)
+            a_push(AX0)
+            return 0
+        }
+        a_mov_imm(AX0, elf.dec_bits(in.d))
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_CONST_TEXT) {
+        a_sym_addr(AX0, emit.txt_sym[in.text_idx], 0)
+        a_mov_imm(AX1, emit.txt_len[in.text_idx])
+        a_push_pair(AX0, AX1)
+        return 0
+    }
+    when (in.kind == ir.I_LOAD_LOCAL) {
+        type.number off = a_local_off(in.slot)
+        when (in.ty == sema.T_TEXT) {
+            a_ldr_x(AX0, AX29, off)
+            a_ldr_x(AX1, AX29, off + 8)
+            a_push_pair(AX0, AX1)
+        }
+        else {
+            a_ldr_x(AX0, AX29, off)
+            a_push(AX0)
+        }
+        return 0
+    }
+    when (in.kind == ir.I_STORE_LOCAL) {
+        type.number off = a_local_off(in.slot)
+        when (in.ty == sema.T_TEXT) {
+            a_pop_pair(AX0, AX1)
+            a_str_x(AX0, AX29, off)
+            a_str_x(AX1, AX29, off + 8)
+        }
+        else {
+            a_pop(AX0)
+            a_str_x(AX0, AX29, off)
+        }
+        return 0
+    }
+    when (in.kind == ir.I_LOAD_GLOBAL) {
+        type.ptr<type.Symbol> s = in.sym
+        when (in.ty == sema.T_TEXT) {
+            a_sym_addr(AX9, emit.sym_by_name(s.mangled), 0)
+            a_ldr_x(AX0, AX9, 0)
+            a_ldr_x(AX1, AX9, 8)
+            a_push_pair(AX0, AX1)
+        }
+        else {
+            # one width-aware load through the symbol address
+            a_sym_addr(AX9, emit.sym_by_name(s.mangled), 0)
+            a_mov(AX0, AX9)
+            a_load_at_x0(in.ty)
+            a_push(AX0)
+        }
+        return 0
+    }
+    when (in.kind == ir.I_STORE_GLOBAL) {
+        type.ptr<type.Symbol> s = in.sym
+        when (in.ty == sema.T_TEXT) {
+            a_pop_pair(AX0, AX1)
+            a_sym_addr(AX9, emit.sym_by_name(s.mangled), 0)
+            a_str_x(AX0, AX9, 0)
+            a_str_x(AX1, AX9, 8)
+        }
+        else {
+            a_pop(AX0)
+            a_sym_addr(AX9, emit.sym_by_name(s.mangled), 0)
+            a_mov(AX1, AX0)
+            a_mov(AX0, AX9)
+            a_store_x1_at_x0(in.ty)
+        }
+        return 0
+    }
+    when (in.kind == ir.I_CONV) {
+        return a_emit_conv(in)
+    }
+    when (in.kind == ir.I_BINOP) {
+        return a_emit_binop(in)
+    }
+    when (in.kind == ir.I_UNOP) {
+        return a_emit_unop(in)
+    }
+    when (in.kind == ir.I_LABEL) {
+        a_label_here(in.label)
+        return 0
+    }
+    when (in.kind == ir.I_JMP) {
+        a_b(in.label)
+        return 0
+    }
+    when (in.kind == ir.I_JMPF) {
+        a_pop(AX0)
+        a_cbz(AX0, in.label)
+        return 0
+    }
+    when (in.kind == ir.I_CALL) {
+        return a_emit_call(in)
+    }
+    when (in.kind == ir.I_WRITE) {
+        return a_emit_write(in)
+    }
+    when (in.kind == ir.I_PRINT) {
+        a_call_rt("print_flush")
+        return 0
+    }
+    when (in.kind == ir.I_RETURN) {
+        when (in.ty != null and (sema.is_integer(in.ty) or in.ty == sema.T_BOOL or sema.is_ptr(in.ty) or in.ty == sema.T_NULL or in.ty == sema.T_F32)) {
+            a_pop(AX0)
+        }
+        else when (in.ty == sema.T_DECIMAL) {
+            a_pop(AX0)
+        }
+        else when (in.ty == sema.T_TEXT) {
+            a_pop_pair(AX0, AX1)
+        }
+        else {
+            a_movz(AX0, 0, 0)
+        }
+        a_epilogue()
+        return 0
+    }
+    when (in.kind == ir.I_POP) {
+        a_add_i(31, 31, 16)
+        return 0
+    }
+    when (in.kind == ir.I_ADDR_LOCAL) {
+        type.number off = a_local_off(in.slot)
+        a_add_i(AX0, AX29, off)
+        when (in.i != 0) {
+            a_add_i(AX0, AX0, in.i)
+        }
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_ADDR_GLOBAL) {
+        type.ptr<type.Symbol> sym = in.sym
+        a_sym_addr(AX0, emit.sym_by_name(sym.mangled), in.i)
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_INDEX) {
+        type.number count = 0
+        type.number esz = 8
+        when (in.ty != null) {
+            count = in.ty.count
+            esz = sema.ty_bytes(in.ty.elem)
+        }
+        a_pop(AX1)
+        a_pop(AX0)
+        type.number lok = a_trap_lbl(a_trap_seq)
+        a_trap_seq = a_trap_seq + 1
+        a_subs_i(31, AX1, count)
+        a_bcc(A_LO, lok)
+        a_mov(AX0, AX1)
+        a_mov_imm(AX1, count)
+        a_call_rt("bounds_trap")
+        a_label_here(lok)
+        when (esz == 1) {
+            a_add(AX0, AX0, AX1)
+        }
+        else when (esz == 2 or esz == 4 or esz == 8) {
+            type.number sh = 1
+            when (esz == 4) {
+                sh = 2
+            }
+            else when (esz == 8) {
+                sh = 3
+            }
+            a_mov_imm(AX9, sh)
+            a_lslv(AX1, AX1, AX9)
+            a_add(AX0, AX0, AX1)
+        }
+        else {
+            a_mov_imm(AX9, esz)
+            a_mul(AX1, AX1, AX9)
+            a_add(AX0, AX0, AX1)
+        }
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_TEXT_LEN) {
+        a_pop_pair(AX0, AX1)
+        a_mov(AX0, AX1)
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_TEXT_BYTE) {
+        a_pop(AX1)
+        a_pop_pair(AX0, AX2)
+        type.number lok = a_trap_lbl(a_trap_seq)
+        a_trap_seq = a_trap_seq + 1
+        a_subs(31, AX1, AX2)
+        a_bcc(A_LO, lok)
+        a_mov(AX0, AX1)
+        a_mov(AX1, AX2)
+        a_call_rt("text_bounds_trap")
+        a_label_here(lok)
+        a_ldr_b_reg(0, 0, 1)
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_TEXT_FROMBYTES) {
+        a_pop(AX1)
+        a_pop(AX0)
+        a_push_pair(AX0, AX1)
+        return 0
+    }
+    when (in.kind == ir.I_TEXT_SLICE) {
+        a_pop(AX2)
+        a_pop(AX1)
+        a_pop_pair(AX0, AX3)
+        type.number l1 = a_trap_lbl(a_trap_seq)
+        a_trap_seq = a_trap_seq + 1
+        a_subs(31, AX1, AX2)
+        a_bls(l1)
+        a_mov(AX0, AX1)
+        a_mov(AX1, AX2)
+        a_call_rt("text_bounds_trap")
+        a_label_here(l1)
+        type.number l2 = a_trap_lbl(a_trap_seq)
+        a_trap_seq = a_trap_seq + 1
+        a_subs(31, AX2, AX3)
+        a_bls(l2)
+        a_mov(AX0, AX2)
+        a_mov(AX1, AX3)
+        a_call_rt("text_bounds_trap")
+        a_label_here(l2)
+        a_add(AX0, AX0, AX1)
+        a_sub(AX2, AX2, AX1)
+        a_push_pair(AX0, AX2)
+        return 0
+    }
+    when (in.kind == ir.I_FS_READ) {
+        a_pop_pair(AX0, AX1)
+        a_str_x(AX0, AX29, a_oa)
+        a_str_x(AX1, AX29, a_oa + 8)
+        a_add_i(AX0, AX29, a_oa)
+        a_call_rt("fs_read")
+        a_push_pair(AX0, AX1)
+        return 0
+    }
+    when (in.kind == ir.I_FS_WRITE) {
+        a_pop_pair(AX9, AX10)
+        a_pop_pair(AX11, AX12)
+        a_str_x(AX11, AX29, a_oa)
+        a_str_x(AX12, AX29, a_oa + 8)
+        a_str_x(AX9, AX29, a_oa + 16)
+        a_str_x(AX10, AX29, a_oa + 24)
+        a_add_i(AX0, AX29, a_oa)
+        a_add_i(AX1, AX29, a_oa + 16)
+        a_call_rt("fs_save")
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_FS_EXISTS) {
+        a_pop_pair(AX0, AX1)
+        a_str_x(AX0, AX29, a_oa)
+        a_str_x(AX1, AX29, a_oa + 8)
+        a_add_i(AX0, AX29, a_oa)
+        a_call_rt("fs_exists")
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_ENV_ARGC) {
+        a_call_rt("env_arg_count")
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_ENV_ARG) {
+        a_pop(AX0)
+        a_call_rt("env_arg")
+        a_push_pair(AX0, AX1)
+        return 0
+    }
+    when (in.kind == ir.I_SYSOP) {
+        return a_emit_sysop(in)
+    }
+    when (in.kind == ir.I_LOAD_AT) {
+        a_pop(AX0)
+        when (in.ty == sema.T_TEXT) {
+            a_ldr_x(AX1, AX0, 8)
+            a_ldr_x(AX0, AX0, 0)
+            a_push_pair(AX0, AX1)
+            return 0
+        }
+        a_load_at_x0(in.ty)
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_STORE_AT) {
+        when (in.ty == sema.T_TEXT) {
+            a_pop_pair(AX0, AX1)
+            a_pop(AX9)
+            a_str_x(AX0, AX9, 0)
+            a_str_x(AX1, AX9, 8)
+            return 0
+        }
+        a_pop(AX1)
+        a_pop(AX0)
+        a_store_x1_at_x0(in.ty)
+        return 0
+    }
+    when (in.kind == ir.I_COPY) {
+        a_pop(AX1)
+        a_pop(AX2)
+        a_mov_imm(AX3, in.i)
+        a_copy_bytes()
+        return 0
+    }
+    when (in.kind == ir.I_ALLOC) {
+        type.number esz = 8
+        when (in.ty != null) {
+            esz = sema.ty_bytes(in.ty)
+        }
+        a_pop(AX0)
+        when (esz != 1) {
+            a_mov_imm(AX9, esz)
+            a_mul(AX0, AX0, AX9)
+        }
+        a_call_rt("mem_alloc")
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_RELEASE) {
+        a_pop(AX0)
+        a_call_rt("mem_release")
+        return 0
+    }
+    when (in.kind == ir.I_PTRCHK) {
+        type.number pnk = a_trap_lbl(a_trap_seq)
+        a_trap_seq = a_trap_seq + 1
+        a_pop(AX0)
+        a_cbnz(AX0, pnk)
+        a_call_rt("null_trap")
+        a_label_here(pnk)
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_PTR_SCALE) {
+        type.number esz = 8
+        when (in.ty != null and in.ty.elem != null) {
+            esz = sema.ty_bytes(in.ty.elem)
+        }
+        a_pop(AX1)
+        a_pop(AX0)
+        when (esz == 1) {
+            a_add(AX0, AX0, AX1)
+        }
+        else when (esz == 2 or esz == 4 or esz == 8) {
+            type.number sh = 1
+            when (esz == 4) {
+                sh = 2
+            }
+            else when (esz == 8) {
+                sh = 3
+            }
+            a_mov_imm(AX9, sh)
+            a_lslv(AX1, AX1, AX9)
+            a_add(AX0, AX0, AX1)
+        }
+        else {
+            a_mov_imm(AX9, esz)
+            a_mul(AX1, AX1, AX9)
+            a_add(AX0, AX0, AX1)
+        }
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_PTR_DIFF) {
+        type.number esz = 8
+        when (in.ty != null and in.ty.elem != null) {
+            esz = sema.ty_bytes(in.ty.elem)
+        }
+        a_pop(AX1)
+        a_pop(AX0)
+        a_sub(AX0, AX0, AX1)
+        a_mov_imm(AX9, esz)
+        a_sdiv(AX0, AX0, AX9)
+        a_push(AX0)
+        return 0
+    }
+    when (in.kind == ir.I_ADDOFF) {
+        a_pop(AX0)
+        when (in.i != 0) {
+            a_add_i(AX0, AX0, in.i)
+        }
+        a_push(AX0)
+        return 0
+    }
+    return 0
+}
+
+# ---- conversions ----
+function.a_emit_conv(type.ptr<type.IrInst>.in) -> number {
+    type.ptr<type.Ty> src = in.ty
+    type.ptr<type.Ty> dst = in.ty2
+    when (src == dst) {
+        return 0
+    }
+    when (dst == sema.T_TEXT) {
+        # T.to_text(v): the runtime returns a text pair in x0/x1
+        when (src == sema.T_F32 or src == sema.T_DECIMAL or src == sema.T_BOOL or src == sema.T_UINT64) {
+            a_pop(AX0)
+        }
+        else {
+            a_pop(AX0)
+        }
+        a_call_rt(a_to_text_fn(src))
+        a_push_pair(AX0, AX1)
+        return 0
+    }
+    when (src == sema.T_TEXT) {
+        a_pop_pair(AX0, AX1)
+        a_str_x(AX0, AX29, a_oa)
+        a_str_x(AX1, AX29, a_oa + 8)
+        a_add_i(AX0, AX29, a_oa)
+        when (dst == sema.T_DECIMAL) {
+            a_call_rt("text_to_decimal")
+            a_push(AX0)
+            return 0
+        }
+        when (dst == sema.T_F32) {
+            a_call_rt("text_to_decimal")
+            a_fmov_d_x(0, AX0)
+            a_fcvt_s_d(0, 0)
+            a_fmov_w_s(AX0, 0)
+            a_push(AX0)
+            return 0
+        }
+        a_call_rt("text_to_number")
+        a_reencode(dst)
+        a_push(AX0)
+        return 0
+    }
+    when (dst == sema.T_F32) {
+        when (src == sema.T_DECIMAL) {
+            a_pop(AX0)
+            a_fmov_d_x(0, AX0)
+            a_fcvt_s_d(0, 0)
+            a_fmov_w_s(AX0, 0)
+            a_push(AX0)
+            return 0
+        }
+        when (src == sema.T_BOOL) {
+            a_pop(AX0)
+            a_scvtf_s_x(0, AX0)
+            a_fmov_w_s(AX0, 0)
+            a_push(AX0)
+            return 0
+        }
+        when (src == sema.T_UINT64) {
+            a_pop(AX0)
+            a_ucvtf_s_x(0, AX0)
+            a_fmov_w_s(AX0, 0)
+            a_push(AX0)
+            return 0
+        }
+        when (sema.is_ptr(src) or src == sema.T_NULL) {
+            a_pop(AX0)
+            a_push(AX0)
+            return 0
+        }
+        a_pop(AX0)
+        a_scvtf_s_x(0, AX0)
+        a_fmov_w_s(AX0, 0)
+        a_push(AX0)
+        return 0
+    }
+    when (src == sema.T_F32) {
+        when (dst == sema.T_DECIMAL) {
+            a_pop(AX0)
+            a_fmov_s_w(0, AX0)
+            a_fcvt_d_s(0, 0)
+            a_fmov_x_d(AX0, 0)
+            a_push(AX0)
+            return 0
+        }
+        when (sema.is_ptr(dst) or dst == sema.T_NULL) {
+            a_pop(AX0)
+            a_push(AX0)
+            return 0
+        }
+        a_pop(AX0)
+        a_fmov_s_w(0, AX0)
+        a_fcvtzs_x_s(AX0, 0)
+        a_reencode(dst)
+        a_push(AX0)
+        return 0
+    }
+    when (src == sema.T_DECIMAL) {
+        a_pop(AX0)
+        a_fmov_d_x(0, AX0)
+        a_fcvtzs_x_d(AX0, 0)
+        a_reencode(dst)
+        a_push(AX0)
+        return 0
+    }
+    when (dst == sema.T_DECIMAL) {
+        a_pop(AX0)
+        when (src == sema.T_BOOL) {
+            a_scvtf_d_x(0, AX0)
+        }
+        else when (src == sema.T_UINT64) {
+            a_ucvtf_d_x(0, AX0)
+        }
+        else when (sema.is_ptr(src) or src == sema.T_NULL) {
+            a_push(AX0)
+            return 0
+        }
+        else {
+            a_scvtf_d_x(0, AX0)
+        }
+        a_fmov_x_d(AX0, 0)
+        a_push(AX0)
+        return 0
+    }
+    # integer -> integer (and pointer reinterpretations)
+    a_pop(AX0)
+    when (sema.is_ptr(dst) or dst == sema.T_NULL or sema.is_ptr(src) or src == sema.T_NULL) {
+        a_push(AX0)
+        return 0
+    }
+    a_reencode(dst)
+    a_push(AX0)
+    return 0
+}
+
+function.a_to_text_fn(type.ptr<type.Ty>.t) -> text {
+    when (t == sema.T_F32) {
+        return "f32_to_text"
+    }
+    when (t == sema.T_DECIMAL) {
+        return "decimal_to_text"
+    }
+    when (t == sema.T_BOOL) {
+        return "bool_to_text"
+    }
+    when (t == sema.T_UINT64) {
+        return "uint_to_text"
+    }
+    return "number_to_text"
+}
+
+# ---- binary operators ----
+function.a_emit_binop(type.ptr<type.IrInst>.in) -> number {
+    # f32 arithmetic and comparisons
+    when (in.ty == sema.T_F32 and (in.op == parser.OP_ADD or in.op == parser.OP_SUB or in.op == parser.OP_MUL or in.op == parser.OP_DIV or (in.op >= parser.OP_EQ and in.op <= parser.OP_GE))) {
+        a_pop(AX1)
+        a_pop(AX0)
+        a_fmov_s_w(1, AX1)
+        a_fmov_s_w(0, AX0)
+        when (in.op == parser.OP_ADD) {
+            a_fadd_s(0, 0, 1)
+        }
+        else when (in.op == parser.OP_SUB) {
+            a_fsub_s(0, 0, 1)
+        }
+        else when (in.op == parser.OP_MUL) {
+            a_fmul_s(0, 0, 1)
+        }
+        else when (in.op == parser.OP_DIV) {
+            a_fdiv_s(0, 0, 1)
+        }
+        else {
+            return a_fcmp_result(in.op, 0)
+        }
+        a_fmov_w_s(AX0, 0)
+        a_push(AX0)
+        return 0
+    }
+    # decimal arithmetic and comparisons
+    when (in.ty == sema.T_DECIMAL) {
+        a_pop(AX1)
+        a_pop(AX0)
+        a_fmov_d_x(1, AX1)
+        a_fmov_d_x(0, AX0)
+        when (in.op == parser.OP_ADD) {
+            a_fadd_d(0, 0, 1)
+        }
+        else when (in.op == parser.OP_SUB) {
+            a_fsub_d(0, 0, 1)
+        }
+        else when (in.op == parser.OP_MUL) {
+            a_fmul_d(0, 0, 1)
+        }
+        else when (in.op == parser.OP_DIV) {
+            a_fdiv_d(0, 0, 1)
+        }
+        else {
+            return a_fcmp_result_d(in.op)
+        }
+        a_fmov_x_d(AX0, 0)
+        a_push(AX0)
+        return 0
+    }
+    # text concat / equality (runtime calls)
+    when (in.ty == sema.T_TEXT) {
+        a_pop_pair(AX9, AX10)
+        a_pop_pair(AX11, AX12)
+        a_str_x(AX11, AX29, a_oa)
+        a_str_x(AX12, AX29, a_oa + 8)
+        a_str_x(AX9, AX29, a_oa + 16)
+        a_str_x(AX10, AX29, a_oa + 24)
+        a_add_i(AX0, AX29, a_oa)
+        a_add_i(AX1, AX29, a_oa + 16)
+        when (in.op == parser.OP_ADD) {
+            a_call_rt("concat")
+            a_push_pair(AX0, AX1)
+            return 0
+        }
+        a_call_rt("text_eq")
+        when (in.op == parser.OP_NEQ) {
+            a_movz(AX9, 1, 0)
+            a_eor(AX0, AX0, AX9)
+        }
+        a_push(AX0)
+        return 0
+    }
+    # pointer arithmetic
+    when (in.ty != null and sema.is_ptr(in.ty) and (in.op == parser.OP_ADD or in.op == parser.OP_SUB)) {
+        type.number esz = sema.ty_bytes(in.ty.elem)
+        a_pop(AX1)
+        a_pop(AX0)
+        a_mov_imm(AX9, esz)
+        a_mul(AX1, AX1, AX9)
+        when (in.op == parser.OP_ADD) {
+            a_add(AX0, AX0, AX1)
+        }
+        else {
+            a_sub(AX0, AX0, AX1)
+        }
+        a_push(AX0)
+        return 0
+    }
+    # integer / bool
+    type.number is_bool = 0
+    when (in.ty == sema.T_BOOL) {
+        is_bool = 1
+    }
+    type.number is_unsigned = 0
+    when (in.ty != null and sema.is_integer(in.ty) and sema.ty_signed(in.ty) == false) {
+        is_unsigned = 1
+    }
+    a_pop(AX1)
+    a_pop(AX0)
+    when (in.op == parser.OP_ADD) {
+        a_add(AX0, AX0, AX1)
+    }
+    else when (in.op == parser.OP_SUB) {
+        a_sub(AX0, AX0, AX1)
+    }
+    else when (in.op == parser.OP_MUL) {
+        a_mul(AX0, AX0, AX1)
+    }
+    else when (in.op == parser.OP_BAND) {
+        a_and(AX0, AX0, AX1)
+    }
+    else when (in.op == parser.OP_BOR) {
+        a_or(AX0, AX0, AX1)
+    }
+    else when (in.op == parser.OP_XOR) {
+        a_eor(AX0, AX0, AX1)
+    }
+    else when (in.op == parser.OP_AND) {
+        a_and(AX0, AX0, AX1)
+    }
+    else when (in.op == parser.OP_OR) {
+        a_or(AX0, AX0, AX1)
+    }
+    else when (in.op == parser.OP_SHL or in.op == parser.OP_SHR) {
+        type.number bits = 64
+        when (in.ty != null) {
+            bits = sema.ty_bits(in.ty)
+        }
+        type.number lsv = a_trap_lbl(a_trap_seq)
+        a_trap_seq = a_trap_seq + 1
+        a_subs_i(31, AX1, bits)
+        a_bcc(A_LO, lsv)
+        a_mov(AX0, AX1)
+        a_call_rt("shift_trap")
+        a_label_here(lsv)
+        when (in.op == parser.OP_SHL) {
+            a_lslv(AX0, AX0, AX1)
+        }
+        else when (in.ty != null and sema.ty_signed(in.ty)) {
+            a_asrv(AX0, AX0, AX1)
+        }
+        else {
+            a_lsrv(AX0, AX0, AX1)
+        }
+    }
+    else when (in.op == parser.OP_DIV or in.op == parser.OP_MOD) {
+        type.number dz = a_trap_lbl(a_trap_seq)
+        a_trap_seq = a_trap_seq + 1
+        a_cbnz(AX1, dz)
+        a_call_rt("div_trap")
+        a_label_here(dz)
+        when (is_unsigned == 1) {
+            a_udiv(AX2, AX0, AX1)
+            when (in.op == parser.OP_DIV) {
+                a_mov(AX0, AX2)
+            }
+            else {
+                a_msub(AX0, AX2, AX1, AX0)
+            }
+        }
+        else {
+            a_sdiv(AX2, AX0, AX1)
+            when (in.op == parser.OP_DIV) {
+                a_mov(AX0, AX2)
+            }
+            else {
+                a_msub(AX0, AX2, AX1, AX0)
+            }
+        }
+    }
+    else when (in.op == parser.OP_EQ) {
+        a_subs(31, AX0, AX1)
+        a_cset(AX0, A_EQ)
+    }
+    else when (in.op == parser.OP_NEQ) {
+        a_subs(31, AX0, AX1)
+        a_cset(AX0, A_NE)
+    }
+    else when (in.op == parser.OP_LT) {
+        a_subs(31, AX0, AX1)
+        when (is_unsigned == 1) {
+            a_cset(AX0, A_CC)
+        }
+        else {
+            a_cset(AX0, A_LT)
+        }
+    }
+    else when (in.op == parser.OP_LE) {
+        a_subs(31, AX0, AX1)
+        when (is_unsigned == 1) {
+            a_cset(AX0, A_LS)
+        }
+        else {
+            a_cset(AX0, A_LE)
+        }
+    }
+    else when (in.op == parser.OP_GT) {
+        a_subs(31, AX0, AX1)
+        when (is_unsigned == 1) {
+            a_cset(AX0, A_HI)
+        }
+        else {
+            a_cset(AX0, A_GT)
+        }
+    }
+    else when (in.op == parser.OP_GE) {
+        a_subs(31, AX0, AX1)
+        when (is_unsigned == 1) {
+            a_cset(AX0, A_CS)
+        }
+        else {
+            a_cset(AX0, A_GE)
+        }
+    }
+    type.number is_intop = 0
+    when (in.op <= parser.OP_MOD or in.op >= parser.OP_BAND) {
+        is_intop = 1
+    }
+    when (is_intop == 1 and is_bool == 0) {
+        a_reencode(in.ty)
+    }
+    a_push(AX0)
+    return 0
+}
+
+# ordered comparison result for f32 (values in s0/s1)
+function.a_fcmp_result(number.op, number.tmp) -> number {
+    type.number lnan = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    type.number ldone = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    a_fcmp_s(0, 1)
+    when (op == parser.OP_EQ) {
+        a_cset(AX0, A_EQ)
+    }
+    else when (op == parser.OP_NEQ) {
+        a_cset(AX0, A_NE)
+    }
+    else {
+        # ordered comparisons: NaN makes < <= > >= false
+        a_bvs(lnan)
+        when (op == parser.OP_LT) {
+            a_cset(AX0, A_LT)
+        }
+        else when (op == parser.OP_LE) {
+            a_cset(AX0, A_LE)
+        }
+        else when (op == parser.OP_GT) {
+            a_cset(AX0, A_GT)
+        }
+        else {
+            a_cset(AX0, A_GE)
+        }
+        a_b(ldone)
+        a_label_here(lnan)
+        a_movz(AX0, 0, 0)
+        a_label_here(ldone)
+    }
+    a_push(AX0)
+    return 0
+}
+
+function.a_fcmp_result_d(number.op) -> number {
+    type.number lnan = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    type.number ldone = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    a_fcmp_d(0, 1)
+    when (op == parser.OP_EQ) {
+        a_cset(AX0, A_EQ)
+    }
+    else when (op == parser.OP_NEQ) {
+        a_cset(AX0, A_NE)
+    }
+    else {
+        a_bvs(lnan)
+        when (op == parser.OP_LT) {
+            a_cset(AX0, A_LT)
+        }
+        else when (op == parser.OP_LE) {
+            a_cset(AX0, A_LE)
+        }
+        else when (op == parser.OP_GT) {
+            a_cset(AX0, A_GT)
+        }
+        else {
+            a_cset(AX0, A_GE)
+        }
+        a_b(ldone)
+        a_label_here(lnan)
+        a_movz(AX0, 0, 0)
+        a_label_here(ldone)
+    }
+    a_push(AX0)
+    return 0
+}
+
+# ---- unary operators ----
+function.a_emit_unop(type.ptr<type.IrInst>.in) -> number {
+    when (in.uop == parser.UN_NEG and in.ty == sema.T_F32) {
+        a_pop(AX0)
+        a_fmov_s_w(0, AX0)
+        a_fneg_s(0, 0)
+        a_fmov_w_s(AX0, 0)
+        a_push(AX0)
+        return 0
+    }
+    when (in.uop == parser.UN_NEG and in.ty == sema.T_DECIMAL) {
+        a_pop(AX0)
+        a_fmov_d_x(0, AX0)
+        a_fneg_d(0, 0)
+        a_fmov_x_d(AX0, 0)
+        a_push(AX0)
+        return 0
+    }
+    when (in.uop == parser.UN_NEG) {
+        a_pop(AX0)
+        a_neg(AX0, AX0)
+        a_reencode(in.ty)
+        a_push(AX0)
+        return 0
+    }
+    when (in.uop == parser.UN_BNOT) {
+        a_pop(AX0)
+        a_mvn(AX0, AX0)
+        a_reencode(in.ty)
+        a_push(AX0)
+        return 0
+    }
+    # logical not
+    a_pop(AX0)
+    a_movz(AX9, 1, 0)
+    a_eor(AX0, AX0, AX9)
+    a_push(AX0)
+    return 0
+}
+
+# ---- calls ----
+function.a_emit_call(type.ptr<type.IrInst>.in) -> number {
+    type.ptr<type.FuncInfo> fi = in.finfo
+    type.number n = in.nargs
+
+    # phase 1: pop the args (arg1 pops first), staging each into the
+    # outgoing area; arrays copy into the scratch
+    type.array<type.number, 16> arr_off = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    type.number scratch_off = 0
+    loop (k from 0 until n) {
+        type.ptr<type.Ty> t = sema.T_NUMBER
+        when (k < fi.nparams) {
+            t = fi.ptypes[k]
+        }
+        when (t.form == sema.F_ARRAY or sema.is_record(t)) {
+            type.number bytes = sema.ty_bytes(t)
+            a_pop(AX2)
+            a_add_i(AX1, AX29, a_arr_base + scratch_off)
+            a_mov_imm(AX3, bytes)
+            a_copy_bytes_param()
+            when (k < 16) {
+                arr_off[k] = scratch_off
+            }
+            scratch_off = scratch_off + bytes
+            continue
+        }
+        when (t == sema.T_TEXT) {
+            a_pop_pair(AX0, AX1)
+            a_str_x(AX0, AX29, a_oa + k * 16)
+            a_str_x(AX1, AX29, a_oa + k * 16 + 8)
+            continue
+        }
+        a_pop(AX9)
+        a_str_x(AX9, AX29, a_oa + k * 16)
+    }
+
+    # phase 2: load the argument registers
+    loop (k from 0 until n) {
+        when (k >= 6) {
+            break
+        }
+        type.ptr<type.Ty> t = sema.T_NUMBER
+        when (k < fi.nparams) {
+            t = fi.ptypes[k]
+        }
+        type.number areg = k
+        when (t.form == sema.F_ARRAY or sema.is_record(t)) {
+            a_add_i(areg, AX29, a_arr_base + arr_off[k])
+        }
+        else when (t == sema.T_TEXT) {
+            a_add_i(areg, AX29, a_oa + k * 16)
+        }
+        else {
+            a_ldr_x(areg, AX29, a_oa + k * 16)
+        }
+    }
+
+    type.number csym = emit.sym_by_name(fi.mangled)
+    when (csym < 0) {
+        sys.write(2, "okular: call to `" + fi.mangled + "` cannot be linked — its module was skipped (add it to [source.files.use]).\n")
+        emit.set_failed(1)
+        csym = 0
+    }
+    a_bl_sym(csym)
+
+    # result
+    type.ptr<type.Ty> ret = fi.ret
+    when (ret != null and (sema.is_integer(ret) or ret == sema.T_BOOL or sema.is_ptr(ret) or ret == sema.T_NULL or ret == sema.T_F32)) {
+        a_push(AX0)
+    }
+    else when (ret == sema.T_DECIMAL) {
+        a_push(AX0)
+    }
+    else when (ret == sema.T_TEXT) {
+        a_push_pair(AX0, AX1)
+    }
+    return 0
+}
+
+# ---- write ----
+function.a_emit_write(type.ptr<type.IrInst>.in) -> number {
+    type.number k = 0
+    when (in.ty != null and in.ty.form == sema.F_SCALAR) {
+        k = in.ty.scalar
+    }
+    when (k == sema.S_UINT64) {
+        a_pop(AX0)
+        a_call_rt("write_uint")
+    }
+    else when (in.ty == sema.T_BOOL) {
+        a_pop(AX0)
+        a_call_rt("write_bool")
+    }
+    else when (sema.is_integer(in.ty)) {
+        a_pop(AX0)
+        a_call_rt("write_number")
+    }
+    else when (in.ty == sema.T_F32) {
+        a_pop(AX0)
+        a_call_rt("write_f32")
+    }
+    else when (in.ty == sema.T_DECIMAL) {
+        a_pop(AX0)
+        a_call_rt("write_decimal")
+    }
+    else when (in.ty == sema.T_TEXT) {
+        a_pop_pair(AX0, AX1)
+        a_str_x(AX0, AX29, a_oa)
+        a_str_x(AX1, AX29, a_oa + 8)
+        a_add_i(AX0, AX29, a_oa)
+        a_call_rt("write_text")
+    }
+    return 0
+}
+
+# ---- inline syscalls (ARM64 Linux numbers; the *at variants) ----
+function.a_emit_sysop(type.ptr<type.IrInst>.in) -> number {
+    when (in.i == 0) {
+        # sys.write(fd, text.buf): write(2)
+        a_pop_pair(AX9, AX10)
+        a_pop(AX0)
+        a_mov(AX1, AX9)
+        a_mov(AX2, AX10)
+        a_movz(AX8, 64, 0)
+        a_svc()
+        a_push(AX0)
+        return 0
+    }
+    when (in.i == 1) {
+        # sys.read(fd, ptr<byte>.buf, len): read(2)
+        a_pop(AX2)
+        a_pop(AX1)
+        a_pop(AX0)
+        a_movz(AX8, 63, 0)
+        a_svc()
+        a_push(AX0)
+        return 0
+    }
+    when (in.i == 2) {
+        # sys.open(path, flags, mode): openat(AT_FDCWD, ...)
+        return a_emit_open(in)
+    }
+    when (in.i == 9) {
+        # sys.getdents(fd, buf, len): getdents64(2)
+        a_pop(AX2)
+        a_pop(AX1)
+        a_pop(AX0)
+        a_movz(AX8, 61, 0)
+        a_svc()
+        a_push(AX0)
+        return 0
+    }
+    when (in.i == 3) {
+        # sys.close(fd)
+        a_pop(AX0)
+        a_movz(AX8, 57, 0)
+        a_svc()
+        a_push(AX0)
+        return 0
+    }
+    when (in.i == 4) {
+        # sys.size(fd): newfstatat(fd, "", buf, AT_EMPTY_PATH) — the
+        # aarch64 kernel has no plain fstat; st_size at offset 48
+        a_pop(AX0)
+        a_str_b(31, AX29, 0)
+        a_add_i(AX1, AX29, 0)
+        a_add_i(AX2, AX29, 256)
+        a_movz(AX3, 4096, 0)
+        a_movz(AX8, 80, 0)
+        a_svc()
+        type.number lok = a_trap_lbl(a_trap_seq)
+        a_trap_seq = a_trap_seq + 1
+        type.number ldone = a_trap_lbl(a_trap_seq)
+        a_trap_seq = a_trap_seq + 1
+        a_subs_i(31, AX0, 0)
+        a_bpl(lok)
+        a_movz(AX0, 0, 0)
+        a_movn(AX0, 0)
+        a_b(ldone)
+        a_label_here(lok)
+        a_ldr_x(AX0, AX2, 48)
+        a_label_here(ldone)
+        a_push(AX0)
+        return 0
+    }
+    when (in.i == 5) {
+        # sys.mmap(len): anonymous RW; kernel errors -> null
+        a_pop(AX1)
+        a_movz(AX0, 0, 0)
+        type.number lpush = a_trap_lbl(a_trap_seq)
+        a_trap_seq = a_trap_seq + 1
+        type.number lok = a_trap_lbl(a_trap_seq)
+        a_trap_seq = a_trap_seq + 1
+        a_cbz(AX1, lpush)
+        a_movz(AX2, 3, 0)
+        a_movz(AX3, 34, 0)
+        a_movn(AX4, 0)
+        a_movz(AX5, 0, 0)
+        a_movz(AX8, 222, 0)
+        a_svc()
+        # error mapping: x0 in (-4096, 0) -> null
+        a_subs_i(31, AX0, 0)
+        a_bpl(lok)
+        a_movn(AX9, 4095)
+        a_subs(31, AX0, AX9)
+        a_ble(lok)
+        a_movz(AX0, 0, 0)
+        a_label_here(lok)
+        a_label_here(lpush)
+        a_push(AX0)
+        return 0
+    }
+    when (in.i == 6) {
+        # sys.exit(code): exit(2)
+        a_pop(AX0)
+        a_movz(AX8, 93, 0)
+        a_svc()
+        a_movz(AX0, 0, 0)
+        a_push(AX0)
+        return 0
+    }
+    when (in.i == 8) {
+        # sys.mkdir(path, mode): mkdirat(AT_FDCWD, ...)
+        return a_emit_path_mode_call(in, 34)
+    }
+    when (in.i == 7) {
+        # sys.chmod(path, mode): fchmodat(AT_FDCWD, ...)
+        return a_emit_path_mode_call(in, 53)
+    }
+    return 0
+}
+
+# openat with the path copied into the frame's scratch buffer
+function.a_emit_open(type.ptr<type.IrInst>.in) -> number {
+    # sys.open(path, flags, mode): three stack slots — mode (top), flags,
+    # then the path pair — exactly like the x86-64 path (r9/r10/rax,rdx)
+    a_pop(AX9)
+    a_pop(AX10)
+    a_pop_pair(AX0, AX1)
+    type.number lok = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    type.number ldone = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    # plen >= 256 -> ENAMETOOLONG (-36)
+    a_subs_i(31, AX1, 256)
+    a_bcc(A_LO, lok)
+    a_movn(AX0, 35)
+    a_b(ldone)
+    a_label_here(lok)
+    # copy path bytes into [x29, #0..], NUL-terminate
+    a_add_i(AX2, AX29, 0)
+    a_mov(AX3, AX0)
+    a_mov(AX4, AX1)
+    type.number lloop = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    type.number lcopy_done = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    a_cbz(AX4, lcopy_done)
+    a_label_here(lloop)
+    a_ldr_b(5, AX3, 0)
+    a_str_b(5, AX2, 0)
+    a_add_i(AX3, AX3, 1)
+    a_add_i(AX2, AX2, 1)
+    a_sub_i(AX4, AX4, 1)
+    a_cbnz(AX4, lloop)
+    a_label_here(lcopy_done)
+    a_str_b(31, AX2, 0)
+    # openat(AT_FDCWD, path, flags, mode)
+    a_movn(AX0, 99)
+    a_add_i(AX1, AX29, 0)
+    a_mov(AX2, AX10)
+    a_mov(AX3, AX9)
+    a_movz(AX8, 56, 0)
+    a_svc()
+    a_label_here(ldone)
+    a_push(AX0)
+    return 0
+}
+
+# mkdirat / fchmodat with the path copied into the scratch buffer
+function.a_emit_path_mode_call(type.ptr<type.IrInst>.in, number.nr) -> number {
+    a_pop(AX9)
+    a_pop_pair(AX0, AX1)
+    type.number lok = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    type.number ldone = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    a_subs_i(31, AX1, 256)
+    a_bcc(A_LO, lok)
+    a_movn(AX0, 35)
+    a_b(ldone)
+    a_label_here(lok)
+    a_add_i(AX2, AX29, 0)
+    a_mov(AX3, AX0)
+    a_mov(AX4, AX1)
+    type.number lloop = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    type.number lcopy_done = a_trap_lbl(a_trap_seq)
+    a_trap_seq = a_trap_seq + 1
+    a_cbz(AX4, lcopy_done)
+    a_label_here(lloop)
+    a_ldr_b(5, AX3, 0)
+    a_str_b(5, AX2, 0)
+    a_add_i(AX3, AX3, 1)
+    a_add_i(AX2, AX2, 1)
+    a_sub_i(AX4, AX4, 1)
+    a_cbnz(AX4, lloop)
+    a_label_here(lcopy_done)
+    a_str_b(31, AX2, 0)
+    # *at(AT_FDCWD, path, mode[, flags = 0]) — fchmodat's 4th argument
+    # must be a valid flags value on real kernels, never garbage
+    a_movn(AX0, 99)
+    a_add_i(AX1, AX29, 0)
+    a_mov(AX2, AX9)
+    a_movz(AX3, 0, 0)
+    a_movz(AX8, nr, 0)
+    a_svc()
+    a_label_here(ldone)
+    a_push(AX0)
+    return 0
+}
+
+# ---- module emission ----
+function.a_emit_module(type.ptr<type.IrModule>.im) -> number {
+    emit.load_texts(im)
+    loop (i from 0 until im.nfuncs) {
+        type.ptr<type.IrFunc> f = im.funcs[i]
+        a_gen_function(f, i)
+    }
+    emit.emit_globals(im)
+    return 0
+}
+
+# ---- the ELF entry stub ----
+function.a_emit_start(number.entry_sym) -> number {
+    elf.entry_off = a_code_len()
+    # ldr x0, [sp] (argc); add x1, sp, #8 (argv)
+    a_put(0xF94003E0)
+    a_put(0x910023E1)
+    # bl rt_init
+    a_bl_sym(emit.rt_sym("rt_init"))
+    # bl __ok_entry
+    a_bl_sym(entry_sym)
+    # x0 already holds the exit code
+    a_bl_sym(emit.rt_sym("rt_exit"))
+    # never reached: b .
+    a_put(0x14000000)
+    return 0
+}

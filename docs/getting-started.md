@@ -1,11 +1,11 @@
 # Getting Started with Okular
 
-**Okular 0.15** — a natively compiled systems language. This guide takes
+**Okular 0.17** — a natively compiled systems language. This guide takes
 you from zero to a running executable.
 
 ## Requirements
 
-* Linux on x86-64 (ARM64 is planned)
+* Linux on x86-64 or ARM64 (aarch64)
 * GNU make
 * Nothing else: **no C compiler, no `as`, no `ld`** — the repository
   carries its own native compiler seed (`bin/okular`), and the build is
@@ -26,6 +26,7 @@ The build produces:
 | Path | What it is |
 |---|---|
 | `build/okular` | the Okular compiler, built from `selfhost/compiler` sources by the committed seed |
+| `build/okular-arm64` | the same compiler cross-compiled for linux-aarch64 (`make arm64`) |
 | `bin/okular` | the committed native seed — the same compiler at a verified self-compilation fixed point |
 
 ## Your first program
@@ -74,7 +75,7 @@ print
 ## Compiler flags
 
 ```console
-$ okular [-s | --strict] [--out PATH] [--dump-ir] path/to/main.ok
+$ okular [-s | --strict] [--out PATH] [--dump-ir] [--target ARCH] [-O level] path/to/main.ok
 ```
 
 | Flag | Meaning |
@@ -83,6 +84,8 @@ $ okular [-s | --strict] [--out PATH] [--dump-ir] path/to/main.ok
 | `-w`, `--warnings` | warnings on: unused local variables, unreachable code, implicit number-to-decimal widening |
 | `--out PATH` | executable output path (default `<project>/build/output/main`) |
 | `--dump-ir` | print the generated IR of every function to stderr |
+| `--target ARCH` | output architecture: `x86-64` (the default) or `arm64` / `aarch64` — cross-compile in either direction from either host |
+| `-O0` / `-O1` / `-O2` | optimization level (`-O` = `-O1`): `-O1` IR pass pipeline (DCE, control-flow simplification, peephole); `-O2` additionally register-cached code generation (x86-64; on arm64 `-O2` honestly falls back to the `-O1` passes) |
 
 ## Projects with source components
 
@@ -117,7 +120,7 @@ the build always fails.
 ## Where to go next
 
 * `docs/language-basics.md` — a tour of the language
-* `specs/spec-v0.2.md` — the specification (with an honest status table)
+* `specs/spec-v0.17.md` — the specification (with an honest status table)
 * `docs/architecture.md` — how the compiler works
 * `docs/roadmap.md` — what comes next (heap, pointers, structs, arrays…)
 * `examples/` — runnable programs (`examples/HelloProject` shows a full
@@ -128,6 +131,6 @@ the build always fails.
 ```console
 $ make test
 ...
-passed: 113   failed: 0
-ALL TESTS PASSED
+selfhost differential: passed 503   failed 0
+arm64 differential: passed 264   failed 0
 ```

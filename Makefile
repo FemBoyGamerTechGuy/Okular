@@ -5,11 +5,16 @@
 #                     selfhost/compiler sources by bin/okular (the committed
 #                     native seed). Deterministic: the output is byte-identical
 #                     to the seed when the sources match it.
+#   make arm64        build/okular-arm64 — the same compiler cross-compiled
+#                     for linux-aarch64 (--target arm64).
 #   make test         the acceptance gate: the seed must reproduce itself
-#                     byte-for-bit, and the compiler must pass the full
+#                     byte-for-byte, and the compiler must pass the full
 #                     differential suite (positive / negative / policy;
 #                     every positive case is also re-verified at -O1 and
-#                     -O2 — optimization must not change behavior).
+#                     -O2 — optimization must not change behavior), and
+#                     every positive case again as ARM64 code executed
+#                     under tools/emu64.py (the aarch64 user-mode emulator;
+#                     python3 is a test tool, not a build dependency).
 #   make release      package + end-to-end test the downloadable compiler.
 #   make update-seed  after editing compiler sources: rebuild to the new fixed
 #                     point, verify, and install it as bin/okular.
@@ -20,7 +25,7 @@
 
 .DEFAULT_GOAL := all
 
-.PHONY: all test clean release selfhost-compiler update-seed \
+.PHONY: all test arm64 arm64-test clean release selfhost-compiler update-seed \
         selfhost-lex selfhost-parse selfhost-runtime selfhost-assembler
 
 OKC_SRCS := selfhost/compiler/main.ok $(wildcard selfhost/compiler/src/*.ok)
@@ -29,10 +34,20 @@ build/okular: bin/okular $(OKC_SRCS)
 	mkdir -p build
 	cd selfhost/compiler && ../../bin/okular main.ok --out ../../build/okular
 
+build/okular-arm64: bin/okular $(OKC_SRCS)
+	mkdir -p build
+	cd selfhost/compiler && ../../bin/okular main.ok --target arm64 --out ../../build/okular-arm64
+
 all: build/okular
+
+arm64: build/okular-arm64
 
 test: all
 	bash tools/run_selfbuild_check.sh
+	bash tools/run_arm64_tests.sh
+
+arm64-test: build/okular
+	bash tools/run_arm64_tests.sh
 
 release: all
 	bash tools/package_release.sh

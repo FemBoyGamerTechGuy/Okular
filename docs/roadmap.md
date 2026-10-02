@@ -5,6 +5,33 @@ before the test suite proves it.**
 
 ## Where we are
 
+**Okular 0.17 — the ARM64 backend.** In addition to everything below,
+0.17 gives Okular a second native target: `okular main.ok --target
+arm64` emits a native linux-aarch64 ELF64 executable from the same
+typed stack IR. The complete AArch64 backend (`selfhost/compiler/src/
+arm.ok`, ~2300 lines) covers instruction selection for every IR
+operation (NZCV condition codes, `msub`/`sdiv`/`udiv` with explicit
+zero-checks, decimal and `f32` SIMD in D/S forms, narrow loads/stores,
+struct and array copies), the AAPCS-style frame (paired `stp`/`ldp`,
+16-byte alignment, args in `x0`-`x5`), REL26/ABS64_ARM fixups, and the
+Linux aarch64 syscall interface — the same `rt.ok` runtime source,
+lowered per target. Cross-compilation works in both directions;
+`make arm64` cross-builds the compiler itself, and releases ship
+`okular-linux-arm64` alongside the x86-64 archive. Verification, all
+of it executing real programs: the full positive suite re-compiled
+and executed under `tools/emu64.py` (the aarch64 user-mode emulator
+shipping with the repository — a test tool, not a build dependency;
+264 further checks, suite now 767), the self-cross-compilation test
+(the emulated aarch64 compiler compiles a program that runs natively),
+and — on real hardware — a native `ubuntu-24.04-arm` CI runner where
+the ARM64 compiler self-compiles byte-identically and the whole
+positive suite is compiled AND executed natively. `-O2` register-
+cached emission remains x86-64-only for now (honest fallback to `-O1`).
+Three latent defects were found by the ARM64 differential before they
+could ship: a mis-aligned outgoing-argument area, `sys.open` passing
+mode where flags belong, and a three-argument `fstatat` real kernels
+reject.
+
 **Okular 0.16 — the optimizer.** In addition to everything below, 0.16
 gives Okular its first real optimization subsystem: `-O1` runs an IR
 pass pipeline (dead-code elimination with provably-balanced dead-store
@@ -135,7 +162,15 @@ for large magnitudes (`specs/spec-v0.16.md` §4.2).
     `stdlib/`, transitively). First modules: `math`, `text`, `io`,
     `memory` (`specs/spec-v0.16.md` §6.3). The `oklib` packaged format
     remains designed.
-12. **ARM64 backend** — second target proves the backend abstraction.
+12. ~~**ARM64 backend**~~ **done in 0.17**: `--target arm64` — full
+    AArch64 instruction selection, AAPCS-style frames, Linux aarch64
+    syscalls, cross-compilation both directions, `make arm64` cross-
+    builds the compiler itself, releases ship `okular-linux-arm64`;
+    verified emulated (`tools/emu64.py`, 264 further differential
+    checks) AND natively on `ubuntu-24.04-arm` CI runners
+    (`specs/spec-v0.17.md` §15). The `-O2` register-cached mode remains
+    x86-64-only on this target (falls back to `-O1`). RISC-V remains
+    the planned third target.
 13. ~~**Optimizer framework**~~ **done in 0.16**: `-O1` IR passes (DCE,
     control-flow simplification, peephole) and `-O2` register-cached
     emission with spills/reloads and GP/XMM register classes

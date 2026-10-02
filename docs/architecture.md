@@ -1,6 +1,6 @@
 # Okular Compiler — Architecture
 
-**Version:** 0.16
+**Version:** 0.17
 **Applies to:** `selfhost/compiler` (the Okular implementation)
 
 > The compiler is written in Okular and compiles itself. The C bootstrap
@@ -40,9 +40,20 @@
                       evaluation (the operand stack's top units live in
                       registers), -O0: classic stack-machine pushes/pops
                 |
+             OR, with --target arm64:
+                |
+            [arm]    per IR function: AArch64 machine code — the same
+                      typed stack IR lowered to fixed 4-byte instructions
+                      with NZCV condition codes, the AAPCS-style frame
+                      (stp/ldp x29-x30, 16-byte alignment, args x0-x5),
+                      movz/movk absolute address chains (ABS64_ARM
+                      fixup), REL26 branches/calls, Linux aarch64
+                      syscall numbers; -O2 falls back to -O1 here
+                |
             [elf]    one R+X PT_LOAD image: headers + code + rodata +
-                      data (+bss), ABS64/REL32 fixups, entry stub,
-                      fs.save + chmod
+                      data (+bss), ABS64/REL32 fixups (x86-64) or
+                      ABS64_ARM/REL26 fixups (aarch64), e_machine 62 or
+                      183, entry stub, fs.save + chmod
                 |
             native ELF64 executable (freestanding, raw syscalls)
 ```
@@ -58,6 +69,7 @@
 | `sema.ok` | the type checker: collect (symbols, module scopes, struct layout) + check (every expression/statement rule), constant evaluation, diagnostics with the optional-source downgrade policy |
 | `ir.ok` | IR construction (stack-machine form), constant folding, `--dump-ir` |
 | `opt.ok` | the optimizer (0.16): the `-O1` pass pipeline — DCE, jump simplification, peephole; pass statistics |
+| `arm.ok` | the ARM64 backend (0.17): the same typed stack IR lowered to AArch64 machine code — instruction selection, frames, fixups, syscall numbers |
 | `emit.ok` | the x86-64 backend: every IR instruction, frame layout, call discipline, inline syscalls, trap sequences, label backpatching |
 | `elf.ok` | native ELF64 emission: segments, symbols, fixups, entry |
 | `rt.ok` | the runtime compiled into every program: output formatters, text arena, conversions, the free-list heap allocator, file operations — on the `sys.*` syscall floor |
@@ -119,16 +131,34 @@
 
 ## 6. Targets
 
-* Implemented: x86-64 Linux (System V kernel syscall ABI).
-* Planned: ARM64 as the second backend — proving the emitter abstraction.
+* Implemented: x86-64 Linux (System V kernel syscall ABI) — classic
+  stack-machine codegen at `-O0`, register-cached at `-O2`.
+* Implemented: ARM64 Linux (AAPCS-style frames, Linux aarch64 syscall
+  numbers) — selected with `--target arm64`; classic stack-machine
+  codegen with the `-O1` IR passes available (register-cached `-O2`
+  emission is x86-64-only and honestly falls back to `-O1`). The
+  runtime source `rt.ok` is shared; syscall numbers and call frames
+  differ per target. Cross-compilation works in both directions from
+  either distribution, and `make arm64` cross-builds the compiler
+  itself for aarch64.
+* Planned: RISC-V as the third backend.
 
 ## 7. Testing
 
 * `tools/run_selfhost_tests.sh` — 503 checks: positive (compile + run +
   exact stdout/exit — at -O0, -O1, AND -O2), negative (exact diagnostic
   patterns), policy (optional-source semantics incl. `--strict`).
+* `tools/run_arm64_tests.sh` — 264 further checks: every positive case
+  re-compiled `--target arm64` and executed (under `tools/emu64.py`, the
+  aarch64 user-mode emulator shipping with the repository, or natively
+  via `ARM64_RUN=native` on real aarch64 hosts) — stdout and exit codes
+  must match the x86-64 expectations exactly.
 * `tools/run_selfbuild_check.sh` — the acceptance gate: seed
   self-reproduction + the full suite.
-* CI (`.github/workflows/ci.yml`) runs the gate, then packages and
-  end-to-end tests the downloadable compiler (build -> unpack -> compile
-  hello -> run it) on every push, and publishes releases on `v*` tags.
+* CI (`.github/workflows/ci.yml`) runs the gate, the emulated ARM64
+  suite, the self-cross-compilation test, AND a native
+  `ubuntu-24.04-arm` job (the ARM64 compiler self-compiles byte-
+  identically on real hardware; the full positive suite is compiled
+  and executed natively), then packages and end-to-end tests both
+  downloadable compilers (build -> unpack -> compile hello -> run it)
+  on every push, and publishes releases on `v*` tags.

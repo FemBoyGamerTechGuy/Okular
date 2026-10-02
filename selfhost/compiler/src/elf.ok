@@ -81,6 +81,14 @@ function.buf_wr16_at(type.ptr<type.Buf>.b, number.off, number.v) -> number {
     return 0
 }
 
+function.buf_rd32_at(type.ptr<type.Buf>.b, number.off) -> number {
+    type.number v = b.data[off]
+    v = v + 256 * b.data[off + 1]
+    v = v + 65536 * b.data[off + 2]
+    v = v + 16777216 * b.data[off + 3]
+    return v
+}
+
 function.buf_wr32_at(type.ptr<type.Buf>.b, number.off, number.v) -> number {
     b.data[off] = number.to_uint8(v & 255)
     b.data[off + 1] = number.to_uint8((v >> 8) & 255)
@@ -92,6 +100,16 @@ function.buf_wr32_at(type.ptr<type.Buf>.b, number.off, number.v) -> number {
 function.buf_wr64_at(type.ptr<type.Buf>.b, number.off, number.v) -> number {
     buf_wr32_at(b, off, v & 4294967295)
     buf_wr32_at(b, off + 4, (v >> 32) & 4294967295)
+    return 0
+}
+
+# ---- target machine ----
+# 62 = EM_X86_64 (default), 183 = EM_AARCH64. The fixup kinds 2/3 below
+# are AArch64-specific; kinds 0/1 are shared.
+type.number elf_machine = 62
+
+function.set_machine(number.m) -> number {
+    elf_machine = m
     return 0
 }
 
@@ -248,6 +266,35 @@ function.fx_abs64(number.seg, number.off, number.sym, number.addend) -> number {
     return 0
 }
 
+# AArch64: pc-relative branch (b / b.cond / bl) — imm26 in 4-byte units
+function.fx_rel26(number.seg, number.off, number.sym) -> number {
+    when (nfx == fx_cap) {
+        fx_grow()
+    }
+    fx_kind[nfx] = 2
+    fx_seg[nfx] = seg
+    fx_off[nfx] = off
+    fx_sym[nfx] = sym
+    fx_add[nfx] = 0
+    nfx = nfx + 1
+    return 0
+}
+
+# AArch64: absolute address materialized as movz/movk x4 — the fixup
+# patches the imm16 field of each of four consecutive instructions
+function.fx_abs64_arm(number.seg, number.off, number.sym, number.addend) -> number {
+    when (nfx == fx_cap) {
+        fx_grow()
+    }
+    fx_kind[nfx] = 3
+    fx_seg[nfx] = seg
+    fx_off[nfx] = off
+    fx_sym[nfx] = sym
+    fx_add[nfx] = addend
+    nfx = nfx + 1
+    return 0
+}
+
 # ---- segment geometry ----
 function.align_up(number.v, number.a) -> number {
     return (v + a - 1) &~(a - 1)
@@ -291,7 +338,7 @@ function.emit_elf(text.path) -> number {
         buf_put(img, 0)
     }
     buf_put16(img, 2)  # e_type: ET_EXEC
-    buf_put16(img, 62)  # e_machine: x86-64
+    buf_put16(img, elf_machine)  # e_machine: x86-64 (62) or AArch64 (183)
     buf_put32(img, 1)  # e_version
     buf_put64(img, BASE + CODE_OFF + entry_off)  # e_entry
     buf_put64(img, 64)  # e_phoff
@@ -352,6 +399,26 @@ function.emit_elf(text.path) -> number {
             type.number site = BASE + CODE_OFF + off
             type.number rel = target - site - 4
             buf_wr32_at(img, CODE_OFF + off, rel & 4294967295)
+        }
+        else when (kind == 2) {
+            # AArch64 rel26 branch: target = site + 4 + imm26*4 — the
+            # low 26 bits of the word carry the offset in 4-byte units
+            type.number site = BASE + CODE_OFF + off
+            type.number rel = (target - site - 4) / 4
+            type.number word = buf_rd32_at(img, CODE_OFF + off)
+            word = (word &~67108863) | (rel & 67108863)
+            buf_wr32_at(img, CODE_OFF + off, word & 4294967295)
+        }
+        else when (kind == 3) {
+            # AArch64 movz/movk chain: four consecutive instructions,
+            # each imm16 field at bits [20:5], carrying the address in
+            # 16-bit chunks from the low word up
+            loop (j from 0 until 4) {
+                type.number chunk = (target >> (16 * j)) & 65535
+                type.number word = buf_rd32_at(img, CODE_OFF + off + 4 * j)
+                word = (word &~2097120) | (chunk << 5)
+                buf_wr32_at(img, CODE_OFF + off + 4 * j, word & 4294967295)
+            }
         }
         else {
             # abs64: 8 bytes at the segment position

@@ -2392,6 +2392,11 @@ function.set_trace_emit(number.t) -> number {
     return 0
 }
 
+function.set_failed(number.f) -> number {
+    emit_failed = f
+    return 0
+}
+
 function.emit_failed_flag() -> number {
     return emit_failed
 }

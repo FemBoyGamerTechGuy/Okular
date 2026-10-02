@@ -18,6 +18,7 @@ type.text=1
     "ir",
     "opt",
     "emit",
+    "arm",
     "elf",
     "fmt",
     "rt"
@@ -70,6 +71,7 @@ type.number dump_ir_flag = 0
 type.number strict_mode = 0
 type.number warn_mode = 0
 type.number opt_level_flag = 0
+type.number target_arm64 = 0
 
 # ---- the used-module collection (prescan over the token buffer) ----
 type.ptr<type.text> uses = null
@@ -590,6 +592,22 @@ function.main() -> number {
         else when (a == "--trace-emit") {
             emit.set_trace_emit(1)
         }
+        else when (a == "--target") {
+            ai = ai + 1
+            when (ai < argc) {
+                type.text tgt = env.arg(ai)
+                when (tgt == "arm64" or tgt == "aarch64") {
+                    target_arm64 = 1
+                }
+                else when (tgt == "x86-64" or tgt == "x86_64") {
+                    target_arm64 = 0
+                }
+                else {
+                    sys.write(2, "okc: unknown target `" + tgt + "` (supported: x86-64, arm64).\n")
+                    return 2
+                }
+            }
+        }
         else {
             sys.write(2, "okc: unknown flag `" + a + "`.\n")
             return 2
@@ -636,7 +654,9 @@ function.main() -> number {
     when (opt_level_flag > 0) {
         opt.optimize(irmods, n_irmods, opt_level_flag)
     }
-    when (opt_level_flag >= 2) {
+    # -O2 register-cached emission is x86-64 only for now; on arm64 it
+    # falls back to the -O1 IR passes (honest capability reporting)
+    when (opt_level_flag >= 2 and target_arm64 == 0) {
         emit.set_regmode(1)
     }
 
@@ -659,9 +679,18 @@ function.main() -> number {
         sys.write(2, "okular: main.ok has no entry point — add top-level statements.\n")
         return 1
     }
-    emit.emit_start(entry_sym)
-    loop (i from 0 until n_irmods) {
-        emit.emit_module(irmods[i])
+    when (target_arm64 == 1) {
+        elf.set_machine(183)
+        arm.a_emit_start(entry_sym)
+        loop (i from 0 until n_irmods) {
+            arm.a_emit_module(irmods[i])
+        }
+    }
+    else {
+        emit.emit_start(entry_sym)
+        loop (i from 0 until n_irmods) {
+            emit.emit_module(irmods[i])
+        }
     }
 
     when (out_path == "") {
