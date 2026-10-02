@@ -110,6 +110,21 @@ selfhost differential: passed 191   failed 0
 ALL SELFHOST TESTS PASSED
 ```
 
+## License
+
+Okular is **source-available** under the [Okular Project License](LICENSE).
+In plain words:
+
+* **Study and use freely** — read all the source, run the compiler,
+  build anything with it, including commercial software.
+* **Software you build is yours** — programs you write and compile with
+  Okular are entirely unrestricted: distribute, sell, publish, open-source,
+  or keep them proprietary. The runtime the compiler links into your
+  programs is exempt as well, so this is true in practice, not just on
+  paper.
+* **The project itself is not for re-publishing** — no redistributing the
+  compiler/source as your own distribution, no forks.
+
 ## The self-hosting arc
 
 The evolution is complete and tracked in `docs/roadmap.md`: bootstrap

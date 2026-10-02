@@ -48,6 +48,8 @@ for f in getting-started.md language-basics.md architecture.md roadmap.md; do
     cp "$REPO/docs/$f" "$STAGE/docs/" 2>/dev/null || true
 done
 
+cp "$REPO/LICENSE" "$STAGE/LICENSE"
+
 cat > "$STAGE/README.md" << EOF
 # Okular ${VER} — native compiler for the Okular language (linux-x86_64)
 
@@ -75,8 +77,17 @@ Or just call \`bin/okular\` by its full path.
     src/rt.ok    the runtime module (compiled into every program)
     examples/    runnable example projects
     docs/        language and architecture documentation
+    LICENSE      the Okular Project License (see the license note below)
 
 Requirements: Linux x86-64. Nothing else.
+
+## License, in plain words
+
+The software you build with this compiler is entirely yours: distribute,
+sell, publish, or keep it proprietary — the Okular Project claims nothing
+over programs compiled with Okular (the runtime linked into them is
+exempt as well). The compiler and its source are licensed for study and
+use, not for redistribution or forks: see LICENSE in this archive.
 EOF
 
 echo "$VER" > "$STAGE/VERSION"

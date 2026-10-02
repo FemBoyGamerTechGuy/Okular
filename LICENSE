@@ -1,0 +1,173 @@
+# The Okular Project License
+
+**Version 1.0 — the license of the Okular compiler, its source code, and
+the Okular project materials.**
+
+This is a source-available license. You may study, use, and build with the
+Okular project. You may not redistribute it or publish forks of it.
+Software you create **with** Okular is yours — completely unrestricted.
+
+This file is written to be read by humans. It is the license of the
+project itself; section 6 explains exactly how it applies (and does not
+apply) to the software you build with the compiler.
+
+---
+
+## 1. Definitions
+
+In this license:
+
+* **The Project** means the Okular programming language project: the
+  compiler, its source code, the runtime library source, the
+  specification, the documentation, the examples, the test suite, the
+  build tooling, and the distribution packages published by the Project,
+  as a whole and in any version.
+* **Project Source** means the source code and other files of the
+  Project, in original or modified form.
+* **The Compiler** means any native executable built from the Project
+  Source that translates Okular programs into native code.
+* **The Runtime Library** means the parts of the Project that the
+  Compiler compiles *into* programs as part of normal compilation — at
+  the time of writing, the runtime module (`rt.ok` and anything the
+  Project designates as runtime library or standard-library code that is
+  linked into compiled programs by default).
+* **Your Software** means a program or library that you (or anyone)
+  write in the Okular language — the source code *you* author — together
+  with the native binaries the Compiler produces from that source.
+* **Redistribution** means making the Project, or a copy or modified
+  version of the Project, available to any third party: publishing it,
+  hosting it for download, shipping it inside another product as the
+  Okular compiler/toolchain, mirroring it as an distribution of its own,
+  or selling it.
+* **A Fork** means a derivative of the Project presented as an
+  independent or alternative project — the same or similar compiler,
+  language, or toolchain under another name or another home, whether
+  derived by copying the Project Source, by reusing its design and
+  materials wholesale, or by continued development of a modified copy.
+
+## 2. What you MAY do with the Project
+
+* **View and study** the Project Source, the specification, and every
+  other file, for any purpose, including education and research.
+* **Use the Compiler** — including the released native binaries — to
+  compile, build, test, and run software, commercially or not.
+* **Build Your Software** and do anything whatsoever with it. See
+  section 5: Your Software is not restricted by this license.
+* **Modify the Project for your own internal use** — to experiment, to
+  port internally, to debug, to measure. Modifications you keep to
+  yourself (and to your organization's internal machines) are permitted.
+* **Quote and discuss** the Project: small excerpts for review,
+  teaching, bug reports, and discussion are fine — that is not
+  Redistribution of the Project.
+* **Contribute** to the Project through its accepted contribution
+  channels (see section 7).
+
+## 3. What you may NOT do with the Project
+
+* **No Redistribution.** You may not redistribute the Project or Project
+  Source — original or modified — as a distribution of your own: no
+  publishing copies, no hosting mirrors, no bundling the compiler into
+  another product as its Okular toolchain, no selling it.
+* **No Forks.** You may not create or distribute a Fork. Publishing an
+  alternative or renamed compiler, language, or toolchain derived from
+  this Project — in whole or in substantial part — is not permitted.
+* **No misleading origin.** You may not represent work derived from this
+  Project as your own independent creation.
+* **No removal of this license or of attribution** notices the Project
+  carries.
+
+If you want to redistribute or build on the Project beyond these terms,
+contact the Project's maintainer for a separate written agreement.
+
+## 4. Clarity about what counts (and does not count)
+
+* Installing the Compiler on machines you administer — including build
+  machines and CI runners — is **use**, not Redistribution.
+* Compiling Your Software with the Compiler, and distributing the
+  resulting binaries, is **not** Redistribution of the Project. It does
+  not make Your Software part of the Project or subject to this license.
+* Sending Project Source excerpts in a bug report, mailing list, or
+  discussion is **not** Redistribution.
+* A backup copy kept for your own recovery purposes is **not**
+  Redistribution.
+* Publishing a *re-packaged Okular distribution* — even with additions —
+  **is** Redistribution. Publishing a compiler derived from this one —
+  same language, same design, different name — **is** a Fork.
+
+## 5. Your Software is yours (the compiled-output rule)
+
+**This license does not restrict software built with the Compiler.**
+
+The Okular Project claims no ownership, control, or revenue interest in
+Your Software. You may distribute, sell, publish, open-source, or keep
+proprietary the programs and libraries you write in Okular and the
+binaries produced from them — commercially or non-commercially, with any
+license you choose, or with none.
+
+Compiling with Okular does not make Your Software a derivative
+distribution of the Project, and does not subject Your Software to this
+license.
+
+## 6. The Runtime Library exception
+
+Normal compilation with the Compiler links the Runtime Library into Your
+Software (today: the runtime module `rt.ok`).
+
+**The Runtime Library, as compiled into Your Software, is subject to no
+restriction from this license.** For the purpose of Your Software, you
+may treat the compiled Runtime Library as if it carried a permissive,
+attribution-free license: use, modify, and distribute Your Software
+containing it without restriction, including commercially.
+
+This exception exists precisely so that section 5 is true in practice,
+not only on paper: the presence of the compiled Runtime Library inside
+Your Software's binaries never makes Your Software a derivative
+distribution of the Project.
+
+The exception covers only the Runtime Library as embedded in Your
+Software. Taking the Runtime Library source itself, or any other Project
+Source, and distributing it as standalone source or as part of another
+compiler/toolchain project remains subject to sections 2 and 3.
+
+## 7. Contributions
+
+Contributions you submit for inclusion in the Project are accepted under
+this license, and under the terms of this license only. You retain the
+copyright in your contribution; you grant the Project the perpetual,
+worldwide right to use, modify, and distribute it as part of the Project
+under this license. Do not submit work you are not entitled to license
+this way.
+
+A contribution accepted into the Project becomes part of the Project
+Source and is covered by sections 2 and 3 like the rest of the Project —
+including the Runtime Library exception when the contribution lands in
+the Runtime Library.
+
+## 8. Third-party components
+
+The Project may contain or make use of third-party components. Those
+components keep their own licenses, which remain in force for those
+components. This license applies to the Project's own work and does not
+override, replace, or relicense third-party work.
+
+## 9. No warranty
+
+The Project is provided "as is", without warranty of any kind, express
+or implied, including but not limited to the warranties of
+merchantability, fitness for a particular purpose, and non-infringement.
+In no event shall the authors or copyright holders of the Project be
+liable for any claim, damages, or other liability arising from, out of,
+or in connection with the Project or the use or other dealings in the
+Project.
+
+## 10. Version and changes
+
+This is version 1.0 of the Okular Project License. If the Project later
+adopts a newer version of this license, files remain under the version
+that applied when they were received unless explicitly relicensed.
+
+---
+
+**In one sentence:** study and use Okular freely; build and sell whatever
+you want with it — the things you build are entirely yours; but don't
+republish or fork the project itself.
