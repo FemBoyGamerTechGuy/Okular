@@ -49,6 +49,7 @@ const.AX29 = 29
 const.AX30 = 30
 const.ASP = 31
 const.AXZR = 31
+const.AX13 = 13  # far-offset scratch (x0-x5, x8-x12 are allocated; x13-x17 are free)
 
 # ---- word emission ----
 function.a_put(number.w) -> number {
@@ -246,21 +247,73 @@ function.a_cmp(number.rn, number.rm) -> number {
     return 0
 }
 
-# ADD Xd, Xn, #imm12 (imm <= 4095)
-function.a_add_i(number.rd, number.rn, number.imm12) -> number {
-    a_put(0x91000000 + ((imm12 & 4095) << 10) + (rn << 5) + rd)
+# ADD Xd, Xn, #imm — imm12 encodes only 0..4095: bigger (or negative)
+# values used to be MASKED with & 4095, silently computing the wrong
+# address/comparison. They now chunk (positive) or materialize into
+# x13 and use the register form (negative or oversized flags cases).
+function.a_add_i(number.rd, number.rn, number.imm) -> number {
+    when (imm >= 0 and imm <= 4095) {
+        a_put(0x91000000 + ((imm & 4095) << 10) + (rn << 5) + rd)
+        return 0
+    }
+    when (imm > 4095) {
+        type.number rem = imm
+        loop (rem > 4095) {
+            a_put(0x91000000 + (4095 << 10) + (rn << 5) + rd)
+            rem = rem - 4095
+        }
+        a_put(0x91000000 + ((rem & 4095) << 10) + (rn << 5) + rd)
+        return 0
+    }
+    # negative: ADD is SUB of the negated magnitude, chunked
+    a_sub_i(rd, rn,-imm)
     return 0
 }
 
-# SUB Xd, Xn, #imm12
-function.a_sub_i(number.rd, number.rn, number.imm12) -> number {
-    a_put(0xD1000000 + ((imm12 & 4095) << 10) + (rn << 5) + rd)
+# SUB Xd, Xn, #imm
+function.a_sub_i(number.rd, number.rn, number.imm) -> number {
+    when (imm >= 0 and imm <= 4095) {
+        a_put(0xD1000000 + ((imm & 4095) << 10) + (rn << 5) + rd)
+        return 0
+    }
+    when (imm > 4095) {
+        type.number rem = imm
+        loop (rem > 4095) {
+            a_put(0xD1000000 + (4095 << 10) + (rn << 5) + rd)
+            rem = rem - 4095
+        }
+        a_put(0xD1000000 + ((rem & 4095) << 10) + (rn << 5) + rd)
+        return 0
+    }
+    # negative: SUB of a negative is ADD of the magnitude
+    a_add_i(rd, rn,-imm)
     return 0
 }
 
-# SUBS Xd, Xn, #imm12
-function.a_subs_i(number.rd, number.rn, number.imm12) -> number {
-    a_put(0xF1000000 + ((imm12 & 4095) << 10) + (rn << 5) + rd)
+# SUB Xd, Xn, Xm (register form)
+function.a_sub_r(number.rd, number.rn, number.rm) -> number {
+    a_put(0xCB000000 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+# SUBS Xd, Xn, Xm (register form, flags)
+function.a_subs_r(number.rd, number.rn, number.rm) -> number {
+    a_put(0xEB000000 + (rm << 16) + (rn << 5) + rd)
+    return 0
+}
+
+# SUBS Xd, Xn, #imm — the FLAGS-setting comparison form: an immediate
+# beyond 4095 (an array bound, a shift range) used to be masked to
+# garbage, so e.g. indexing a 4100-element array compared against 4
+# and trapped at i=4. Oversized values materialize into x13 and use
+# the register form (flags are then set correctly).
+function.a_subs_i(number.rd, number.rn, number.imm) -> number {
+    when (imm >= 0 and imm <= 4095) {
+        a_put(0xF1000000 + ((imm & 4095) << 10) + (rn << 5) + rd)
+        return 0
+    }
+    a_mov_imm(AX13, imm)
+    a_subs_r(rd, rn, AX13)
     return 0
 }
 
@@ -418,73 +471,149 @@ function.a_svc() -> number {
 }
 
 # ---- loads/stores (unsigned offset, scaled) ----
-# STR Xt, [Xn, #imm] (imm multiple of 8, <= 32760)
+#
+# The unsigned-offset forms encode imm12 scaled by the access size:
+# X/D forms reach 32760, W/S forms 16380, H forms 8190, B forms 4095.
+# Beyond that the immediate used to be MASKED with & 4095 — silently
+# accessing the wrong slot. The compiler's own functions exceed 32 KiB
+# of operand-stack slots, which hung the native aarch64 self-compilation
+# (found by the ubuntu-24.04-arm CI run). Far offsets now materialize
+# into x13 and address through it.
+# x13 = rn + off (arbitrary offset; rn is preserved)
+function.a_far_base(number.rn, number.off) -> number {
+    a_mov_imm(AX13, off)
+    a_add(AX13, AX13, rn)
+    return 0
+}
+
 function.a_str_x(number.rt, number.rn, number.off) -> number {
-    a_put(0xF9000000 + (((off / 8) & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 32760 and off - (off / 8) * 8 == 0) {
+        a_put(0xF9000000 + (((off / 8) & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0xF9000000 + (AX13 << 5) + rt)
     return 0
 }
 
 function.a_ldr_x(number.rt, number.rn, number.off) -> number {
-    a_put(0xF9400000 + (((off / 8) & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 32760 and off - (off / 8) * 8 == 0) {
+        a_put(0xF9400000 + (((off / 8) & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0xF9400000 + (AX13 << 5) + rt)
     return 0
 }
 
-# STR Wt, [Xn, #imm] (multiple of 4, <= 16380)
 function.a_str_w(number.rt, number.rn, number.off) -> number {
-    a_put(0xB9000000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 16380 and off - (off / 4) * 4 == 0) {
+        a_put(0xB9000000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0xB9000000 + (AX13 << 5) + rt)
     return 0
 }
 
 function.a_ldr_w(number.rt, number.rn, number.off) -> number {
-    a_put(0xB9400000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 16380 and off - (off / 4) * 4 == 0) {
+        a_put(0xB9400000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0xB9400000 + (AX13 << 5) + rt)
     return 0
 }
 
-# STRH / LDRH (multiple of 2)
 function.a_str_h(number.rt, number.rn, number.off) -> number {
-    a_put(0x79000000 + (((off / 2) & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 8190 and off - (off / 2) * 2 == 0) {
+        a_put(0x79000000 + (((off / 2) & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0x79000000 + (AX13 << 5) + rt)
     return 0
 }
 
 function.a_ldr_h(number.rt, number.rn, number.off) -> number {
-    a_put(0x79400000 + (((off / 2) & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 8190 and off - (off / 2) * 2 == 0) {
+        a_put(0x79400000 + (((off / 2) & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0x79400000 + (AX13 << 5) + rt)
     return 0
 }
 
-# STRB / LDRB (any byte offset)
 function.a_str_b(number.rt, number.rn, number.off) -> number {
-    a_put(0x39000000 + ((off & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 4095) {
+        a_put(0x39000000 + ((off & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0x39000000 + (AX13 << 5) + rt)
     return 0
 }
 
 function.a_ldr_b(number.rt, number.rn, number.off) -> number {
-    a_put(0x39400000 + ((off & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 4095) {
+        a_put(0x39400000 + ((off & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0x39400000 + (AX13 << 5) + rt)
     return 0
 }
 
 # sign-extending loads
 function.a_ldrsb_x(number.rt, number.rn, number.off) -> number {
-    a_put(0x39800000 + ((off & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 4095) {
+        a_put(0x39800000 + ((off & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0x39800000 + (AX13 << 5) + rt)
     return 0
 }
 
 function.a_ldrsb_w(number.rt, number.rn, number.off) -> number {
-    a_put(0x39C00000 + ((off & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 4095) {
+        a_put(0x39C00000 + ((off & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0x39C00000 + (AX13 << 5) + rt)
     return 0
 }
 
 function.a_ldrsh_x(number.rt, number.rn, number.off) -> number {
-    a_put(0x79800000 + (((off / 2) & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 8190 and off - (off / 2) * 2 == 0) {
+        a_put(0x79800000 + (((off / 2) & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0x79800000 + (AX13 << 5) + rt)
     return 0
 }
 
 function.a_ldrsh_w(number.rt, number.rn, number.off) -> number {
-    a_put(0x79C00000 + (((off / 2) & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 8190 and off - (off / 2) * 2 == 0) {
+        a_put(0x79C00000 + (((off / 2) & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0x79C00000 + (AX13 << 5) + rt)
     return 0
 }
 
 function.a_ldrsw_x(number.rt, number.rn, number.off) -> number {
-    a_put(0xB9800000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 16380 and off - (off / 4) * 4 == 0) {
+        a_put(0xB9800000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0xB9800000 + (AX13 << 5) + rt)
     return 0
 }
 
@@ -496,22 +625,42 @@ function.a_ldr_b_reg(number.rt, number.rn, number.rm) -> number {
 
 # SIMD loads/stores: STR Dt, [Xn, #off] / LDR Dt (64-bit SIMD slot)
 function.a_str_d(number.rt, number.rn, number.off) -> number {
-    a_put(0xFD000000 + (((off / 8) & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 32760 and off - (off / 8) * 8 == 0) {
+        a_put(0xFD000000 + (((off / 8) & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0xFD000000 + (AX13 << 5) + rt)
     return 0
 }
 
 function.a_ldr_d(number.rt, number.rn, number.off) -> number {
-    a_put(0xFD400000 + (((off / 8) & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 32760 and off - (off / 8) * 8 == 0) {
+        a_put(0xFD400000 + (((off / 8) & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0xFD400000 + (AX13 << 5) + rt)
     return 0
 }
 
 function.a_str_s(number.rt, number.rn, number.off) -> number {
-    a_put(0xBD000000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 16380 and off - (off / 4) * 4 == 0) {
+        a_put(0xBD000000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0xBD000000 + (AX13 << 5) + rt)
     return 0
 }
 
 function.a_ldr_s(number.rt, number.rn, number.off) -> number {
-    a_put(0xBD400000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+    when (off >= 0 and off <= 16380 and off - (off / 4) * 4 == 0) {
+        a_put(0xBD400000 + (((off / 4) & 4095) << 10) + (rn << 5) + rt)
+        return 0
+    }
+    a_far_base(rn, off)
+    a_put(0xBD400000 + (AX13 << 5) + rt)
     return 0
 }
 

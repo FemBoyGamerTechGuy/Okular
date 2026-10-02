@@ -78,18 +78,9 @@ jobs:
       - name: Cross-build the ARM64 compiler (seed under qemu)
         run: timeout 1800 make arm64
 
-      - name: ARM64 self-compilation fixed point on real hardware
-        run: |
-          mkdir -p build/armfix
-          echo "native fixed point: compiling the compiler with itself (aarch64)..."
-          timeout 900 bash -c 'cd selfhost/compiler && ../../build/okular-arm64 main.ok --target arm64 --out ../../build/armfix/okular-arm64'
-          echo "native fixed point: compile done, comparing bytes..."
-          cmp build/okular-arm64 build/armfix/okular-arm64
-          echo "arm64 fixed point on native hardware: byte-identical self-compilation"
-
-      # The full positive suite, compiled by the aarch64 compiler running
-      # natively AND executed natively — stdout and exit codes must match
-      # the x86-64 expectations exactly.
+      # small programs first: the full positive suite, compiled by the
+      # aarch64 compiler running natively AND executed natively — stdout
+      # and exit codes must match the x86-64 expectations exactly
       - name: Full ARM64 differential suite (native compile + native execution)
         run: timeout 1800 env OKC=$PWD/build/okular-arm64 ARM64_RUN=native bash tools/run_arm64_tests.sh
 
@@ -103,6 +94,17 @@ jobs:
             exit 1
           fi
           echo "native arm64 product test OK: $OUT"
+
+      # the big one last: the compiler compiles ITSELF on real hardware
+      # and must reproduce byte-identically
+      - name: ARM64 self-compilation fixed point on real hardware
+        run: |
+          mkdir -p build/armfix
+          echo "native fixed point: compiling the compiler with itself (aarch64)..."
+          timeout 900 bash -c 'cd selfhost/compiler && ../../build/okular-arm64 main.ok --target arm64 --out ../../build/armfix/okular-arm64'
+          echo "native fixed point: compile done, comparing bytes..."
+          cmp build/okular-arm64 build/armfix/okular-arm64
+          echo "arm64 fixed point on native hardware: byte-identical self-compilation"
 
   lsp:
     name: LSP protocol suite (okular lsp over stdio JSON-RPC)
