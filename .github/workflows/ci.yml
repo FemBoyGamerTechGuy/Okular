@@ -78,6 +78,23 @@ jobs:
       - name: Cross-build the ARM64 compiler (seed under qemu)
         run: timeout 1800 make arm64
 
+      # diagnostics: the qemu-built binary must be byte-identical to the
+      # deterministic local build (md5 recorded by the maintainer); and
+      # one traced compile shows how far the native compiler gets before
+      # any hang, with the last emitted function in the log
+      - name: Diagnostics (binary hash + one traced compile)
+        run: |
+          md5sum build/okular-arm64
+          mkdir -p build/diag/hello
+          printf 'type.text=1\n\nwrite("diag")\nprint\n' > build/diag/hello/main.ok
+          cd build/diag/hello
+          timeout 60 ../../../build/okular-arm64 main.ok --target arm64 --out ./diag 2> trace.log || true
+          echo "--- trace tail ---"
+          tail -5 trace.log || true
+          echo "--- result ---"
+          ls -la ./
+          cd "$GITHUB_WORKSPACE"
+
       # small programs first: the full positive suite, compiled by the
       # aarch64 compiler running natively AND executed natively — stdout
       # and exit codes must match the x86-64 expectations exactly
