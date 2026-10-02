@@ -142,6 +142,43 @@ when (score) {
 * Text compares for equality only: `"a" < "z"` is a compile error, not a
   silent false. See `specs/spec-v0.15.md` §10.1.
 
+## `f32` — single-precision floats (0.15)
+
+A **true 32-bit IEEE float**, not a stored-as-double approximation:
+
+```ok
+type.f32 a = 1.5           # the literal rounds ONCE to the nearest float32
+type.f32 b = 2.25
+type.f32 c = a + b         # addss — single-precision rounding at every op
+write(c)                   # 3.750000
+print
+
+type.decimal wide = a      # f32 widens EXACTLY to decimal (every f32 is an f64)
+type.f32 narrow = decimal.to_f32(2.5)   # narrowing is explicit
+type.number iv = f32.to_number(2.75)    # 2 — truncates toward zero
+type.text s = f32.to_text(a)            # "1.500000"
+type.f32 p = text.to_f32("4.25")        # parse + one rounding
+```
+
+* Arithmetic compiles to SSE single-precision instructions; comparisons
+  to `ucomiss`. Memory is 4 bytes — locals, globals, `array<f32, N>`
+  elements (stride 4), struct fields.
+* Constant folding is **bit-exact** for `+ - *` (computed through the
+  wider `decimal` intermediate with one rounding per op — provably
+  identical to single-precision hardware). Division is deliberately
+  never folded: an intermediate could double-round.
+* NaN and infinities keep their IEEE shapes: `nan == nan` is `false`,
+  overflow produces `inf`, `inf - inf` is `nan`, signed zero is
+  preserved. Magnitudes ≥ 1e15 print scientifically (`3.402823e38`),
+  `inf` and `nan` print by name.
+* Mixed arithmetic: integers widen to `f32`; `f32` mixed with `decimal`
+  computes in `decimal`. `%`, bitwise operators, and `when (float)`
+  conditions are compile errors — no silent truthiness.
+* Match-style `when` accepts `f32` subjects with equality patterns
+  (`1.5 { ... } else { ... }`).
+
+See `specs/spec-v0.15.md` §4.2.
+
 ## Output
 
 ```ok
@@ -429,5 +466,5 @@ members stay explicit. See `specs/spec-v0.12.md` §8.1.
 Dynamic-length arrays, FFI, threads, aliases, struct-pattern matching
 (destructuring), and visibility modifiers are all **designed** (see
 `specs/spec-v0.15.md` §20 and `docs/roadmap.md`) and **not implemented**.
-The same goes for `f32` (a true 32-bit float). The compiler says so plainly
+The compiler says so plainly
 when you use a reserved construct — it never pretends.

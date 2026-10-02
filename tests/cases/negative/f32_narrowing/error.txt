@@ -1,0 +1,1 @@
+variable `f` is `f32`, but the initializer is `decimal`.

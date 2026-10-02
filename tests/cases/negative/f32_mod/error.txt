@@ -1,0 +1,1 @@
+remainder (`%`) is defined for integer types only in 0.3

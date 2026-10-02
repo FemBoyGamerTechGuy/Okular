@@ -42,6 +42,7 @@ const.S_UINT16 = 8
 const.S_UINT32 = 9
 const.S_UINT64 = 10
 const.S_AUTO = 11
+const.S_F32 = 12
 
 const.SIGN_BIT = 0x8000000000000000
 const.MAX_STRUCT_BYTES = 1048576
@@ -251,6 +252,7 @@ type.ptr<type.Ty> T_UINT16 = null
 type.ptr<type.Ty> T_UINT32 = null
 type.ptr<type.Ty> T_UINT64 = null
 type.ptr<type.Ty> T_AUTO = null
+type.ptr<type.Ty> T_F32 = null
 type.ptr<type.Ty> T_NULL = null
 type.ptr<type.Ty> T_VOID = null
 
@@ -279,6 +281,7 @@ function.init_types() -> number {
     T_UINT32 = mk_scalar(S_UINT32)
     T_UINT64 = mk_scalar(S_UINT64)
     T_AUTO = mk_scalar(S_AUTO)
+    T_F32 = mk_scalar(S_F32)
     T_NULL = parser.new_ty()
     T_NULL.form = F_NULL
     T_VOID = parser.new_ty()
@@ -371,6 +374,7 @@ function.canon(type.ptr<type.Ty>.t) -> type.ptr<type.Ty> {
     when (t.form == F_SCALAR) {
         when (t.scalar == S_NUMBER) { return T_NUMBER }
         else when (t.scalar == S_DECIMAL) { return T_DECIMAL }
+        else when (t.scalar == S_F32) { return T_F32 }
         else when (t.scalar == S_TEXT) { return T_TEXT }
         else when (t.scalar == S_BOOL) { return T_BOOL }
         else when (t.scalar == S_INT8) { return T_INT8 }
@@ -485,6 +489,7 @@ function.ty_bytes(type.ptr<type.Ty>.t) -> number {
     when (t.form == F_SCALAR) {
         when (t.scalar == S_NUMBER) { return 8 }
         else when (t.scalar == S_DECIMAL) { return 8 }
+        else when (t.scalar == S_F32) { return 4 }
         else when (t.scalar == S_TEXT) { return 16 }
         else when (t.scalar == S_BOOL) { return 1 }
         else when (t.scalar == S_INT8) { return 1 }
@@ -517,6 +522,7 @@ function.ty_align(type.ptr<type.Ty>.t) -> number {
     when (t.form == F_SCALAR) {
         when (t.scalar == S_NUMBER) { return 8 }
         else when (t.scalar == S_DECIMAL) { return 8 }
+        else when (t.scalar == S_F32) { return 4 }
         else when (t.scalar == S_TEXT) { return 8 }
         else when (t.scalar == S_BOOL) { return 1 }
         else when (t.scalar == S_INT8) { return 1 }
@@ -525,6 +531,7 @@ function.ty_align(type.ptr<type.Ty>.t) -> number {
         else when (t.scalar == S_UINT8) { return 1 }
         else when (t.scalar == S_UINT16) { return 2 }
         else when (t.scalar == S_UINT32) { return 4 }
+        else when (t.scalar == S_F32) { return 4 }
         else when (t.scalar == S_UINT64) { return 8 }
         return 1
     }
@@ -555,6 +562,7 @@ function.ty_name(type.ptr<type.Ty>.t) -> text {
     when (t.form == F_SCALAR) {
         when (t.scalar == S_NUMBER) { return "number" }
         else when (t.scalar == S_DECIMAL) { return "decimal" }
+        else when (t.scalar == S_F32) { return "f32" }
         else when (t.scalar == S_TEXT) { return "text" }
         else when (t.scalar == S_BOOL) { return "bool" }
         else when (t.scalar == S_INT8) { return "int8" }
@@ -588,6 +596,7 @@ function.scalar_from_name(text.s) -> number {
     else when (s == "int64") { return S_NUMBER }
     else when (s == "decimal") { return S_DECIMAL }
     else when (s == "f64") { return S_DECIMAL }
+    else when (s == "f32") { return S_F32 }
     else when (s == "text") { return S_TEXT }
     else when (s == "bool") { return S_BOOL }
     else when (s == "int8") { return S_INT8 }
@@ -604,6 +613,7 @@ function.scalar_from_name(text.s) -> number {
 function.scalar_ty(number.code) -> type.ptr<type.Ty> {
     when (code == S_NUMBER) { return T_NUMBER }
     else when (code == S_DECIMAL) { return T_DECIMAL }
+    else when (code == S_F32) { return T_F32 }
     else when (code == S_TEXT) { return T_TEXT }
     else when (code == S_BOOL) { return T_BOOL }
     else when (code == S_INT8) { return T_INT8 }
@@ -717,6 +727,135 @@ function.dec_to_int(decimal.d, type.ptr<type.Ty>.t) -> number {
     return reencode(v, t)
 }
 
+# ---- f32 bit-level converters (0.15, spec §4.2) ----
+#
+# f32 constants and folding: every float32 is exactly a float64, so a
+# single f64->f32 rounding (round-to-nearest-even) is what hardware
+# cvtsd2ss does, and what these integer implementations reproduce. The
+# 53-bit f64 intermediate is wide enough that rounding f32 +,-,* through
+# it is innocuous (Figueroa: p2 >= 2*p1+2), so folding f32 arithmetic in
+# f64 and rounding once per op is bit-identical to single-precision
+# hardware — f32 division stays unfolded (double rounding is possible).
+
+# one reusable scratch slot for reading a decimal's raw f64 bits
+type.ptr<type.decimal> dec_scratch = null
+
+function.dec_u64_bits(decimal.d) -> number {
+    when (dec_scratch == null) {
+        dec_scratch = alloc<type.decimal>(1)
+    }
+    dec_scratch[0] = d
+    type.ptr<type.byte> pb = number.to_ptr(ptr.to_number(dec_scratch))
+    type.number v = 0
+    type.number w = 1
+    loop (i from 0 until 8) {
+        v = v + pb[i] * w
+        w = w * 256
+    }
+    return v
+}
+
+# f64 value -> f32 bits, round-to-nearest-even (hardware cvtsd2ss parity)
+function.dec_to_f32_bits(decimal.d) -> number {
+    type.number bits = dec_u64_bits(d)
+    type.number sign = (bits >> 63) & 1
+    type.number exp = (bits >> 52) & 2047
+    type.number mant = bits & 4503599627370495
+    # infinities and NaNs map to their f32 shapes (NaN -> canonical quiet)
+    when (exp == 2047) {
+        when (mant == 0) {
+            return (sign << 31) + 2139095040
+        }
+        return (sign << 31) + 2143289344
+    }
+    # f64 zero or subnormal: subnormals are ~60 orders below the f32 range
+    # and always round to a signed zero
+    when (exp == 0) {
+        return sign << 31
+    }
+    type.number m52 = mant + 4503599627370496
+    type.number e0 = exp - 1075
+    # subnormal-or-zero f32 result: round m52 ONCE to the 2^-149 grid
+    when (e0 + 179 <= 0) {
+        type.number shiftsub = 926 - exp
+        when (shiftsub >= 54) {
+            return sign << 31
+        }
+        type.number msub = m52 >> shiftsub
+        type.number rem2 = m52 & ((1 << shiftsub) - 1)
+        type.number half2 = 1 << (shiftsub - 1)
+        when (rem2 > half2 or (rem2 == half2 and (msub & 1) == 1)) {
+            msub = msub + 1
+        }
+        when (msub >= 8388608) {
+            # rounded up into the smallest normal
+            return (sign << 31) + 8388608
+        }
+        return (sign << 31) + msub
+    }
+    # normal result: round the 53-bit mantissa to 24 bits, RNE
+    type.number m24 = m52 >> 29
+    type.number rem = m52 & 536870911
+    type.number half = 268435456
+    when (rem > half or (rem == half and (m24 & 1) == 1)) {
+        m24 = m24 + 1
+    }
+    when (m24 == 16777216) {
+        m24 = 8388608
+        e0 = e0 + 1
+    }
+    type.number E = e0 + 179
+    when (E >= 255) {
+        # overflow rounds to infinity (the halfway case rounded up)
+        return (sign << 31) + 2139095040
+    }
+    return (sign << 31) + (E << 23) + (m24 - 8388608)
+}
+
+# f32 bits -> exact decimal value (every f32 is an f64); NaN/inf callers
+# check finiteness first with f32_bits_finite
+function.f32_bits_finite(number.bits) -> bool {
+    type.number E = (bits >> 23) & 255
+    return E != 255
+}
+
+function.f32_bits_to_dec(number.bits) -> decimal {
+    type.number sign = (bits >> 31) & 1
+    type.number E = (bits >> 23) & 255
+    type.number m = bits & 8388607
+    type.decimal v = 0.0
+    when (E == 0) {
+        v = number.to_decimal(m)
+        loop (i from 0 until 149) {
+            v = v / 2.0
+        }
+    }
+    else {
+        v = number.to_decimal(m + 8388608)
+        type.number sh = E - 150
+        when (sh >= 0) {
+            loop (i from 0 until sh) {
+                v = v * 2.0
+            }
+        }
+        else {
+            loop (i from 0 until 0 - sh) {
+                v = v / 2.0
+            }
+        }
+    }
+    when (sign == 1) {
+        v = 0.0 - v
+    }
+    return v
+}
+
+# round a decimal to the nearest f32 value (as a decimal) — the folding
+# primitive: one RNE, exactly what cvtsd2ss does at runtime
+function.dec_round_f32(decimal.d) -> decimal {
+    return f32_bits_to_dec(dec_to_f32_bits(d))
+}
+
 # implicit conversion / assignment compatibility (types.c ty_assignable)
 function.assignable(type.ptr<type.Ty>.frm, type.ptr<type.Ty>.dst) -> bool {
     when (frm == dst) {
@@ -739,6 +878,14 @@ function.assignable(type.ptr<type.Ty>.frm, type.ptr<type.Ty>.dst) -> bool {
     }
     # any integer -> decimal
     when (dst == T_DECIMAL and is_integer(frm)) {
+        return true
+    }
+    # any integer -> f32 (same implicit widening as -> decimal)
+    when (dst == T_F32 and is_integer(frm)) {
+        return true
+    }
+    # f32 -> decimal widens exactly (every f32 is an f64)
+    when (dst == T_DECIMAL and frm == T_F32) {
         return true
     }
     # integer -> integer widening
@@ -784,7 +931,23 @@ function.ty_common(type.ptr<type.Ty>.a, type.ptr<type.Ty>.b) -> type.ptr<type.Ty
     when (b == T_DECIMAL and is_integer(a)) {
         return T_DECIMAL
     }
+    when (a == T_F32 and is_integer(b)) {
+        return T_F32
+    }
+    when (b == T_F32 and is_integer(a)) {
+        return T_F32
+    }
+    # f32 mixed with decimal computes in decimal (f32 widens exactly)
+    when (a == T_F32 and b == T_DECIMAL) {
+        return T_DECIMAL
+    }
+    when (b == T_F32 and a == T_DECIMAL) {
+        return T_DECIMAL
+    }
     when (a == T_DECIMAL or b == T_DECIMAL) {
+        return null
+    }
+    when (a == T_F32 or b == T_F32) {
         return null
     }
     when (is_integer(a) and is_integer(b)) {
@@ -810,10 +973,10 @@ function.convertible(type.ptr<type.Ty>.frm, type.ptr<type.Ty>.dst) -> bool {
     }
     # text conversion builtins (spec §4.4) — checked FIRST
     when (frm == T_TEXT) {
-        return dst == T_NUMBER or is_integer(dst) or dst == T_DECIMAL
+        return dst == T_NUMBER or is_integer(dst) or dst == T_DECIMAL or dst == T_F32
     }
     when (dst == T_TEXT) {
-        return is_integer(frm) or frm == T_DECIMAL or frm == T_BOOL
+        return is_integer(frm) or frm == T_DECIMAL or frm == T_BOOL or frm == T_F32
     }
     # records/arrays/named never convert
     when (frm.form == F_ARRAY or dst.form == F_ARRAY) {
@@ -828,9 +991,9 @@ function.convertible(type.ptr<type.Ty>.frm, type.ptr<type.Ty>.dst) -> bool {
     when (frm == T_VOID or dst == T_VOID) {
         return false
     }
-    # bool -> integer/decimal
+    # bool -> integer/decimal/f32
     when (frm == T_BOOL) {
-        return is_integer(dst) or dst == T_DECIMAL
+        return is_integer(dst) or dst == T_DECIMAL or dst == T_F32
     }
     # integer/decimal -> bool: no
     when (dst == T_BOOL) {
@@ -844,6 +1007,19 @@ function.convertible(type.ptr<type.Ty>.frm, type.ptr<type.Ty>.dst) -> bool {
         return true
     }
     when (frm == T_DECIMAL and is_integer(dst)) {
+        return true
+    }
+    # f32 <-> integers and f32 <-> decimal
+    when (is_integer(frm) and dst == T_F32) {
+        return true
+    }
+    when (frm == T_F32 and is_integer(dst)) {
+        return true
+    }
+    when (frm == T_F32 and dst == T_DECIMAL) {
+        return true
+    }
+    when (frm == T_DECIMAL and dst == T_F32) {
         return true
     }
     # pointer raw-address escapes (0.13, spec §12)
@@ -1636,6 +1812,16 @@ function.cv_dec(decimal.v) -> type.ptr<type.ConstVal> {
     return o
 }
 
+# an f32 constant: the value rides as its exact decimal (f64) form; the
+# f32-ness lives in the type, and materialization rounds once (spec §4.2)
+function.cv_f32(decimal.v) -> type.ptr<type.ConstVal> {
+    type.ptr<type.ConstVal> o = new_cv()
+    o.valid = 1
+    o.ty = T_F32
+    o.d = v
+    return o
+}
+
 function.cv_bool(number.v) -> type.ptr<type.ConstVal> {
     type.ptr<type.ConstVal> o = new_cv()
     o.valid = 1
@@ -1812,6 +1998,16 @@ function.const_eval(type.ptr<type.Node>.e) -> type.ptr<type.ConstVal> {
             }
             return cv_dec(parsed)
         }
+        when (v.ty == T_TEXT and dst == T_F32) {
+            # parse in f64, round once to f32 — a single rounding is exactly
+            # cvtsd2ss (innocuous through the wider format)
+            type.decimal parsed = parse_text_dec(v.t)
+            when (text_dec_ok == 0) {
+                serr_node(e, "text is not a number: \"" + v.t + "\".")
+                return null
+            }
+            return cv_f32(dec_round_f32(parsed))
+        }
         when ((is_integer(v.ty) or v.ty == T_DECIMAL or v.ty == T_BOOL) and dst == T_TEXT) {
             type.text out = ""
             when (v.ty == T_BOOL) {
@@ -1824,6 +2020,9 @@ function.const_eval(type.ptr<type.Node>.e) -> type.ptr<type.ConstVal> {
             }
             else when (v.ty == T_DECIMAL) {
                 out = rt.decimal_to_text(v.d)
+            }
+            else when (v.ty == T_F32) {
+                out = rt.f32_to_text(dec_to_f32_bits(v.d))
             }
             else when (v.ty == T_UINT64) {
                 out = rt.uint_to_text(v.i)
@@ -1839,6 +2038,25 @@ function.const_eval(type.ptr<type.Node>.e) -> type.ptr<type.ConstVal> {
         when (v.ty == T_DECIMAL and is_integer(dst)) {
             return cv_int(dec_to_int(v.d, dst), dst)
         }
+        when (v.ty == T_F32 and is_integer(dst)) {
+            # truncating conversion, matching runtime cvttss2si
+            return cv_int(dec_to_int(v.d, dst), dst)
+        }
+        when (v.ty == T_F32 and dst == T_DECIMAL) {
+            # exact widening — every f32 is an f64
+            return cv_dec(v.d)
+        }
+        when (is_integer(v.ty) and dst == T_F32) {
+            # int -> f32 rounds once; huge ints (>2^53) already rounded by
+            # the f64 intermediate stay unfolded (runtime is the truth)
+            when (v.i > 9007199254740992 or v.i < 0 - 9007199254740992) {
+                return null
+            }
+            return cv_f32(dec_round_f32(int_to_dec(v.i, v.ty)))
+        }
+        when (v.ty == T_DECIMAL and dst == T_F32) {
+            return cv_f32(dec_round_f32(v.d))
+        }
         when (is_integer(v.ty) and dst == T_DECIMAL) {
             return cv_dec(int_to_dec(v.i, v.ty))
         }
@@ -1852,6 +2070,13 @@ function.const_eval(type.ptr<type.Node>.e) -> type.ptr<type.ConstVal> {
                     d = 1.0
                 }
                 return cv_dec(d)
+            }
+            when (dst == T_F32) {
+                type.decimal d = 0.0
+                when (v.b == 1) {
+                    d = 1.0
+                }
+                return cv_f32(d)
             }
             type.number iv = 0
             when (v.b == 1) {
@@ -1907,6 +2132,10 @@ function.const_eval(type.ptr<type.Node>.e) -> type.ptr<type.ConstVal> {
             when (l.ty == T_DECIMAL) {
                 return cv_dec(l.d + r.d)
             }
+            when (l.ty == T_F32) {
+                # f64 intermediate + one RNE = single-precision add exactly
+                return cv_f32(dec_round_f32(l.d + r.d))
+            }
             when (l.ty == T_TEXT) {
                 return cv_text(l.t + r.t)
             }
@@ -1919,6 +2148,9 @@ function.const_eval(type.ptr<type.Node>.e) -> type.ptr<type.ConstVal> {
             when (l.ty == T_DECIMAL) {
                 return cv_dec(l.d - r.d)
             }
+            when (l.ty == T_F32) {
+                return cv_f32(dec_round_f32(l.d - r.d))
+            }
             return null
         }
         when (e.op == parser.OP_MUL) {
@@ -1927,6 +2159,9 @@ function.const_eval(type.ptr<type.Node>.e) -> type.ptr<type.ConstVal> {
             }
             when (l.ty == T_DECIMAL) {
                 return cv_dec(l.d * r.d)
+            }
+            when (l.ty == T_F32) {
+                return cv_f32(dec_round_f32(l.d * r.d))
             }
             return null
         }
@@ -1948,6 +2183,9 @@ function.const_eval(type.ptr<type.Node>.e) -> type.ptr<type.ConstVal> {
             when (l.ty == T_DECIMAL) {
                 return cv_dec(l.d / r.d)
             }
+            # f32 division stays UNFOLDED: an f64 intermediate can double-
+            # round where single-precision division would not — runtime
+            # divss is the truth (spec §4.2)
             return null
         }
         when (e.op == parser.OP_MOD) {
@@ -2023,6 +2261,20 @@ function.const_eval(type.ptr<type.Node>.e) -> type.ptr<type.ConstVal> {
                 else when (e.op == parser.OP_GE) { when (l.d >= r.d) { res = 1 } }
                 return cv_bool(res)
             }
+            when (l.ty == T_F32) {
+                # comparisons of exact f32 values in f64 are exact; NaN
+                # operands stay unfolded (runtime semantics, spec §4.2)
+                when (l.d != l.d or r.d != r.d) {
+                    return null
+                }
+                when (e.op == parser.OP_EQ) { when (l.d == r.d) { res = 1 } }
+                else when (e.op == parser.OP_NEQ) { when (l.d != r.d) { res = 1 } }
+                else when (e.op == parser.OP_LT) { when (l.d < r.d) { res = 1 } }
+                else when (e.op == parser.OP_LE) { when (l.d <= r.d) { res = 1 } }
+                else when (e.op == parser.OP_GT) { when (l.d > r.d) { res = 1 } }
+                else when (e.op == parser.OP_GE) { when (l.d >= r.d) { res = 1 } }
+                return cv_bool(res)
+            }
             when (l.ty == T_BOOL) {
                 when (e.op == parser.OP_EQ) {
                     when (l.b == r.b) { res = 1 }
@@ -2070,6 +2322,24 @@ function.assignable_value(type.ptr<type.Node>.val, type.ptr<type.Ty>.frm, type.p
     }
     when (assignable(frm, dst)) {
         return true
+    }
+    # float literals adopt an f32 target (single rounding, spec §4.2)
+    when (dst == T_F32 and val.kind == parser.N_DEC) {
+        return true
+    }
+    when (dst == T_F32 and val.kind == parser.N_INT) {
+        return true
+    }
+    when (dst == T_F32 and val.kind == parser.N_UN and val.uop == parser.UN_NEG and val.a.kind == parser.N_INT) {
+        return true
+    }
+    # foldable float expression: rounds once through const_into_type
+    when (dst == T_F32 and (frm == T_DECIMAL or frm == T_F32)) {
+        type.number mark = n_errors
+        type.ptr<type.ConstVal> cv = const_eval(val)
+        when (cv != null and n_errors == mark and cv.valid == 1) {
+            return true
+        }
     }
     when (dst == null or is_integer(dst) == false) {
         return false
@@ -2242,6 +2512,18 @@ function.const_into_type(type.ptr<type.Node>.init, type.ptr<type.ConstVal>.cv, t
     when (dst == T_DECIMAL) {
         cv.ty = T_DECIMAL
         cv.d = number.to_decimal(cv.i)
+        return true
+    }
+    when (dst == T_F32) {
+        # literal/global initializers round ONCE to the nearest f32 — the
+        # same single rounding hardware cvtsd2ss performs at runtime
+        when (cv.ty == T_DECIMAL or cv.ty == T_F32) {
+            cv.d = dec_round_f32(cv.d)
+        }
+        else {
+            cv.d = dec_round_f32(number.to_decimal(cv.i))
+        }
+        cv.ty = T_F32
         return true
     }
     when (is_integer(dst)) {
@@ -3274,6 +3556,19 @@ function.check_write(type.ptr<type.Node>.n) -> type.ptr<type.Ty> {
 
 # contextual literal typing (spec §4.2)
 function.literal_as(type.ptr<type.Node>.e, type.ptr<type.Ty>.other) -> type.ptr<type.Ty> {
+    # float literals adopt an f32 context (single rounding; spec §4.2)
+    when (other == T_F32) {
+        when (e.kind == parser.N_DEC and e.rtype == T_DECIMAL) {
+            return T_F32
+        }
+        when (e.kind == parser.N_INT and e.rtype == T_NUMBER) {
+            return T_F32
+        }
+        when (e.kind == parser.N_UN and e.uop == parser.UN_NEG and e.a != null and (e.a.kind == parser.N_INT or e.a.kind == parser.N_DEC)) {
+            return T_F32
+        }
+        return null
+    }
     when (other == null or is_integer(other) == false) {
         return null
     }
@@ -3702,8 +3997,8 @@ function.check_expr(type.ptr<type.Node>.e) -> type.ptr<type.Ty> {
     when (e.kind == parser.N_UN) {
         type.ptr<type.Ty> t = check_expr(e.a)
         when (e.uop == parser.UN_NEG) {
-            when (is_integer(t) == false and t != T_DECIMAL) {
-                serr_node(e, "unary `-` needs an integer or `decimal`, but `" + ty_name(t) + "` was given.")
+            when (is_integer(t) == false and t != T_DECIMAL and t != T_F32) {
+                serr_node(e, "unary `-` needs an integer, `decimal`, or `f32`, but `" + ty_name(t) + "` was given.")
             }
             e.rtype = t
             return t

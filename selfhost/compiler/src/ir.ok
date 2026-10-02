@@ -494,6 +494,14 @@ function.build_expr(type.ptr<type.Node>.e) -> number {
                 dec.d = cv.d
                 emit(dec)
             }
+            else when (cv.ty == sema.T_F32) {
+                # the value rides as its exact f64 form; emit converts to
+                # the single-precision bits with one cvtsd2ss (spec §4.2)
+                type.ptr<type.IrInst> dec = mkinst(I_CONST_DEC, e.line, e.col)
+                dec.ty = sema.T_F32
+                dec.d = cv.d
+                emit(dec)
+            }
             else when (cv.ty == sema.T_BOOL) {
                 type.ptr<type.IrInst> bo = mkinst(I_CONST_BOOL, e.line, e.col)
                 bo.ty = sema.T_BOOL
@@ -1569,6 +1577,35 @@ function.ir_fold(type.ptr<type.IrFunc>.f) -> number {
                     res.ty = sema.T_DECIMAL
                     res.d = number.to_decimal(a.b)
                 }
+                # f32 conversions fold with one RNE — exactly what the
+                # emitted cvtsd2ss/cvtss2sd perform at runtime (spec §4.2)
+                else when (src == sema.T_F32 and dst != null and sema.is_integer(dst)) {
+                    res.ty = dst
+                    res.i = sema.dec_to_int(a.d, dst)
+                }
+                else when (src == sema.T_F32 and dst == sema.T_DECIMAL) {
+                    # exact widening: every f32 is an f64
+                    res.ty = sema.T_DECIMAL
+                    res.d = a.d
+                }
+                else when (src != null and sema.is_integer(src) and dst == sema.T_F32) {
+                    when (a.i > 9007199254740992 or a.i < 0 - 9007199254740992) {
+                        # huge ints: the f64 intermediate would double-round
+                        handled = 0
+                    }
+                    else {
+                        res.ty = sema.T_F32
+                        res.d = sema.dec_round_f32(sema.int_to_dec(a.i, src))
+                    }
+                }
+                else when (src == sema.T_DECIMAL and dst == sema.T_F32) {
+                    res.ty = sema.T_F32
+                    res.d = sema.dec_round_f32(a.d)
+                }
+                else when (src == sema.T_BOOL and dst == sema.T_F32) {
+                    res.ty = sema.T_F32
+                    res.d = number.to_decimal(a.b)
+                }
                 else {
                     handled = 0
                 }
@@ -1580,10 +1617,10 @@ function.ir_fold(type.ptr<type.IrFunc>.f) -> number {
                         on = on - 1
                     }
                     type.ptr<type.IrInst> ci = mkinst(0, in.line, in.col)
-                    when (res.ty == sema.T_DECIMAL) {
+                    when (res.ty == sema.T_DECIMAL or res.ty == sema.T_F32) {
                         ci.kind = I_CONST_DEC
                         ci.d = res.d
-                        ci.ty = sema.T_DECIMAL
+                        ci.ty = res.ty
                     }
                     else {
                         ci.kind = I_CONST_INT
@@ -1628,6 +1665,36 @@ function.ir_fold(type.ptr<type.IrFunc>.f) -> number {
                     res.ty = in.ty
                     res.i = sema.reencode(v, in.ty)
                     ok = 1
+                }
+                else {
+                    ok = 0
+                }
+            }
+            else when (in.ty == sema.T_F32 and l.ty == sema.T_F32 and r.ty == sema.T_F32) {
+                # f32 arithmetic folds through the f64 intermediate with one
+                # RNE per op — innocuous for +,-,* (the 53-bit intermediate
+                # is at least 2*24+2 wide); division stays unfolded (spec §4.2)
+                type.number fold_ok = 1
+                type.decimal rd = 0.0
+                when (in.op == parser.OP_ADD) {
+                    rd = l.d + r.d
+                }
+                else when (in.op == parser.OP_SUB) {
+                    rd = l.d - r.d
+                }
+                else when (in.op == parser.OP_MUL) {
+                    rd = l.d * r.d
+                }
+                else {
+                    fold_ok = 0
+                }
+                when (rd != rd) {
+                    # NaN result (inf - inf): leave it to the runtime
+                    fold_ok = 0
+                }
+                when (fold_ok == 1) {
+                    res.ty = sema.T_F32
+                    res.d = sema.dec_round_f32(rd)
                 }
                 else {
                     ok = 0

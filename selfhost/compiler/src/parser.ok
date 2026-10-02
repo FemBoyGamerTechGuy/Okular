@@ -109,6 +109,7 @@ const.S_UINT16 = 8
 const.S_UINT32 = 9
 const.S_UINT64 = 10
 const.S_AUTO = 11
+const.S_F32 = 12
 const.S_VOID = -1
 
 struct.Ty = {
@@ -263,6 +264,7 @@ function.scalar_code(text.name) -> number {
     else when (name == "int64") { return S_NUMBER }
     else when (name == "decimal") { return S_DECIMAL }
     else when (name == "f64") { return S_DECIMAL }
+    else when (name == "f32") { return S_F32 }
     else when (name == "text") { return S_TEXT }
     else when (name == "bool") { return S_BOOL }
     else when (name == "int8") { return S_INT8 }
@@ -280,6 +282,7 @@ function.scalar_code(text.name) -> number {
 function.scalar_name(number.code) -> text {
     when (code == S_NUMBER) { return "number" }
     else when (code == S_DECIMAL) { return "decimal" }
+    else when (code == S_F32) { return "f32" }
     else when (code == S_TEXT) { return "text" }
     else when (code == S_BOOL) { return "bool" }
     else when (code == S_INT8) { return "int8" }
@@ -299,6 +302,7 @@ function.ty_bytes(type.ptr<type.Ty>.t) -> number {
     when (t.form == F_SCALAR) {
         when (t.scalar == S_NUMBER) { return 8 }
         else when (t.scalar == S_DECIMAL) { return 8 }
+        else when (t.scalar == S_F32) { return 4 }
         else when (t.scalar == S_TEXT) { return 16 }
         else when (t.scalar == S_BOOL) { return 1 }
         else when (t.scalar == S_INT8) { return 1 }

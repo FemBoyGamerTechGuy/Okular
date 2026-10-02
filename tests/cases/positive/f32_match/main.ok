@@ -1,0 +1,20 @@
+type.text=1
+
+function.classify(type.f32.v) -> text {
+    when (v) {
+        1.5 { return "one-and-a-half" }
+        2.5 { return "two-and-a-half" }
+        else { return "other" }
+    }
+}
+
+function.run() -> number {
+    write(classify(1.5))
+    print
+    write(classify(2.5))
+    print
+    write(classify(3.5))
+    print
+    return 0
+}
+run()

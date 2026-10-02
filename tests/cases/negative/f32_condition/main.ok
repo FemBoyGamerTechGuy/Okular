@@ -1,0 +1,6 @@
+type.text=1
+type.f32 a = 1.5
+when (a) {
+    write("truthy?")
+    print
+}

@@ -1,0 +1,57 @@
+type.text=1
+
+# single-precision geometry: 4-byte values, SSE arithmetic
+struct.Particle = { type.f32 x  type.f32 y  type.f32 vx  type.f32 vy }.end
+
+function.step(type.ptr<type.Particle>.p, type.f32.dt) -> number {
+    p.x = p.x + p.vx * dt
+    p.y = p.y + p.vy * dt
+    return 0
+}
+
+function.speed2(type.ptr<type.Particle>.p) -> f32 {
+    return p.vx * p.vx + p.vy * p.vy
+}
+
+function.describe(type.f32.s) -> text {
+    when (s) {
+        0.0 { return "at rest" }
+        else { return "moving" }
+    }
+}
+
+function.run() -> number {
+    type.Particle p = {0.0, 0.0, 1.5, 2.5}
+    type.ptr<type.Particle> pp = &p
+    loop (i from 0 until 4) {
+        step(pp, 0.5)
+    }
+    write(pp.x)
+    write(" ")
+    write(pp.y)
+    print
+
+    type.f32 s = speed2(pp)
+    write(s)
+    write(" ")
+    write(describe(s))
+    print
+
+    # literals round once; arithmetic rounds at f32 width
+    type.f32 third = 1.0 / 3.0
+    write(third)
+    print
+
+    # the full conversion family
+    type.decimal exact = third              # exact widening
+    type.number iv = f32.to_number(2.75)    # truncating
+    type.f32 back = decimal.to_f32(0.1)     # one rounding
+    write(exact)
+    write(" ")
+    write(iv)
+    write(" ")
+    write(back)
+    print
+    return 0
+}
+run()

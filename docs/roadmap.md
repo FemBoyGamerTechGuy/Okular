@@ -5,16 +5,22 @@ before the test suite proves it.**
 
 ## Where we are
 
-**Okular 0.15 — match-style `when`.** In addition to everything below,
-0.15 gives the `when` keyword a second reading: `when (subject) {
+**Okular 0.15 — match-style `when` + `f32`.** In addition to everything
+below, 0.15 gives the `when` keyword a second reading: `when (subject) {
 pattern { ... } ... else { ... } }` — equality patterns for integers,
 decimals, `text`, `bool`, and pointers (`null`), inclusive `lo to hi`
 ranges, comma-separated alternatives, constant patterns, arm guards
 (`pattern when (guard)`) that run only after the pattern matched,
 subject-evaluated-once semantics, first-match-wins, and exhaustiveness
-that satisfies the return analysis (17 new test cases). The same release
-fixes a real correctness defect: text ordering (`"a" < "z"`) was silently
-accepted and compiled as equality — it is now a precise compile error.
+that satisfies the return analysis. **`f32`** arrives as a true 32-bit
+IEEE float: SSE single-precision arithmetic, 4-byte storage, one-RNE
+literals, bit-exact folding, exact widening to `decimal`, the full
+conversion family, and NaN/inf/signed-zero semantics (28 new test
+cases). The same release fixes two real correctness defects found while
+testing: text ordering (`"a" < "z"`) was silently accepted and compiled
+as equality — now a precise compile error; and NaN equality assembled
+its `and` into the wrong register (`nan == nan` was `true`) — fixed in
+both the decimal and f32 paths.
 
 **Okular 0.13 — milestone M4 (the parser runs in Okular).** In addition to
 everything below, 0.13 makes **`and`/`or` short-circuit** (§9 — guards like
@@ -97,7 +103,12 @@ ranges, comma-separated alternatives, guards, exhaustiveness for `bool`
 subjects, duplicate/empty-range/misplaced-`else` diagnostics
 (`specs/spec-v0.15.md` §10.1). Struct patterns and destructuring remain
 designed, not implemented.
-9. **`f32`** — true 32-bit float (needs its own ABI/register path).
+9. ~~**`f32`**~~ **done in 0.15**: a true 32-bit IEEE float — SSE
+single-precision arithmetic/comparisons, 4-byte storage (locals, globals,
+arrays, structs), one-rounding literals, Figueroa-safe bit-exact folding
+(division deliberately unfolded), exact widening to `decimal`, the full
+conversion family, NaN/inf/signed-zero shapes, scientific formatting
+for large magnitudes (`specs/spec-v0.15.md` §4.2).
 10. ~~**Constants** (`const`), **type inference** (`type.auto`)~~ **done in 0.8**: `const.name = value` folds and inlines at compile time; `type.auto x = init` infers from the initializer (`specs/spec-v0.11.md` §8.1). ~~Const array lengths~~ **done in 0.14**: `type.array<T, NAME>` with module-visible constant names and dotted module paths (`specs/spec-v0.14.md` §8.4).
 11. **Standard library beginnings** — `io`, `text`, `math`, `memory` modules,
     `[libs.use]` binding real code; `oklib` format design.

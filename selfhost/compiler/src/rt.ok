@@ -296,6 +296,106 @@ function.bool_to_text(number.b) -> text {
     return "false"
 }
 
+# ---- f32 formatting (0.15, spec §4.2/§11) ----
+#
+# f32 values reach the runtime as their raw 32-bit pattern. Decoding is
+# exact (every f32 is an f64); NaN, the infinities, and signed zero keep
+# their shapes. Formatting follows the decimal family's documented
+# approximation: six fractional digits; magnitudes >= 1e15 print in
+# scientific form (m.dddddd e k) so the full f32 range is honest — the
+# plain fixed form would truncate past the 64-bit integer range.
+
+function.f32_bits_to_value(number.bits) -> decimal {
+    type.number sign = (bits >> 31) & 1
+    type.number E = (bits >> 23) & 255
+    type.number m = bits & 8388607
+    type.decimal v = 0.0
+    when (E == 0) {
+        # zeros and subnormals: m * 2^-149
+        v = number.to_decimal(m)
+        loop (i from 0 until 149) {
+            v = v / 2.0
+        }
+    }
+    else {
+        # normals: (m | 2^23) * 2^(E-150)
+        v = number.to_decimal(m + 8388608)
+        type.number sh = E - 150
+        when (sh >= 0) {
+            loop (i from 0 until sh) {
+                v = v * 2.0
+            }
+        }
+        else {
+            loop (i from 0 until 0 - sh) {
+                v = v / 2.0
+            }
+        }
+    }
+    when (sign == 1) {
+        v = 0.0 - v
+    }
+    return v
+}
+
+function.write_f32(number.bits) -> number {
+    type.number E = (bits >> 23) & 255
+    type.number m = bits & 8388607
+    when (E == 255) {
+        # the NaN and infinity shapes (spec §4.2)
+        when (m == 0) {
+            when ((bits >> 31) & 1 == 1) {
+                write_text("-inf")
+            }
+            else {
+                write_text("inf")
+            }
+        }
+        else {
+            write_text("nan")
+        }
+        return 0
+    }
+    type.decimal v = f32_bits_to_value(bits)
+    when (v != 0.0 and (v >= 1000000000000000.0 or v <= 0.0 - 1000000000000000.0)) {
+        # scientific: normalize into [1,10) and count the exponent
+        type.number neg = 0
+        when (v < 0.0) {
+            neg = 1
+            v = 0.0 - v
+        }
+        type.number k = 0
+        loop (v >= 10.0) {
+            v = v / 10.0
+            k = k + 1
+        }
+        when (neg == 1) {
+            write_text("-")
+        }
+        write_decimal(v)
+        write_text("e")
+        write_number(k)
+        return 0
+    }
+    write_decimal(v)
+    return 0
+}
+
+function.f32_to_text(number.bits) -> text {
+    # format through the output buffer, then copy into the arena (owned)
+    type.number save = out_len
+    out_ensure()
+    out_len = 0
+    write_f32(bits)
+    type.number n = out_len
+    type.ptr<type.byte> p = arena_take(n)
+    loop (i from 0 until n) {
+        p[i] = out_buf[i]
+    }
+    out_len = save
+    return text.from_bytes(p, n)
+}
+
 # ---- parsing (text -> number / decimal) ----
 
 function.digit(number.b) -> number {

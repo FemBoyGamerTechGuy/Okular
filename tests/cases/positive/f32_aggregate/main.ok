@@ -1,0 +1,36 @@
+type.text=1
+
+struct.Vec = { type.f32 x  type.f32 y  type.number tag }.end
+type.array<type.f32, 3> GLOB = {1.5, 2.5, 3.5}
+
+function.run() -> number {
+    # arrays: 4-byte elements, value copies, bounds checks
+    type.array<type.f32, 3> fs = {1.5, 2.5, 3.5}
+    write(fs[0] + fs[2])
+    print
+    fs[1] = 10.5
+    write(fs[1])
+    print
+    write(GLOB[1])
+    print
+
+    # structs: f32 fields pack at 4-byte alignment
+    type.Vec v = {1.5, 2.5, 7}
+    write(v.x + v.y)
+    print
+    write(v.tag)
+    print
+    v.x = 4.25
+    write(v.x)
+    print
+
+    # pointers to f32
+    type.ptr<type.f32> p = alloc<type.f32>(2)
+    p[0] = 1.25
+    p[1] = 2.75
+    write(p[0] + p[1])
+    print
+    release(p)
+    return 0
+}
+run()

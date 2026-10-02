@@ -1,0 +1,29 @@
+type.text=1
+
+function.run() -> number {
+    type.f32 a = 1.5
+
+    type.decimal dd = f32.to_decimal(a)
+    write(dd)
+    print
+    type.f32 back = decimal.to_f32(2.5)
+    write(back)
+    print
+    type.number iv = f32.to_number(2.75)
+    write(iv)
+    print
+    type.f32 fromint = number.to_f32(3)
+    write(fromint)
+    print
+    type.text s = f32.to_text(a)
+    write(s)
+    print
+    type.f32 parsed = text.to_f32("4.25")
+    write(parsed)
+    print
+    type.f32 frombool = bool.to_f32(true)
+    write(frombool)
+    print
+    return 0
+}
+run()

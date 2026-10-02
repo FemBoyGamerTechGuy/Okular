@@ -1,0 +1,5 @@
+type.text=1
+type.f32 a = 1.5
+type.f32 b = a % 2.0
+write(b)
+print

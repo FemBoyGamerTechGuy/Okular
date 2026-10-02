@@ -1,0 +1,29 @@
+type.text=1
+
+function.run() -> number {
+    # 0.1 has no exact binary form: the literal rounds ONCE to the nearest
+    # f32 (the same single rounding hardware cvtsd2ss performs)
+    type.f32 pointone = 0.1
+    write(pointone)
+    print
+
+    # single-precision arithmetic rounds at f32 width
+    type.f32 third = 1.0 / 3.0
+    write(third)
+    print
+
+    # 16777216 + 1 is representable; 16777217 is not (rounds to even)
+    type.f32 big = 16777216.0
+    write(big + 1.0)
+    print
+    type.f32 big2 = 16777217.0
+    write(big2)
+    print
+
+    # subnormal-range literal prints as the documented 6-digit zero
+    type.f32 tiny = 0.0000000000000000000000000000000000000000000015
+    write(tiny)
+    print
+    return 0
+}
+run()

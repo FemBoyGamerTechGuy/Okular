@@ -1,0 +1,36 @@
+type.text=1
+
+function.run() -> number {
+    # overflow rounds to infinity
+    type.f32 big = 340282350000000000000000000000000000000.0
+    write(big)
+    print
+    type.f32 inf = big * 2.0
+    write(inf)
+    print
+
+    # inf - inf = NaN; NaN compares unequal to itself (sete + setnp + and)
+    type.f32 nanv = big * 2.0 - big * 2.0
+    write(nanv)
+    print
+    when (nanv == nanv) { write("eq-true") print }
+    else { write("eq-false") print }
+    when (nanv != nanv) { write("ne-true") print }
+    else { write("ne-false") print }
+    when (nanv < 1.0) { write("lt-true") print }
+    else { write("lt-false") print }
+
+    # magnitudes >= 1e15 print in scientific form
+    type.f32 large = 10000000000000000.0
+    write(large)
+    print
+    write(0.0 - large)
+    print
+
+    # signed zero survives storage
+    type.f32 z = 0.0
+    type.f32 nz = 0.0 - z
+    when (z == 0.0 and nz == 0.0) { write("zeros-equal") print }
+    return 0
+}
+run()

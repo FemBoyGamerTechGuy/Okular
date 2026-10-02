@@ -1,0 +1,47 @@
+type.text=1
+
+function.run() -> number {
+    type.f32 a = 1.5
+    type.f32 b = 2.25
+    write(a + b)
+    print
+    write(a * b)
+    print
+    write(a - b)
+    print
+    write(a / b)
+    print
+
+    # int literals adopt the f32 context
+    type.f32 g = 2
+    write(g)
+    print
+
+    # f32 widens exactly to decimal
+    type.decimal wide = a
+    write(wide)
+    print
+
+    # every comparison
+    when (a < b) { write("lt") print }
+    when (a <= 1.5) { write("le") print }
+    when (b > a) { write("gt") print }
+    when (a >= 1.5) { write("ge") print }
+    when (a == 1.5) { write("eq") print }
+    when (a != b) { write("ne") print }
+
+    # mixed arithmetic: int widens to f32; f32 widens to decimal
+    type.f32 mixed = a + 1
+    write(mixed)
+    print
+    type.decimal dm = a + 0.25
+    write(dm)
+    print
+
+    # unary minus keeps single precision
+    type.f32 neg = 0.0 - a
+    write(-neg)
+    print
+    return 0
+}
+run()

@@ -1,6 +1,6 @@
 # Okular Language Specification
 
-**Version:** 0.15 (match-style `when`; text-ordering correctness fix)
+**Version:** 0.15 (match-style `when`; `f32`; text-ordering correctness fix)
 **Status:** Evolving draft
 **Implementation:** the compiler written in Okular (`selfhost/compiler`),
 which compiles itself; a committed native seed (`bin/okular`) builds it —
@@ -21,6 +21,26 @@ no C compiler, no `as`, no `ld` anywhere in the repository
 > are not last; `bool` subjects warn when not exhaustive. An exhaustive
 > match (an `else` arm, or `true`+`false` on `bool`) satisfies the
 > return analysis exactly like a fully-else'd conditional chain.
+>
+> 0.15 also adds **`f32`** (§4.2): a true 32-bit float — not an alias,
+> not a stored-as-double approximation. Values compute through SSE
+> single-precision operations (`addss`, `ucomiss`, ...); memory is 4
+> bytes (locals, globals, array elements, struct fields); literals adopt
+> an `f32` context with ONE round-to-nearest-even — exactly what the
+> hardware `cvtsd2ss` performs; constant folding rounds once per
+> operation through the wider `decimal` intermediate, which provably
+> cannot double-round for `+ - *` (Figueroa: p2 ≥ 2·p1+2) — `f32`
+> division is deliberately left unfolded because a double rounding
+> there is possible. `f32` widens exactly to `decimal` (every float32 is
+> a float64); integers widen implicitly in arithmetic (as they do to
+> `decimal`); narrowing is explicit through the conversion family:
+> `f32.to_decimal`, `decimal.to_f32`, `f32.to_number` (truncating),
+> `number.to_f32`, `f32.to_text`, `text.to_f32`. NaN and the infinities
+> keep their IEEE shapes (`nan == nan` is `false` — including through a
+> 0.15 backend fix to the setcc AND encoding that also repaired the
+> pre-existing decimal path); magnitudes ≥ 1e15 print in scientific
+> form; `%`, bitwise operators, and boolean conditions are rejected with
+> precise diagnostics. Tests: `f32_*` (11 cases).
 >
 > 0.15 also fixes a correctness defect that predates the Okular-written
 > compiler: **text ordering comparisons (`<`, `<=`, `>`, `>=`) were
@@ -358,8 +378,39 @@ byte   (alias of uint8)
 * `int64` is **`number`'s systems name** — the same type. `f64` is
   `decimal`'s. `byte` is `uint8`. Aliases exist so systems code reads the
   way systems programmers think; they add no new semantics.
-* `f32` remains designed-not-implemented (a true 32-bit float needs its own
-  ABI path; it arrives with the float milestone).
+* **`f32` (implemented in 0.15) is a true 32-bit IEEE float** — not an
+  alias, not a stored-as-double approximation:
+  * **Arithmetic is single precision**: `+ - * /` compile to SSE
+    `addss/subss/mulss/divss`; comparisons to `ucomiss`. Every operation
+    rounds to float32 width — `f32 0.1 + 0.2` differs from
+    `decimal 0.1 + 0.2` exactly as C `float` differs from `double`.
+  * **Memory is 4 bytes**: locals, globals, array elements, and struct
+    fields (natural 4-byte alignment; `array<f32, N>` strides 4).
+  * **Literals round once**: `type.f32 x = 0.1` performs exactly one
+    round-to-nearest-even to the nearest float32 — the same single
+    rounding `cvtsd2ss` performs, so literals are exact.
+  * **Constant folding is bit-exact**: folded `+ - *` compute in the
+    wider `decimal` intermediate and round once per op, which cannot
+    double-round through ≥ 2·24+2 bits (Figueroa); folded `f32`
+    **division is deliberately not folded** (double rounding is
+    possible there — runtime `divss` is the truth).
+  * **`f32` widens exactly to `decimal`** (every float32 is a float64);
+    integers widen implicitly in mixed arithmetic (as they do to
+    `decimal`); `decimal → f32` never happens implicitly — narrowing is
+    explicit: `decimal.to_f32(x)`.
+  * **Conversions**: `f32.to_decimal` (exact), `decimal.to_f32` (one
+    RNE), `f32.to_number` (truncates toward zero, like `f64.to_number`),
+    `number.to_f32`, `f32.to_text`, `text.to_f32` (parse then one RNE).
+  * **NaN and infinities keep their IEEE shapes**: `nan == nan` is
+    `false`, `nan != nan` is `true`, ordering against NaN is `false`;
+    overflow (e.g. the max float times 2) is `inf`; `inf - inf` is
+    `nan`; signed zero is preserved (`0.0 - 0.0` is `-0.0`, equal to
+    `0.0`).
+  * **Formatting** follows the decimal family's documented 6-fractional-
+    digit fixed form; magnitudes ≥ 1e15 print scientifically
+    (`3.402823e38`, `-inf`, `nan`) so the entire f32 range is honest.
+  * `%`, the bitwise family, and `when (f32-value)` conditions are
+    rejected with precise diagnostics — no silent truthiness.
 * All share the declaration grammar (`type.uint32 flags = 0xFF`) and the
   dotted parameter/return forms (`int32.x`, `-> uint16`).
 * **Arithmetic wraps** — two's-complement, modulo 2^N, at the operand type:
@@ -1493,7 +1544,7 @@ An implementation claiming "Okular 0.1" must:
 | Bounds checks + runtime trap | §8.4/13 | implemented |
 | Fixed-width integers (all widths, wrap, lattice) | §4.2 | implemented |
 | Conversion builtins `T.to_U(x)` | §4.4 | implemented (text pairs included, 0.6) |
-| `f32` | §4.2 | NOT IMPLEMENTED (float milestone) |
+| `f32` | §4.2 | **implemented (0.15)** — true single-precision: SSE ops, 4-byte memory, one-RNE literals, bit-exact folding (+−× only), exact widening to `decimal`, NaN/inf shapes |
 | `type.text=1` gate | §5 | implemented |
 | Variables, scoping, reassignment | §8.1 | implemented |
 | Functions, recursion, return checking | §8.2 | implemented |
@@ -1603,6 +1654,19 @@ the conversion family (`T.to_U`): the source type names the operation.
   patterns, duplicates, range-covered patterns, empty ranges, ranges on
   non-numbers, misplaced `else` arms, non-matchable subjects. 17 new test
   cases (`match_*`, `text_ordering`).
+* **`f32`** (§4.2): the true 32-bit float — SSE single-precision
+  arithmetic and comparisons; 4-byte storage in locals, globals, arrays,
+  structs; one-rounding literals; Figueroa-safe constant folding
+  (`+ - *` only — division stays unfolded); exact widening to `decimal`;
+  the full conversion family (`f32.to_decimal`, `decimal.to_f32`,
+  `f32.to_number`, `number.to_f32`, `f32.to_text`, `text.to_f32`);
+  NaN/inf/signed-zero semantics; scientific formatting for magnitudes
+  ≥ 1e15; match-style `when` support. 11 test cases (`f32_*`).
+* **NaN-equality backend fix (pre-existing)**: the `sete`+`setnp`+
+  `and` sequence assembled `and cl, al` — the AND result landed in the
+  wrong register, so `x == x` was `true` for NaNs in BOTH the decimal
+  and new f32 paths. Now `and al, cl`; NaN equality is `false` in both
+  (`f32_nan_inf` regression).
 * **Text-ordering correctness fix**: `<`, `<=`, `>`, `>=` on `text` were
   silently accepted and compiled as equality (a defect that predates the
   Okular-written compiler); they are now precise compile errors. Text

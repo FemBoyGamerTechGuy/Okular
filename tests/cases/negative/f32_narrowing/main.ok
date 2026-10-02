@@ -1,0 +1,9 @@
+type.text=1
+function.run() -> number {
+    type.decimal d = 2.5
+    type.f32 f = d
+    write(f)
+    print
+    return 0
+}
+run()

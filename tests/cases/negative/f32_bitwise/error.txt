@@ -1,0 +1,1 @@
+`&` combines two integer values, but `f32` and `decimal` were given.

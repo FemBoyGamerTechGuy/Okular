@@ -1,0 +1,9 @@
+3.402823e38
+inf
+nan
+eq-false
+ne-true
+lt-false
+1.000000e16
+-1.000000e16
+zeros-equal
