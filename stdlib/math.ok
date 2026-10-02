@@ -1,0 +1,143 @@
+# math.ok — the Okular standard library: integer and decimal math (0.15)
+#
+# Pure Okular on the language floor: no syscalls, no runtime calls —
+# arithmetic, Newton iterations, and Euclid. Integer functions wrap like
+# all Okular integer arithmetic; decimal functions compute in f64.
+
+type.text=1
+
+function.abs(number.n) -> number {
+    when (n < 0) {
+        return 0 - n
+    }
+    return n
+}
+
+function.sign(number.n) -> number {
+    when (n > 0) {
+        return 1
+    }
+    else when (n < 0) {
+        return -1
+    }
+    return 0
+}
+
+function.min(number.a, number.b) -> number {
+    when (a < b) {
+        return a
+    }
+    return b
+}
+
+function.max(number.a, number.b) -> number {
+    when (a > b) {
+        return a
+    }
+    return b
+}
+
+function.clamp(number.v, number.lo, number.hi) -> number {
+    when (v < lo) {
+        return lo
+    }
+    when (v > hi) {
+        return hi
+    }
+    return v
+}
+
+function.powi(number.base, number.exp) -> number {
+    # non-negative integer exponent; wraps at 64 bits like all arithmetic
+    type.number r = 1
+    loop (i from 0 until exp) {
+        r = r * base
+    }
+    return r
+}
+
+function.gcd(number.a, number.b) -> number {
+    # Euclid over absolute values; gcd(0, 0) = 0
+    when (a < 0) {
+        a = 0 - a
+    }
+    when (b < 0) {
+        b = 0 - b
+    }
+    loop (b != 0) {
+        type.number t = a % b
+        a = b
+        b = t
+    }
+    return a
+}
+
+function.lcm(number.a, number.b) -> number {
+    # zero yields zero (0 is absorbent); otherwise |a*b| / gcd
+    when (a == 0 or b == 0) {
+        return 0
+    }
+    type.number g = gcd(a, b)
+    when (g == 0) {
+        return 0
+    }
+    type.number p = a * b
+    when (p < 0) {
+        p = 0 - p
+    }
+    return p / g
+}
+
+function.isqrt(number.n) -> number {
+    # floor(sqrt(n)) by integer Newton iteration
+    when (n < 2) {
+        return n
+    }
+    type.number x = n
+    type.number y = (x + 1) / 2
+    loop (y < x) {
+        x = y
+        y = (x + n / x) / 2
+    }
+    return x
+}
+
+function.sqrt(decimal.x) -> decimal {
+    # decimal square root by Newton's method, iterated to a fixed point
+    # of the f64 representation. sqrt of a negative value returns nan
+    # (0/0 at runtime — hardware division, no trap).
+    when (x < 0.0) {
+        return 0.0 / 0.0
+    }
+    when (x == 0.0) {
+        return 0.0
+    }
+    type.decimal g = x
+    type.decimal last = -1.0
+    loop (g != last) {
+        last = g
+        g = (g + x / g) / 2.0
+    }
+    return g
+}
+
+function.dabs(decimal.d) -> decimal {
+    when (d < 0.0) {
+        return 0.0 - d
+    }
+    return d
+}
+
+function.dmin(decimal.a, decimal.b) -> decimal {
+    when (a < b) {
+        return a
+    }
+    return b
+}
+
+function.dmax(decimal.a, decimal.b) -> decimal {
+    when (a > b) {
+        return a
+    }
+    return b
+}

@@ -23,7 +23,9 @@ arithmetic), records with predictable layout, unions with
 type-directed literals, the full conversion builtin set, **bitwise
 operations** with range-checked shifts, **short-circuit `and`/`or`**,
 **match-style `when`** (ranges, guards, `else`, exhaustiveness — spec
-§10.1), and the raw syscall floor (`sys.*` — write/read/open/close/size/
+§10.1), **`f32`** — a true 32-bit IEEE float (spec §4.2), a **standard
+library** (`[libs.use]` binding `math`/`text`/`io`/`memory` — spec §6.3),
+and the raw syscall floor (`sys.*` — write/read/open/close/size/
 mmap/exit/chmod/mkdir/getdents) that the runtime itself rides on.
 
 ```ok
@@ -91,6 +93,7 @@ bin/          okular — the committed native seed compiler (self-built,
 selfhost/     the compiler written in Okular (toks, parser, sema, ir,
               emit, elf, rt, and the M3/M4 component lineage)
 specs/        the language specification (versioned, honest status table)
+stdlib/       the standard library (math, text, io, memory)
 docs/         getting started, language basics, architecture, roadmap
 examples/     runnable Okular programs (HelloProject = full project)
 tests/        the test suite (positive / negative / policy)

@@ -5,22 +5,24 @@ before the test suite proves it.**
 
 ## Where we are
 
-**Okular 0.15 — match-style `when` + `f32`.** In addition to everything
-below, 0.15 gives the `when` keyword a second reading: `when (subject) {
-pattern { ... } ... else { ... } }` — equality patterns for integers,
-decimals, `text`, `bool`, and pointers (`null`), inclusive `lo to hi`
-ranges, comma-separated alternatives, constant patterns, arm guards
-(`pattern when (guard)`) that run only after the pattern matched,
+**Okular 0.15 — match-style `when`, `f32`, and the standard library.**
+In addition to everything below, 0.15 gives the `when` keyword a second
+reading: `when (subject) { pattern { ... } ... else { ... } }` — equality
+patterns for integers, decimals, `text`, `bool`, and pointers (`null`),
+inclusive `lo to hi` ranges, comma-separated alternatives, constant
+patterns, arm guards that run only after the pattern matched,
 subject-evaluated-once semantics, first-match-wins, and exhaustiveness
 that satisfies the return analysis. **`f32`** arrives as a true 32-bit
 IEEE float: SSE single-precision arithmetic, 4-byte storage, one-RNE
 literals, bit-exact folding, exact widening to `decimal`, the full
-conversion family, and NaN/inf/signed-zero semantics (28 new test
-cases). The same release fixes two real correctness defects found while
-testing: text ordering (`"a" < "z"`) was silently accepted and compiled
-as equality — now a precise compile error; and NaN equality assembled
-its `and` into the wrong register (`nan == nan` was `true`) — fixed in
-both the decimal and f32 paths.
+conversion family, and NaN/inf/signed-zero semantics. **`[libs.use]`
+binds** — libraries are modules resolved from `libs/`, `deps/`, or the
+compiler's `stdlib/`, and the first four standard-library modules ship:
+`math`, `text`, `io`, `memory` (35 new test cases). Two real correctness
+defects were found and fixed along the way: text ordering (`"a" < "z"`)
+was silently accepted and compiled as equality — now a precise compile
+error; and NaN equality assembled its `and` into the wrong register
+(`nan == nan` was `true`) — fixed in both the decimal and f32 paths.
 
 **Okular 0.13 — milestone M4 (the parser runs in Okular).** In addition to
 everything below, 0.13 makes **`and`/`or` short-circuit** (§9 — guards like
@@ -110,8 +112,11 @@ arrays, structs), one-rounding literals, Figueroa-safe bit-exact folding
 conversion family, NaN/inf/signed-zero shapes, scientific formatting
 for large magnitudes (`specs/spec-v0.15.md` §4.2).
 10. ~~**Constants** (`const`), **type inference** (`type.auto`)~~ **done in 0.8**: `const.name = value` folds and inlines at compile time; `type.auto x = init` infers from the initializer (`specs/spec-v0.11.md` §8.1). ~~Const array lengths~~ **done in 0.14**: `type.array<T, NAME>` with module-visible constant names and dotted module paths (`specs/spec-v0.14.md` §8.4).
-11. **Standard library beginnings** — `io`, `text`, `math`, `memory` modules,
-    `[libs.use]` binding real code; `oklib` format design.
+11. ~~**Standard library beginnings**~~ **done in 0.15**: `[libs.use]`
+    binds — a library is a module (`libs/`, `deps/`, the compiler's
+    `stdlib/`, transitively). First modules: `math`, `text`, `io`,
+    `memory` (`specs/spec-v0.15.md` §6.3). The `oklib` packaged format
+    remains designed.
 12. **ARM64 backend** — second target proves the backend abstraction.
 13. **Optimizer framework** — register allocation, DCE, inlining on the IR;
     constant folding already exists as the first pass.

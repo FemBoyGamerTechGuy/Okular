@@ -1,0 +1,184 @@
+# text.ok — the Okular standard library: text utilities (0.15)
+#
+# Extends the text.* builtins (length, byte_at, slice, from_bytes —
+# spec §4.5) with searching, casing, trimming, and construction. All
+# construction is O(n): bytes go into an alloc'd buffer once, then
+# text.from_bytes makes the immutable view. No arena, no copies beyond
+# the one each function needs.
+
+type.text=1
+
+function.repeat(text.s, number.n) -> text {
+    type.number sl = text.length(s)
+    when (sl == 0 or n <= 0) {
+        return ""
+    }
+    type.number total = sl * n
+    type.ptr<type.byte> buf = alloc<type.byte>(total)
+    loop (i from 0 until n) {
+        loop (j from 0 until sl) {
+            buf[i * sl + j] = text.byte_at(s, j)
+        }
+    }
+    type.text r = rt.arena_text(buf, total)
+    release(buf)
+    return r
+}
+
+function.upper(text.s) -> text {
+    # ASCII a-z -> A-Z (UTF-8 bytes outside the range pass through)
+    type.number n = text.length(s)
+    when (n == 0) {
+        return ""
+    }
+    type.ptr<type.byte> buf = alloc<type.byte>(n)
+    loop (i from 0 until n) {
+        type.number b = text.byte_at(s, i)
+        when (b >= 97 and b <= 122) {
+            b = b - 32
+        }
+        buf[i] = number.to_uint8(b)
+    }
+    type.text r = rt.arena_text(buf, n)
+    release(buf)
+    return r
+}
+
+function.lower(text.s) -> text {
+    # ASCII A-Z -> a-z
+    type.number n = text.length(s)
+    when (n == 0) {
+        return ""
+    }
+    type.ptr<type.byte> buf = alloc<type.byte>(n)
+    loop (i from 0 until n) {
+        type.number b = text.byte_at(s, i)
+        when (b >= 65 and b <= 90) {
+            b = b + 32
+        }
+        buf[i] = number.to_uint8(b)
+    }
+    type.text r = rt.arena_text(buf, n)
+    release(buf)
+    return r
+}
+
+function.reverse(text.s) -> text {
+    type.number n = text.length(s)
+    when (n == 0) {
+        return ""
+    }
+    type.ptr<type.byte> buf = alloc<type.byte>(n)
+    loop (i from 0 until n) {
+        buf[i] = text.byte_at(s, n - 1 - i)
+    }
+    type.text r = rt.arena_text(buf, n)
+    release(buf)
+    return r
+}
+
+function.find(text.s, text.sub) -> number {
+    # first index of `sub` in `s`, or -1; the empty text is found at 0
+    type.number n = text.length(s)
+    type.number m = text.length(sub)
+    when (m == 0) {
+        return 0
+    }
+    when (m > n) {
+        return -1
+    }
+    type.number lim = n - m
+    loop (i from 0 until lim + 1) {
+        type.number ok = 1
+        loop (j from 0 until m) {
+            when (text.byte_at(s, i + j) != text.byte_at(sub, j)) {
+                ok = 0
+                break
+            }
+        }
+        when (ok == 1) {
+            return i
+        }
+    }
+    return -1
+}
+
+function.contains(text.s, text.sub) -> bool {
+    return find(s, sub) >= 0
+}
+
+function.starts_with(text.s, text.prefix) -> bool {
+    type.number n = text.length(s)
+    type.number m = text.length(prefix)
+    when (m > n) {
+        return false
+    }
+    loop (j from 0 until m) {
+        when (text.byte_at(s, j) != text.byte_at(prefix, j)) {
+            return false
+        }
+    }
+    return true
+}
+
+function.ends_with(text.s, text.suffix) -> bool {
+    type.number n = text.length(s)
+    type.number m = text.length(suffix)
+    when (m > n) {
+        return false
+    }
+    type.number off = n - m
+    loop (j from 0 until m) {
+        when (text.byte_at(s, off + j) != text.byte_at(suffix, j)) {
+            return false
+        }
+    }
+    return true
+}
+
+function.count(text.s, text.sub) -> number {
+    # non-overlapping occurrences; the empty text counts as zero
+    type.number m = text.length(sub)
+    when (m == 0) {
+        return 0
+    }
+    type.number n = text.length(s)
+    type.number cnt = 0
+    type.number i = 0
+    loop (i + m <= n) {
+        type.number ok = 1
+        loop (j from 0 until m) {
+            when (text.byte_at(s, i + j) != text.byte_at(sub, j)) {
+                ok = 0
+                break
+            }
+        }
+        when (ok == 1) {
+            cnt = cnt + 1
+            i = i + m
+        }
+        else {
+            i = i + 1
+        }
+    }
+    return cnt
+}
+
+function.is_space(number.b) -> bool {
+    # space, tab, newline, carriage return
+    return b == 32 or b == 9 or b == 10 or b == 13
+}
+
+function.trim(text.s) -> text {
+    # both ends; the result shares the original's bytes (O(1) slice)
+    type.number n = text.length(s)
+    type.number a = 0
+    type.number b = n
+    loop (a < b and is_space(text.byte_at(s, a))) {
+        a = a + 1
+    }
+    loop (b > a and is_space(text.byte_at(s, b - 1))) {
+        b = b - 1
+    }
+    return text.slice(s, a, b)
+}

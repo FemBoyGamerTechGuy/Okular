@@ -1,0 +1,15 @@
+type.text=1
+
+[libs.use] = {
+    "myutil", "math"
+}.end
+
+function.run() -> number {
+    write(myutil.greet("lib"))
+    print
+    # stdlib still resolves alongside the local library
+    write(math.abs(-5))
+    print
+    return 0
+}
+run()

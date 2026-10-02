@@ -1,0 +1,15 @@
+type.text=1
+
+[libs.use] = {
+    "io"
+}.end
+
+function.run() -> number {
+    io.puts("one line")
+    io.putn(7)
+    io.putd(2.5)
+    io.putb(true)
+    io.eputs("to stderr")
+    return 0
+}
+run()

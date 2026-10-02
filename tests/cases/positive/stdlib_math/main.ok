@@ -1,0 +1,34 @@
+type.text=1
+
+[libs.use] = {
+    "math"
+}.end
+
+function.run() -> number {
+    write(math.abs(-42))
+    write(" ")
+    write(math.sign(-7))
+    write(" ")
+    write(math.min(3, 9))
+    write(" ")
+    write(math.max(3, 9))
+    write(" ")
+    write(math.clamp(150, 0, 100))
+    print
+    write(math.powi(2, 10))
+    write(" ")
+    write(math.gcd(48, 18))
+    write(" ")
+    write(math.lcm(4, 6))
+    write(" ")
+    write(math.isqrt(99))
+    print
+    write(math.sqrt(2.0))
+    write(" ")
+    write(math.dabs(-1.5))
+    write(" ")
+    write(math.dmin(1.25, 2.5))
+    print
+    return 0
+}
+run()

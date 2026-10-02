@@ -1,0 +1,6 @@
+# a project-local library: takes precedence over the compiler's stdlib
+type.text=1
+
+function.greet(text.name) -> text {
+    return "local " + name
+}

@@ -1,0 +1,30 @@
+type.text=1
+
+[libs.use] = {
+    "memory"
+}.end
+
+function.run() -> number {
+    type.ptr<type.byte> buf = alloc<type.byte>(16)
+    memory.fill(buf, 16, 0)
+    memory.write_u32le(buf, 0, 16909060)
+    write(memory.read_u32le(buf, 0))
+    print
+    memory.write_u16le(buf, 8, 513)
+    write(memory.read_u16le(buf, 8))
+    print
+    memory.write_u64le(buf, 0, 4294967296)
+    write(memory.read_u64le(buf, 0))
+    print
+    type.ptr<type.byte> b2 = alloc<type.byte>(16)
+    memory.copy(b2, buf, 16)
+    write(memory.same(buf, b2, 16))
+    print
+    memory.zero(b2, 16)
+    write(memory.same(buf, b2, 16))
+    print
+    release(buf)
+    release(b2)
+    return 0
+}
+run()

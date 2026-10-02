@@ -1,0 +1,32 @@
+type.text=1
+
+[libs.use] = {
+    "math", "text", "io", "memory"
+}.end
+
+function.run() -> number {
+    # math: integers and decimals
+    io.putn(math.gcd(48, 18))
+    io.putn(math.powi(2, 16))
+    io.putn(math.isqrt(1000))
+    io.putd(math.sqrt(2.0))
+
+    # text: builtins keep priority; the module adds the rest
+    type.text s = "  Okular 0.15  "
+    io.puts(text.upper(text.trim(s)))
+    io.puts(text.repeat("=-", 12))
+    write("find: ")
+    write(text.find("aXbXc", "X"))
+    print
+
+    # memory: little-endian views over byte buffers
+    type.ptr<type.byte> buf = alloc<type.byte>(8)
+    memory.write_u32le(buf, 0, 305419896)
+    write(memory.read_u16le(buf, 0))
+    write(" ")
+    write(memory.read_u16le(buf, 2))
+    print
+    release(buf)
+    return 0
+}
+run()

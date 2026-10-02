@@ -1,0 +1,8 @@
+type.text=1
+
+[libs.use] = {
+    "does_not_exist"
+}.end
+
+write("still compiles")
+print

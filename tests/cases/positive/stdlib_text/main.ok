@@ -1,0 +1,40 @@
+type.text=1
+
+[libs.use] = {
+    "text"
+}.end
+
+function.run() -> number {
+    type.text s = "Hello Okular"
+    write(text.upper(s))
+    print
+    write(text.lower(s))
+    print
+    write(text.reverse(s))
+    print
+    write(text.repeat("ab", 3))
+    print
+    write(text.find(s, "Okular"))
+    write(" ")
+    write(text.find(s, "zzz"))
+    print
+    write(text.contains(s, "Oku"))
+    write(" ")
+    write(text.starts_with(s, "Hell"))
+    write(" ")
+    write(text.ends_with(s, "ular"))
+    print
+    write(text.count("aaa bbb aaa", "aaa"))
+    print
+    write(">")
+    write(text.trim("   padded   "))
+    write("<")
+    print
+    # the text.* builtins keep priority over the module
+    write(text.length(s))
+    write(" ")
+    write(text.slice(s, 0, 5))
+    print
+    return 0
+}
+run()

@@ -41,6 +41,10 @@ chmod 755 "$STAGE/bin/okular"
 
 cp "$REPO/selfhost/compiler/src/rt.ok" "$STAGE/src/rt.ok"
 
+# the standard library: [libs.use] resolves against stdlib/ next to bin/
+mkdir -p "$STAGE/stdlib"
+cp "$REPO"/stdlib/*.ok "$STAGE/stdlib/"
+
 cp -r "$REPO/examples" "$STAGE/examples"
 rm -rf "$STAGE/examples"/*/build
 
@@ -75,6 +79,8 @@ Or just call \`bin/okular\` by its full path.
 
     bin/okular   the compiler (one native executable)
     src/rt.ok    the runtime module (compiled into every program)
+    stdlib/      the standard library (math, text, io, memory) —
+                 [libs.use] = { "math" }.end pulls it in
     examples/    runnable example projects
     docs/        language and architecture documentation
     LICENSE      the Okular Project License (see the license note below)

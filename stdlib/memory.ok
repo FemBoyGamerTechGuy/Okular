@@ -1,0 +1,93 @@
+# memory.ok — the Okular standard library: byte-buffer helpers (0.15)
+#
+# Manual-memory conveniences for systems code: fills, copies, compares,
+# and little-endian integer views over ptr<byte> buffers (wire formats,
+# dirent records, ELF structures). All bounds discipline stays with the
+# caller — pointer indexing is unchecked by design (spec §12); these
+# helpers add no hidden checks and no hidden allocations.
+
+type.text=1
+
+function.fill(ptr<byte>.p, number.n, number.v) -> number {
+    # fill n bytes with v (mod 256)
+    loop (i from 0 until n) {
+        p[i] = number.to_uint8(v)
+    }
+    return 0
+}
+
+function.copy(ptr<byte>.dst, ptr<byte>.src, number.n) -> number {
+    # copy n bytes forward (overlapping ranges need memmove semantics —
+    # copy BACK to front yourself when dst > src and ranges overlap)
+    loop (i from 0 until n) {
+        dst[i] = src[i]
+    }
+    return 0
+}
+
+function.copy_back(ptr<byte>.dst, ptr<byte>.src, number.n) -> number {
+    # back-to-front copy: safe when dst > src and the ranges overlap
+    loop (i from 0 until n) {
+        dst[n - 1 - i] = src[n - 1 - i]
+    }
+    return 0
+}
+
+function.same(ptr<byte>.a, ptr<byte>.b, number.n) -> bool {
+    loop (i from 0 until n) {
+        when (a[i] != b[i]) {
+            return false
+        }
+    }
+    return true
+}
+
+function.zero(ptr<byte>.p, number.n) -> number {
+    return fill(p, n, 0)
+}
+
+# ---- little-endian integer views ----
+
+function.read_u16le(ptr<byte>.p, number.off) -> number {
+    return p[off] + 256 * p[off + 1]
+}
+
+function.read_u32le(ptr<byte>.p, number.off) -> number {
+    type.number v = 0
+    type.number w = 1
+    loop (i from 0 until 4) {
+        v = v + p[off + i] * w
+        w = w * 256
+    }
+    return v
+}
+
+function.read_u64le(ptr<byte>.p, number.off) -> number {
+    type.number v = 0
+    type.number w = 1
+    loop (i from 0 until 8) {
+        v = v + p[off + i] * w
+        w = w * 256
+    }
+    return v
+}
+
+function.write_u16le(ptr<byte>.p, number.off, number.v) -> number {
+    p[off] = number.to_uint8(v & 255)
+    p[off + 1] = number.to_uint8((v >> 8) & 255)
+    return 0
+}
+
+function.write_u32le(ptr<byte>.p, number.off, number.v) -> number {
+    loop (i from 0 until 4) {
+        p[off + i] = number.to_uint8((v >> (8 * i)) & 255)
+    }
+    return 0
+}
+
+function.write_u64le(ptr<byte>.p, number.off, number.v) -> number {
+    loop (i from 0 until 8) {
+        p[off + i] = number.to_uint8((v >> (8 * i)) & 255)
+    }
+    return 0
+}

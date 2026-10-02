@@ -461,6 +461,46 @@ declaration's type from its initializer (locals, globals, column
 members); literals and `null` cannot drive inference, and params/returns/
 members stay explicit. See `specs/spec-v0.12.md` §8.1.
 
+## The standard library (0.15)
+
+Libraries are modules, pulled in with `[libs.use]` and resolved from
+your project's `libs/` and `deps/` first, then the compiler's own
+`stdlib/`:
+
+```ok
+type.text=1
+
+[libs.use] = {
+    "math", "text", "io", "memory"
+}.end
+
+function.run() -> number {
+    io.puts(text.upper("hello"))        # HELLO
+    write(math.gcd(48, 18))              # 6
+    print
+    write(math.sqrt(2.0))                # 1.414214
+    print
+    return 0
+}
+run()
+```
+
+* **`math`** — `abs`, `sign`, `min`, `max`, `clamp`, `powi`, `gcd`,
+  `lcm`, `isqrt`, `sqrt` (decimal; negative → nan), `dabs`, `dmin`,
+  `dmax`.
+* **`text`** — `upper`, `lower`, `reverse`, `repeat`, `find`,
+  `contains`, `starts_with`, `ends_with`, `count`, `trim`. The
+  `text.*` builtins (`length`, `byte_at`, `slice`, `from_bytes`)
+  keep priority over module functions.
+* **`io`** — `puts`/`putn`/`putd`/`putf`/`putb` (one value + newline),
+  `eputs`/`ewrite` (stderr).
+* **`memory`** — `fill`, `zero`, `copy`, `copy_back`, `same`, and
+  little-endian views over `ptr<byte>` (`read_u32le`, `write_u64le`,
+  ...).
+
+A missing library name is a warning (an error under `--strict`); your
+project's `src/` modules win over same-named libraries.
+
 ## What 0.15 does not have (yet)
 
 Dynamic-length arrays, FFI, threads, aliases, struct-pattern matching

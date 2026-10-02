@@ -612,26 +612,46 @@ print
   name in different modules is fine (they occupy different namespaces).
 * Aliases (`use greeting as g`) are planned.
 
-### 6.3 Libraries
+### 6.3 Libraries (implemented in 0.15)
 
 ```ok
 [libs.use] = {
-    "math"
+    "math", "text", "io", "memory"
 }.end
 ```
 
-Resolution order (design; search itself implemented in 0.1):
+**A library IS a module.** Once its file is found, the ordinary module
+machinery namespaces it (`math.abs`, `text.upper`), type-checks it,
+links it, and mangles its symbols — no separate binding layer exists
+or is needed. Resolution order:
 
-1. `Project/libs/<name>` (or `<name>.oklib` — format planned)
-2. `Project/deps/<name>`
-3. the compiler's standard library directory
-4. system library locations (platform backend concern)
+1. `Project/libs/<name>.ok`
+2. `Project/deps/<name>.ok`
+3. the compiler's standard library directory (`stdlib/` next to the
+   compiler executable — the same relative discovery the runtime
+   module uses)
 
-In 0.1 the compiler **verifies resolution** of each `[libs.use]` entry
-(unknown entries produce a warning in normal mode, an error in strict mode)
-but **library binding is not yet implemented** — no standard library exists
-yet. Referencing a library symbol therefore surfaces as a normal unresolved
-symbol diagnostic. This is stated plainly in the status table.
+Libraries load transitively: a library's own `[libs.use]` resolves in
+later rounds. A name that resolves nowhere is a **warning** in normal
+mode and an **error** under `--strict`; the project's `src/` modules
+win over same-named libraries. The standard library itself (0.15):
+
+* **`math`** — `abs`, `sign`, `min`, `max`, `clamp`, `powi`, `gcd`,
+  `lcm`, `isqrt` (integer Newton), `sqrt` (decimal Newton; negative
+  input → nan), `dabs`, `dmin`, `dmax`.
+* **`text`** — `upper`, `lower` (ASCII), `reverse`, `repeat`, `find`,
+  `contains`, `starts_with`, `ends_with`, `count`, `trim`, `is_space` —
+  construction is O(n) through owned arena views; the `text.*`
+  builtins (§4.5) keep priority over module functions of the same name.
+* **`io`** — `puts`/`putn`/`putd`/`putf`/`putb` (write + flush),
+  `eputs`/`ewrite` (stderr, unbuffered).
+* **`memory`** — `fill`, `zero`, `copy`, `copy_back` (overlap-safe
+  direction), `same`, and little-endian integer views over
+  `ptr<byte>`: `read_u16le`/`read_u32le`/`read_u64le`, `write_u16le`/
+  `write_u32le`/`write_u64le`.
+
+The `oklib` packaged-library format (multi-file libraries, versioning,
+checksums) remains designed; a library is one `.ok` file in 0.15.
 
 ### 6.4 File builtins (implemented in 0.10)
 
@@ -1536,7 +1556,7 @@ An implementation claiming "Okular 0.1" must:
 | Columns: language + developer + `.end` | §3 | implemented |
 | `[source.files.use]` + transitive + cycle detection | §6.1 | implemented |
 | Module namespaces (`greeting.greet()`) | §6.2 | implemented |
-| `[libs.use]` resolution check | §6.3 | implemented (binding NOT IMPLEMENTED) |
+| `[libs.use]` resolution check | §6.3 | implemented (0.1) — **binding implemented (0.15): libraries are modules**; stdlib `math`/`text`/`io`/`memory` ship with the compiler |
 | Types: number/decimal/text/bool | §4.1 | implemented |
 | Fixed-length arrays `type.array<T, N>` | §8.4 | implemented |
 | Array literals (nested), indexed load/store | §8.4/9 | implemented |
@@ -1671,6 +1691,14 @@ the conversion family (`T.to_U`): the source type names the operation.
   silently accepted and compiled as equality (a defect that predates the
   Okular-written compiler); they are now precise compile errors. Text
   compares with `==`/`!=` only.
+* **Standard library beginnings** (§6.3): `[libs.use]` binds — a
+  library is a module resolved from `libs/`, `deps/`, or the compiler's
+  `stdlib/`, transitively. First four modules: `math` (integer/decimal
+  math incl. Newton `sqrt`/`isqrt`, `gcd`/`lcm`), `text` (upper/lower/
+  reverse/repeat/find/contains/starts_with/ends_with/count/trim over
+  O(n) arena-owned construction), `io` (puts family + stderr), `memory`
+  (fill/copy/copy_back/same + little-endian integer views over
+  `ptr<byte>`). 7 new test cases (`stdlib_*`).
 * Diagnostic fix: `sym_kind_name` now reports `variable` for variables
   (was: `constant`).
 * Project license added: the Okular Project License v1.0 — source-available,

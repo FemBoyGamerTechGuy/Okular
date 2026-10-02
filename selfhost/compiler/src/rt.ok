@@ -246,6 +246,18 @@ function.arena_take(number.len) -> type.ptr<type.byte> {
 
 # ---- to_text family (text results live in the arena) ----
 
+# adopt a byte buffer into the text arena: an OWNED, immutable text view
+# (the caller's buffer can be released afterwards). This is the pattern
+# every to_text function uses; the standard library's text builders
+# (upper, lower, reverse, repeat) ride it too.
+function.arena_text(ptr<byte>.buf, number.len) -> text {
+    type.ptr<type.byte> p = arena_take(len)
+    loop (i from 0 until len) {
+        p[i] = buf[i]
+    }
+    return text.from_bytes(p, len)
+}
+
 function.number_to_text(number.v) -> text {
     # format through the output buffer, then copy into the arena (owned)
     type.number save = out_len

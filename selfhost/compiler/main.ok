@@ -82,6 +82,39 @@ function.uses_reset() -> number {
     return 0
 }
 
+# ---- the [libs.use] collection (spec §6.3): accumulates project-wide ----
+
+type.ptr<type.text> libs = null
+type.number n_libs = 0
+type.number libs_cap = 0
+
+function.push_lib(text.name) -> number {
+    loop (i from 0 until n_libs) {
+        when (libs[i] == name) {
+            return 0
+        }
+    }
+    when (n_libs == libs_cap) {
+        type.number newcap = 8
+        when (libs_cap > 0) {
+            newcap = libs_cap * 2
+        }
+        type.ptr<type.text> nl = alloc<type.text>(newcap)
+        loop (i from 0 until n_libs) {
+            nl[i] = libs[i]
+        }
+        type.ptr<type.text> old = libs
+        libs = nl
+        libs_cap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    libs[n_libs] = name
+    n_libs = n_libs + 1
+    return 0
+}
+
 function.push_use(text.name) -> number {
     when (n_uses == uses_cap) {
         type.number newcap = 8
@@ -145,6 +178,21 @@ function.prescan_uses() -> number {
                 type.number k = toks.kind(j)
                 when (k == toks.K_TEXT) {
                     push_use(strip_quotes(toks.spelling(j)))
+                }
+                else when (k == toks.K_COMMA or k == toks.K_NL) {
+                    # separators
+                }
+                else {
+                    break
+                }
+                j = j + 1
+            }
+        }
+        else when (colpath == "libs.use") {
+            loop (j < n) {
+                type.number k = toks.kind(j)
+                when (k == toks.K_TEXT) {
+                    push_lib(strip_quotes(toks.spelling(j)))
                 }
                 else when (k == toks.K_COMMA or k == toks.K_NL) {
                     # separators
@@ -223,6 +271,54 @@ function.load_project(text.main_path) -> number {
         return 1
     }
     load_module("main", main_path, "main.ok", 1)
+    return 0
+}
+
+# ---- library resolution (spec §6.3, implemented in 0.15) ----
+#
+# A library IS a module: once its file is found, the ordinary module
+# machinery namespaces it (`math.abs`, `text.upper`), type-checks it,
+# and links it — no separate binding layer exists or is needed.
+# Search order: the project's libs/ and deps/ first, then the standard
+# library directory next to the compiler (the distribution's stdlib/ —
+# the same relative discovery the runtime module uses).
+function.resolve_libraries(text.exe_path) -> number {
+    type.text exe_dir = dirname(exe_path)
+    # a queue, not a single pass: a library may itself carry [libs.use],
+    # and entries accumulated while loading resolve in later rounds
+    type.number done = 0
+    loop (done < n_libs) {
+        type.number limit = n_libs
+        loop (i from done until limit) {
+            type.text name = libs[i]
+            when (sema.find_mod(name) != null) {
+                # already present: a src/ module or an earlier resolution won
+                continue
+            }
+            type.text p1 = path_join(proj_root, "libs/" + name + ".ok")
+            type.text p2 = path_join(proj_root, "deps/" + name + ".ok")
+            type.text p3 = path_join(exe_dir, "../stdlib/" + name + ".ok")
+            type.text lib_path = ""
+            when (fs.exists(p1) == true) {
+                lib_path = p1
+            }
+            else when (fs.exists(p2) == true) {
+                lib_path = p2
+            }
+            else when (fs.exists(p3) == true) {
+                lib_path = p3
+            }
+            when (lib_path == "") {
+                report_load_error("libs/" + name, "library `" + name + "` was not found (looked in `libs/`, `deps/`, and the compiler's `stdlib/`).", strict_mode)
+                continue
+            }
+            # found and explicitly requested: load REQUIRED — a resolved
+            # library links (only an unresolvable name stays a warning in
+            # normal mode, per spec §6.3)
+            load_module(name, lib_path, "libs/" + name, 1)
+        }
+        done = limit
+    }
     return 0
 }
 
@@ -451,6 +547,9 @@ function.main() -> number {
 
     when (load_project(main_path) != 0) {
         return 2
+    }
+    when (resolve_libraries(env.arg(0)) != 0) {
+        return 1
     }
     when (inject_runtime(env.arg(0)) != 0) {
         return 1
