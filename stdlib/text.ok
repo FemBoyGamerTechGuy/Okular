@@ -5,7 +5,6 @@
 # construction is O(n): bytes go into an alloc'd buffer once, then
 # text.from_bytes makes the immutable view. No arena, no copies beyond
 # the one each function needs.
-
 type.text=1
 
 function.repeat(text.s, number.n) -> text {
@@ -85,7 +84,7 @@ function.find(text.s, text.sub) -> number {
         return 0
     }
     when (m > n) {
-        return -1
+        return-1
     }
     type.number lim = n - m
     loop (i from 0 until lim + 1) {
@@ -100,7 +99,7 @@ function.find(text.s, text.sub) -> number {
             return i
         }
     }
-    return -1
+    return-1
 }
 
 function.contains(text.s, text.sub) -> bool {

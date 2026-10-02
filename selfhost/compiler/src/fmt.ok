@@ -1,0 +1,543 @@
+# fmt.ok — the official Okular formatter (0.15, `okular fmt`)
+
+#
+# Token-based and semantics-preserving by construction:
+#   * the token SEQUENCE never changes (the only rewrite is splitting a
+#     `>>` back into two `>` closings inside type brackets — the same
+#     split the parser performs, spec §1.8);
+#   * the LINE STRUCTURE never changes — newlines are statement
+#     separators (spec §1.2), and every run of newlines in the input
+#     becomes the same statement boundary in the output, so the
+#     formatted file parses to the same AST;
+#   * comments ride along: they are recovered from the gaps between
+#     tokens (gaps hold only whitespace and `#` comments) — a comment
+#     before its line's newline stays at the end of that line; a comment
+#     on its own line stays on its own line.
+#
+# Style (deterministic; the definition of Okular style from 0.15 on):
+#   * four spaces per brace depth; `}` dedents its own line
+#   * one blank line maximum between statements
+#   * single spaces around binary operators, keywords, and `=`, `->`
+#   * no spaces inside call/index brackets: f(x), xs[i]; none around `.`
+#   * unary - ~ & * bind tight; `not` is a word and takes one space
+#   * type brackets stay tight: array<type.number, 5>, ptr<type.f32>
+#   * feature directives stay tight: type.text=1
+#   * `}.end` closes columns tight
+type.text=1
+
+# ---- comment recovery ----
+type.ptr<type.number> cmt_off = null
+type.number n_cmt = 0
+type.number cmt_cap = 0
+
+function.cmt_push(number.off) -> number {
+    when (n_cmt == cmt_cap) {
+        type.number newcap = 16
+        when (cmt_cap > 0) {
+            newcap = cmt_cap * 2
+        }
+        type.ptr<type.number> nc = alloc<type.number>(newcap)
+        loop (i from 0 until n_cmt) {
+            nc[i] = cmt_off[i]
+        }
+        type.ptr<type.number> old = cmt_off
+        cmt_off = nc
+        cmt_cap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    cmt_off[n_cmt] = off
+    n_cmt = n_cmt + 1
+    return 0
+}
+
+# scan for `#` line comments outside text literals (escape-aware skip)
+function.scan_comments(text.src) -> number {
+    n_cmt = 0
+    type.number n = text.length(src)
+    type.number i = 0
+    loop (i < n) {
+        type.number b = text.byte_at(src, i)
+        when (b == 34) {
+            i = i + 1
+            loop (i < n) {
+                type.number c = text.byte_at(src, i)
+                when (c == 92) {
+                    i = i + 2
+                    continue
+                }
+                when (c == 34 or c == 10) {
+                    break
+                }
+                i = i + 1
+            }
+        }
+        else when (b == 35) {
+            cmt_push(i)
+            loop (i < n and text.byte_at(src, i) != 10) {
+                i = i + 1
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+# the comment starting in [from, to), as text (trailing spaces trimmed)
+function.comment_in_gap(text.src, number.gap_lo, number.gap_hi) -> text {
+    loop (k from 0 until n_cmt) {
+        when (cmt_off[k] >= gap_lo and cmt_off[k] < gap_hi) {
+            type.number e = cmt_off[k]
+            type.number n = text.length(src)
+            loop (e < n and text.byte_at(src, e) != 10) {
+                e = e + 1
+            }
+            type.number t = e
+            loop (t > cmt_off[k] and (text.byte_at(src, t - 1) == 32 or text.byte_at(src, t - 1) == 9 or text.byte_at(src, t - 1) == 13)) {
+                t = t - 1
+            }
+            return text.slice(src, cmt_off[k], t)
+        }
+    }
+    return ""
+}
+
+# skip a comment that comment_in_gap already returned (mark consumed)
+function.cmt_consume(text.src, number.gap_lo, number.gap_hi) -> number {
+    loop (k from 0 until n_cmt) {
+        when (cmt_off[k] >= gap_lo and cmt_off[k] < gap_hi) {
+            cmt_off[k] =-1
+            return 0
+        }
+    }
+    return 0
+}
+
+# ---- token spelling ----
+function.spelling_of(number.k, text.sp) -> text {
+    when (k == toks.K_PLUS) { return "+" }
+    else when (k == toks.K_MINUS) { return "-" }
+    else when (k == toks.K_STAR) { return "*" }
+    else when (k == toks.K_SLASH) { return "/" }
+    else when (k == toks.K_PERCENT) { return "%" }
+    else when (k == toks.K_EQ) { return "=" }
+    else when (k == toks.K_EQEQ) { return "==" }
+    else when (k == toks.K_BANGEQ) { return "!=" }
+    else when (k == toks.K_LT) { return "<" }
+    else when (k == toks.K_LE) { return "<=" }
+    else when (k == toks.K_GT) { return ">" }
+    else when (k == toks.K_GE) { return ">=" }
+    else when (k == toks.K_ARROW) { return "->" }
+    else when (k == toks.K_DOT) { return "." }
+    else when (k == toks.K_COMMA) { return "," }
+    else when (k == toks.K_AMP) { return "&" }
+    else when (k == toks.K_PIPE) { return "|" }
+    else when (k == toks.K_CARET) { return "^" }
+    else when (k == toks.K_TILDE) { return "~" }
+    else when (k == toks.K_SHL) { return "<<" }
+    else when (k == toks.K_SHR) { return ">>" }
+    else when (k == toks.K_LPAREN) { return "(" }
+    else when (k == toks.K_RPAREN) { return ")" }
+    else when (k == toks.K_LBRACE) { return "{" }
+    else when (k == toks.K_RBRACE) { return "}" }
+    else when (k == toks.K_LBRACKET) { return "[" }
+    else when (k == toks.K_RBRACKET) { return "]" }
+    else when (k == toks.K_TYPE) { return "type" }
+    else when (k == toks.K_FUNCTION) { return "function" }
+    else when (k == toks.K_STRUCT) { return "struct" }
+    else when (k == toks.K_UNION) { return "union" }
+    else when (k == toks.K_WHEN) { return "when" }
+    else when (k == toks.K_ELSE) { return "else" }
+    else when (k == toks.K_LOOP) { return "loop" }
+    else when (k == toks.K_FROM) { return "from" }
+    else when (k == toks.K_TO) { return "to" }
+    else when (k == toks.K_UNTIL) { return "until" }
+    else when (k == toks.K_BREAK) { return "break" }
+    else when (k == toks.K_CONTINUE) { return "continue" }
+    else when (k == toks.K_RETURN) { return "return" }
+    else when (k == toks.K_PRINT) { return "print" }
+    else when (k == toks.K_WRITE) { return "write" }
+    else when (k == toks.K_TRUE) { return "true" }
+    else when (k == toks.K_FALSE) { return "false" }
+    else when (k == toks.K_AND) { return "and" }
+    else when (k == toks.K_OR) { return "or" }
+    else when (k == toks.K_NOT) { return "not" }
+    else when (k == toks.K_END) { return "end" }
+    else when (k == toks.K_ALLOC) { return "alloc" }
+    else when (k == toks.K_RELEASE) { return "release" }
+    else when (k == toks.K_NULL) { return "null" }
+    else when (k == toks.K_CONST) { return "const" }
+    return sp
+}
+
+function.is_word(number.k) -> bool {
+    return k == toks.K_IDENT or k == toks.K_INT or k == toks.K_DEC or k == toks.K_TEXT or (k >= toks.K_TYPE and k <= toks.K_RESERVED)
+}
+
+function.is_binop(number.k) -> bool {
+    return k == toks.K_PLUS or k == toks.K_MINUS or k == toks.K_STAR or k == toks.K_SLASH or k == toks.K_PERCENT or k == toks.K_EQEQ or k == toks.K_BANGEQ or k == toks.K_LE or k == toks.K_GE or k == toks.K_SHL or k == toks.K_SHR or k == toks.K_AMP or k == toks.K_PIPE or k == toks.K_CARET
+}
+
+function.is_open_brace(number.k) -> bool {
+    return k == toks.K_LPAREN or k == toks.K_LBRACKET or k == toks.K_LBRACE
+}
+
+# ---- type-bracket tracking ----
+#
+# `<` directly after the identifiers `array` or `ptr` opens a tight
+# bracket; its matching `>` closes it; a `>>` inside two open brackets
+# splits into two `>` closings (the parser's own split, spec §1.8)
+type.ptr<type.number> tydepth = null
+type.number tydepth_cap = 0
+type.number ty_n = 0
+
+function.ty_push() -> number {
+    when (tydepth == null) {
+        tydepth = alloc<type.number>(64)
+        tydepth_cap = 64
+    }
+    when (ty_n >= tydepth_cap) {
+        type.number newcap = tydepth_cap * 2
+        type.ptr<type.number> nd = alloc<type.number>(newcap)
+        loop (i from 0 until ty_n) {
+            nd[i] = tydepth[i]
+        }
+        release(tydepth)
+        tydepth = nd
+        tydepth_cap = newcap
+    }
+    ty_n = ty_n + 1
+    return 0
+}
+
+function.ty_count() -> number {
+    return ty_n
+}
+
+function.ty_pop() -> number {
+    when (ty_n > 0) {
+        ty_n = ty_n - 1
+    }
+    return 0
+}
+
+# ---- the formatter ----
+const.INDENT = 4
+
+# the byte offset of the first newline at/after `from`
+function.find_nl(text.src, number.begin_off) -> number {
+    type.number n = text.length(src)
+    type.number i = begin_off
+    loop (i < n and text.byte_at(src, i) != 10) {
+        i = i + 1
+    }
+    return i
+}
+
+# ---- the output byte buffer ----
+#
+# Building the output by text concatenation would copy the whole
+# accumulated file once per token (O(n^2) arena traffic — a 5 KiB source
+# exhausts the 16 MiB arena). One growable byte buffer, copied into the
+# arena exactly once at the end, is O(n).
+type.ptr<type.byte> ob = null
+type.number ob_len = 0
+type.number ob_cap = 0
+
+function.ob_grow(number.need) -> number {
+    when (ob_len + need <= ob_cap) {
+        return 0
+    }
+    type.number newcap = 256
+    when (ob_cap > 0) {
+        newcap = ob_cap * 2
+    }
+    loop (ob_len + need > newcap) {
+        newcap = newcap * 2
+    }
+    type.ptr<type.byte> nb = alloc<type.byte>(newcap)
+    loop (i from 0 until ob_len) {
+        nb[i] = ob[i]
+    }
+    type.ptr<type.byte> old = ob
+    ob = nb
+    ob_cap = newcap
+    when (old != null) {
+        release(old)
+    }
+    return 0
+}
+
+function.ob_put(number.b) -> number {
+    ob_grow(1)
+    ob[ob_len] = number.to_uint8(b)
+    ob_len = ob_len + 1
+    return 0
+}
+
+function.ob_puts(text.s) -> number {
+    type.number n = text.length(s)
+    ob_grow(n)
+    loop (i from 0 until n) {
+        ob[ob_len + i] = text.byte_at(s, i)
+    }
+    ob_len = ob_len + n
+    return 0
+}
+
+function.ob_indent(number.depth) -> number {
+    ob_grow(4 * depth)
+    loop (i from 0 until 4 * depth) {
+        ob[ob_len + i] = 32
+    }
+    ob_len = ob_len + 4 * depth
+    return 0
+}
+
+# format the tokenized file; returns the formatted source
+function.format_source(text.src) -> number {
+    scan_comments(src)
+    ty_n = 0
+
+    ob_len = 0
+    type.number depth = 0
+    type.number n = toks.count()
+    type.number i = 0
+    type.number line_empty = 1
+    type.number prev_end = 0
+    type.number last_kind = toks.K_NL
+    type.number last_unary = 0
+    type.number last_directive_eq = 0
+    type.number last_ty_close = 0
+
+    loop (i < n) {
+        type.number k = toks.kind(i)
+
+        when (k == toks.K_EOF) {
+            break
+        }
+
+        when (k == toks.K_NL) {
+
+            # the tail comment of the line being closed
+            type.number nl = find_nl(src, prev_end)
+            type.text tc = comment_in_gap(src, prev_end, nl)
+            when (text.length(tc) > 0) {
+                when (line_empty == 1) {
+                    ob_indent(depth)
+                }
+                else {
+                    ob_puts("  ")
+                }
+                ob_puts(tc)
+                cmt_consume(src, prev_end, nl)
+                line_empty = 0
+            }
+            ob_put(10)
+            line_empty = 1
+
+            # collapse runs of blank lines to one — but a comment
+            # between the newlines is content, not a blank
+            type.number j = i
+            type.number nls = 0
+            loop (j < n and toks.kind(j) == toks.K_NL) {
+                nls = nls + 1
+                j = j + 1
+            }
+            type.number nl2 = find_nl(src, nl + 1)
+            type.text seg1 = comment_in_gap(src, nl + 1, nl2)
+            when (nls > 1 and text.length(seg1) == 0) {
+                ob_put(10)
+            }
+
+            # standalone comments before the next real token: own lines
+            type.number nxt_start = text.length(src)
+            type.number jj = j
+            loop (jj < n and toks.kind(jj) == toks.K_NL) {
+                jj = jj + 1
+            }
+            when (jj < n and toks.kind(jj) != toks.K_EOF) {
+                nxt_start = toks.toff(jj)
+            }
+
+            # each comment between the newline run and the next token
+            loop (true) {
+                type.text sc = comment_in_gap(src, nl + 1, nxt_start)
+                when (text.length(sc) == 0) {
+                    break
+                }
+                ob_indent(depth)
+                ob_puts(sc)
+                ob_put(10)
+                cmt_consume(src, nl + 1, nxt_start)
+            }
+
+            i = j
+            last_kind = toks.K_NL
+            continue
+        }
+
+        # dedent before a closing brace
+        when (k == toks.K_RBRACE and depth > 0) {
+            depth = depth - 1
+        }
+
+        # spacing between the previous token on this line and k
+        type.number space = 1
+        type.number this_unary = 0
+        type.number this_directive_eq = 0
+        when (line_empty == 0) {
+            space = 1
+
+            # tight after a unary operator: -x, &x, *p, ~m
+            when (last_unary == 1) {
+                space = 0
+            }
+
+            # tight after a feature directive's `=`: type.text=1
+            when (last_directive_eq == 1) {
+                space = 0
+            }
+            when (last_kind == toks.K_DOT or k == toks.K_DOT or k == toks.K_COMMA or k == toks.K_RPAREN or k == toks.K_RBRACKET or last_kind == toks.K_LPAREN or last_kind == toks.K_LBRACKET) {
+                space = 0
+            }
+
+            # call/index opens after identifiers, closers, and the
+            # call-form keywords: f(x), xs[i], write(x), release(p) —
+            # but when (c), loop (i), not (x) keep their space
+            when (k == toks.K_LPAREN and (last_kind == toks.K_IDENT or last_kind == toks.K_WRITE or last_kind == toks.K_RELEASE or last_kind == toks.K_RPAREN or last_kind == toks.K_RBRACKET or last_ty_close == 1)) {
+                space = 0
+            }
+            when (k == toks.K_LBRACKET and (is_word(last_kind) or last_kind == toks.K_RPAREN or last_kind == toks.K_RBRACKET)) {
+                space = 0
+            }
+
+            # inside a type bracket, right after the tight `<`
+            when (last_kind == toks.K_LT and ty_count() > 0) {
+                space = 0
+            }
+
+            # unary - & * ~ bind tight in prefix position
+            when (k == toks.K_MINUS or k == toks.K_AMP or k == toks.K_STAR or k == toks.K_TILDE) {
+                when (last_kind == toks.K_NL or is_open_brace(last_kind) or last_kind == toks.K_COMMA or is_binop(last_kind) or last_kind == toks.K_EQ or last_kind == toks.K_RETURN or last_kind == toks.K_ARROW) {
+                    space = 0
+                    this_unary = 1
+                }
+            }
+
+            # feature directives stay tight: type.text=1
+            when (k == toks.K_EQ) {
+                when (i >= 3 and toks.kind(i - 1) == toks.K_IDENT and toks.kind(i - 2) == toks.K_DOT and toks.kind(i - 3) == toks.K_TYPE) {
+                    space = 0
+                    this_directive_eq = 1
+                }
+            }
+
+            # type brackets open tight after array/ptr/alloc
+            when (k == toks.K_LT) {
+                when (i >= 1 and (toks.kind(i - 1) == toks.K_IDENT or toks.kind(i - 1) == toks.K_ALLOC) and (toks.spelling(i - 1) == "array" or toks.spelling(i - 1) == "ptr" or toks.kind(i - 1) == toks.K_ALLOC)) {
+                    space = 0
+                }
+            }
+
+            # type closers are tight
+            when (k == toks.K_GT or k == toks.K_SHR) {
+                when (ty_count() > 0) {
+                    space = 0
+                }
+            }
+        }
+
+        # emit (a `>>` inside two open type brackets is two closings —
+        # its own spelling; the parser performs the same split)
+        type.text emit = spelling_of(k, toks.spelling(i))
+        when (line_empty == 1) {
+            ob_indent(depth)
+            line_empty = 0
+        }
+        else when (space == 1) {
+            ob_put(32)
+        }
+        ob_puts(emit)
+
+        # bracket bookkeeping AFTER emission
+        type.number this_ty_close = 0
+        when (k == toks.K_LT) {
+            when (i >= 1 and (toks.kind(i - 1) == toks.K_IDENT or toks.kind(i - 1) == toks.K_ALLOC) and (toks.spelling(i - 1) == "array" or toks.spelling(i - 1) == "ptr" or toks.kind(i - 1) == toks.K_ALLOC)) {
+                ty_push()
+            }
+        }
+        when (k == toks.K_SHR and ty_count() >= 2) {
+            ty_pop()
+            ty_pop()
+            this_ty_close = 1
+        }
+        else when (k == toks.K_GT and ty_count() > 0) {
+            ty_pop()
+            this_ty_close = 1
+        }
+        when (k == toks.K_LBRACE) {
+            depth = depth + 1
+        }
+
+        prev_end = toks.toff(i) + toks.tlen(i)
+        last_kind = k
+        last_unary = this_unary
+        last_directive_eq = this_directive_eq
+        last_ty_close = this_ty_close
+        i = i + 1
+    }
+
+    # a final line without a trailing newline
+    when (line_empty == 0) {
+        type.number nl = find_nl(src, prev_end)
+        type.text tc = comment_in_gap(src, prev_end, nl)
+        when (text.length(tc) > 0) {
+            ob_puts("  ")
+            ob_puts(tc)
+            cmt_consume(src, prev_end, nl)
+        }
+        ob_put(10)
+    }
+
+    # trailing standalone comments before EOF
+    type.number eof_start = text.length(src)
+    loop (k from 0 until n_cmt) {
+        when (cmt_off[k] >= 0) {
+            eof_start = cmt_off[k]
+            break
+        }
+    }
+    loop (true) {
+        type.text sc = comment_in_gap(src, prev_end, text.length(src))
+        when (text.length(sc) == 0) {
+            break
+        }
+        ob_indent(depth)
+        ob_puts(sc)
+        ob_put(10)
+        cmt_consume(src, prev_end, text.length(src))
+    }
+
+    # one copy into the arena: an owned text, safe across calls
+    fmt_result = rt.arena_text(ob, ob_len)
+    return 0
+}
+
+# the formatted text of the last format_source call
+type.text fmt_result = ""
+
+function.result() -> text {
+    return fmt_result
+}
+
+# ---- entry: format one file; empty result means a lexical error ----
+function.format_file(text.path) -> text {
+    type.number n = toks.load(path)
+    when (n == 0 or toks.get_err_kind() != toks.ERR_NONE) {
+        return ""
+    }
+    format_source(toks.tsrc())
+    return fmt_result
+}

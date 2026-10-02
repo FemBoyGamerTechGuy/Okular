@@ -1,7 +1,6 @@
 # text_ops.ok — Okular 0.9 text operations (spec §4.5).
 # Byte-level access without pointers: length, bounds-checked byte_at,
 # O(1) slices. The seed of every lexer.
-
 type.text=1
 
 const.alphabet = "abcdefghijklmnopqrstuvwxyz"

@@ -52,10 +52,10 @@ const.N_UNIONDECL = 36
 const.N_CONSTDECL = 37
 const.N_FUNC = 38
 const.N_FILE = 39
-const.N_SYSOP = 40   # sema-created (machine AST protocol append-only)
-const.N_MATCH = 41   # when (subject) { arms } — match-style when (0.15)
-const.N_MATCHARM = 42   # one arm: patterns (args), guard (a), body; bval=1 -> else-arm
-const.N_MATCHRANGE = 43   # lo to hi — one range pattern alternative (a=lo, b=hi)
+const.N_SYSOP = 40  # sema-created (machine AST protocol append-only)
+const.N_MATCH = 41  # when (subject) { arms } — match-style when (0.15)
+const.N_MATCHARM = 42  # one arm: patterns (args), guard (a), body; bval=1 -> else-arm
+const.N_MATCHRANGE = 43  # lo to hi — one range pattern alternative (a=lo, b=hi)
 
 # binary operators (ast.h BinOp order)
 const.OP_ADD = 0
@@ -91,7 +91,6 @@ const.FEAT_TEXT = 0
 #
 # form 0: scalar (scalar = S_* code)   form 1: array (elem, count)
 # form 2: pointer (elem)               form 3: named struct/union (sname)
-
 const.F_SCALAR = 0
 const.F_ARRAY = 1
 const.F_PTR = 2
@@ -110,7 +109,7 @@ const.S_UINT32 = 9
 const.S_UINT64 = 10
 const.S_AUTO = 11
 const.S_F32 = 12
-const.S_VOID = -1
+const.S_VOID =-1
 
 struct.Ty = {
     type.number form
@@ -126,7 +125,6 @@ struct.Ty = {
 }.end
 
 # ---- AST nodes ----
-
 struct.Node = {
     type.number kind
     type.number line
@@ -167,7 +165,6 @@ struct.Node = {
 }.end
 
 # ---- parser state ----
-
 type.number pos = 0
 type.number nerr = 0
 type.ptr<type.number> err_lines = null
@@ -192,7 +189,6 @@ function.err_msg_at(number.i) -> text {
 }
 
 # ---- constructors ----
-
 # reset per-file parser state (the compiler parses many modules in one
 # process; the token buffer is reloaded by the driver between files)
 function.begin() -> number {
@@ -258,7 +254,6 @@ function.new_node(number.kind, number.line, number.col) -> type.ptr<type.Node> {
 }
 
 # ---- scalar type names ----
-
 function.scalar_code(text.name) -> number {
     when (name == "number") { return S_NUMBER }
     else when (name == "int64") { return S_NUMBER }
@@ -276,7 +271,7 @@ function.scalar_code(text.name) -> number {
     else when (name == "uint32") { return S_UINT32 }
     else when (name == "uint64") { return S_UINT64 }
     else when (name == "auto") { return S_AUTO }
-    return -1
+    return-1
 }
 
 function.scalar_name(number.code) -> text {
@@ -334,7 +329,6 @@ function.ty_is_voidish(type.ptr<type.Ty>.t) -> bool {
 }
 
 # ---- the named-type registry (spec §8.3: one flat namespace, forward refs) ----
-
 type.ptr<type.text> nt_names = null
 type.ptr<type.ptr<type.Ty>> nt_types = null
 type.number nt_len = 0
@@ -409,7 +403,6 @@ function.seed_names(number.argc, number.argbase) -> number {
 }
 
 # ---- token helpers ----
-
 function.cur_kind() -> number {
     return toks.kind(pos)
 }
@@ -449,7 +442,6 @@ function.skip_nl() -> number {
 }
 
 # ---- diagnostics ----
-
 function.perr(number.l, number.c, text.msg) -> number {
     when (nerr == err_cap) {
         type.number newcap = 16
@@ -506,13 +498,11 @@ function.kind_name(number.k) -> text {
     return "unknown token"
 }
 
-
 # ---- keyword path members (spec §6.6, 0.13) ----
 #
 # Keywords are legal dotted-path members (`sys.write`, `mod.print`) except
 # `end`, the column terminator. Keyword tokens carry their source span, so
 # the spelling comes straight from the buffer.
-
 function.is_path_part(number.k) -> bool {
     when (k == toks.K_IDENT) { return true }
     when (k == toks.K_END) { return false }
@@ -588,7 +578,6 @@ function.skip_column_region() -> number {
 }
 
 # ---- integer literal value from a spelling (hex or decimal, `_` groups) ----
-
 function.spell_int_value(text.sp) -> number {
     type.number n = text.length(sp)
     type.number v = 0
@@ -618,7 +607,6 @@ function.spell_int_value(text.sp) -> number {
 }
 
 # ---- types ----
-
 # `type.<T>` / `type.array<T, N>` used by variable declarations (spec §8).
 # Returns null (with a diagnostic) on unknown types or malformed arrays.
 function.parse_type_prefix() -> type.ptr<type.Ty> {
@@ -671,18 +659,18 @@ function.parse_type_prefix() -> type.ptr<type.Ty> {
             cn.parts = parts
             cn.nparts = pn
             cnt_node = cn
-            cnt = -1
+            cnt =-1
         }
         else {
             perr(cur_line(), cur_col(), "the array length must be a whole number of elements or a constant name.")
             return null
         }
         when (expect(toks.K_GT) == false) { return null }
-        when (cnt != -1 and (cnt == 0 or cnt > 65536)) {
+        when (cnt !=-1 and (cnt == 0 or cnt > 65536)) {
             perr(cline, ccol, "the array length must be between 1 and 65536 in this compiler.")
             return null
         }
-        when (cnt != -1 and ty_bytes(elem) * cnt > 1048576) {
+        when (cnt !=-1 and ty_bytes(elem) * cnt > 1048576) {
             perr(cline, ccol, "this array type is too large (more than 1 MiB of storage).")
             return null
         }
@@ -714,7 +702,7 @@ function.parse_type_prefix() -> type.ptr<type.Ty> {
     }
 
     type.number code = scalar_code(name)
-    when (code == -1) {
+    when (code ==-1) {
         when (named_type_exists(name)) {
             return named_type(name)
         }
@@ -759,7 +747,7 @@ function.parse_bare_type() -> type.ptr<type.Ty> {
     }
 
     type.number code = scalar_code(name)
-    when (code == -1) {
+    when (code ==-1) {
         when (named_type_exists(name)) {
             return named_type(name)
         }
@@ -774,7 +762,6 @@ function.parse_bare_type() -> type.ptr<type.Ty> {
 
 # ---- expressions (spec §9 precedence) ----
 # (mutual recursion relies on Okular's forward references)
-
 # { e1, e2, ... } array literal (declaration initializers only, spec §8.4)
 function.parse_arraylit() -> type.ptr<type.Node> {
     type.number tline = cur_line()
@@ -1145,7 +1132,7 @@ function.parse_mul() -> type.ptr<type.Node> {
     type.ptr<type.Node> e = parse_unary()
     when (e == null) { return null }
     loop (true) {
-        type.number op = -1
+        type.number op =-1
         when (is_at(toks.K_STAR)) { op = OP_MUL }
         else when (is_at(toks.K_SLASH)) { op = OP_DIV }
         else when (is_at(toks.K_PERCENT)) { op = OP_MOD }
@@ -1162,7 +1149,7 @@ function.parse_add() -> type.ptr<type.Node> {
     type.ptr<type.Node> e = parse_mul()
     when (e == null) { return null }
     loop (true) {
-        type.number op = -1
+        type.number op =-1
         when (is_at(toks.K_PLUS)) { op = OP_ADD }
         else when (is_at(toks.K_MINUS)) { op = OP_SUB }
         else { return e }
@@ -1179,7 +1166,7 @@ function.parse_shift() -> type.ptr<type.Node> {
     type.ptr<type.Node> e = parse_add()
     when (e == null) { return null }
     loop (true) {
-        type.number op = -1
+        type.number op =-1
         when (is_at(toks.K_SHL)) { op = OP_SHL }
         else when (is_at(toks.K_SHR)) { op = OP_SHR }
         else { return e }
@@ -1231,7 +1218,7 @@ function.parse_cmp() -> type.ptr<type.Node> {
     type.ptr<type.Node> e = parse_bor()
     when (e == null) { return null }
     type.number k = cur_kind()
-    type.number op = -1
+    type.number op =-1
     when (k == toks.K_EQEQ) { op = OP_EQ }
     else when (k == toks.K_BANGEQ) { op = OP_NEQ }
     else when (k == toks.K_LT) { op = OP_LT }
@@ -1276,7 +1263,6 @@ function.parse_expr() -> type.ptr<type.Node> {
 }
 
 # ---- statements ----
-
 # Parse `{ stmts }` until the close token. Returns false on hard failure;
 # recovers at statement boundaries otherwise. The list lands on out.body.
 function.parse_stmt_list(type.ptr<type.Node>.out) -> bool {
@@ -1794,7 +1780,6 @@ function.parse_stmt() -> type.ptr<type.Node> {
 }
 
 # ---- top level ----
-
 # [path] = { "items" }.end — language column (spec §3.2)
 function.parse_langcol() -> type.ptr<type.Node> {
     type.number tline = cur_line()
@@ -2344,7 +2329,6 @@ function.parse_devcol() -> type.ptr<type.Node> {
 }
 
 # ---- the file ----
-
 function.parse_toplevel() -> type.ptr<type.Node> {
     type.number k = cur_kind()
     type.number tline = cur_line()
@@ -2355,7 +2339,7 @@ function.parse_toplevel() -> type.ptr<type.Node> {
         when (at_kind(1) == toks.K_DOT and at_kind(2) == toks.K_IDENT and at_kind(3) == toks.K_EQ) {
             type.text feat = toks.spelling(pos + 2)
             type.ptr<type.Node> n = new_node(N_DIRECTIVE, tline, tcol)
-            n.feature = -1
+            n.feature =-1
             when (feat == "text") {
                 n.feature = FEAT_TEXT
             }

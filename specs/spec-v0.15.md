@@ -22,6 +22,19 @@ no C compiler, no `as`, no `ld` anywhere in the repository
 > match (an `else` arm, or `true`+`false` on `bool`) satisfies the
 > return analysis exactly like a fully-else'd conditional chain.
 >
+> 0.15 also ships **the official formatter**: `okular fmt <file>...
+> [--check]` (§15). It is token-based and semantics-preserving by
+> construction: the token sequence never changes, and every newline-run
+> maps to the same statement boundary, so a formatted file parses to the
+> same AST — proven by compiling the formatter-formatted compiler
+> sources to a byte-identical binary. Comments ride along (trailing
+> comments stay on their line, standalone comments keep their own);
+> the style is deterministic: 4-space indents, one blank line maximum,
+> spaced binary operators, tight call/index/type brackets
+> (`f(x)`, `xs[i]`, `array<type.number, 5>`, `alloc<type.byte>(16)`),
+> tight feature directives (`type.text=1`), `}.end` closers — and the
+> whole repository is formatted in this style.
+>
 > 0.15 also adds **`f32`** (§4.2): a true 32-bit float — not an alias,
 > not a stored-as-double approximation. Values compute through SSE
 > single-precision operations (`addss`, `ucomiss`, ...); memory is 4
@@ -1599,6 +1612,7 @@ An implementation claiming "Okular 0.1" must:
 | Runtime traps (bounds, div by zero, null deref, bad alloc/release) | §13 | implemented |
 | Diagnostics: format, multi-error recovery | §14 | implemented |
 | `-w`, `-xw`, `-s`, `-l` flags | §14 | implemented (no legacy constructs exist yet) |
+| **Formatter `okular fmt` (+ `--check`)** | §15 | **implemented (0.15)** — token-based, comment-preserving, idempotent; the whole repository is formatted with it |
 | x86-64 freestanding native codegen | §15 | implemented |
 | Assembler/linker integration (`as`, `ld`) | §15 | implemented |
 | Own integrated assembler | §15 | NOT IMPLEMENTED (self-hosting milestone) |
@@ -1691,6 +1705,18 @@ the conversion family (`T.to_U`): the source type names the operation.
   silently accepted and compiled as equality (a defect that predates the
   Okular-written compiler); they are now precise compile errors. Text
   compares with `==`/`!=` only.
+* **The official formatter** (`okular fmt`, §15): token-based and
+  semantics-preserving by construction (token sequence and line
+  structure never change; the formatter-formatted compiler sources
+  compile to a byte-identical binary). Comments preserved — trailing
+  stay trailing, standalone keep their lines; deterministic style
+  (4-space indent, one blank line max, spaced operators, tight
+  call/index/type brackets and directives); `--check` mode for CI;
+  idempotent. The entire repository (compiler, stdlib, examples) is
+  formatted with it. Found and fixed along the way: punctuation tokens
+  carried no byte spans (the formatter's gap logic needed them), and
+  output built through an O(n) byte buffer instead of arena
+  concatenation.
 * **Standard library beginnings** (§6.3): `[libs.use]` binds — a
   library is a module resolved from `libs/`, `deps/`, or the compiler's
   `stdlib/`, transitively. First four modules: `math` (integer/decimal

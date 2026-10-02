@@ -14,11 +14,9 @@
 #
 # Kept in sync with tests/cases/positive/selfhost_lexer/src/lexer.ok
 # (the test suite is the proof this component works).
-
 type.text=1
 
 # ---- token kinds (numbered to match bootstrap/src/lexer.c TokKind) ----
-
 const.K_EOF = 0
 const.K_NL = 1
 const.K_IDENT = 2
@@ -80,7 +78,6 @@ const.K_CONST = 57
 const.K_RESERVED = 58
 
 # ---- kind names, indexed by kind ----
-
 type.array<type.text, 59> KIND_NAMES = {
     "eof", "newline", "ident", "int", "decimal", "text",
     "plus", "minus", "star", "slash", "percent",
@@ -96,7 +93,6 @@ type.array<type.text, 59> KIND_NAMES = {
 }
 
 # ---- keyword table (spelling -> kind) ----
-
 type.array<type.text, 25> KEYWORDS = {
     "type", "function", "struct", "when", "else", "loop",
     "from", "to", "until", "break", "continue", "return",
@@ -116,7 +112,6 @@ type.array<type.text, 8> RESERVED_WORDS = {
 }
 
 # ---- scanner state ----
-
 type.text src = ""
 type.number len = 0
 type.number pos = 0
@@ -135,7 +130,6 @@ function.set_machine(number.m) -> number {
 }
 
 # ---- byte helpers ----
-
 function.cur() -> number {
     when (pos < len) {
         return text.byte_at(src, pos)
@@ -193,7 +187,7 @@ function.keyword_kind(text.spelling) -> number {
             return K_RESERVED
         }
     }
-    return -1
+    return-1
 }
 
 # ---- emit: one line per token ----
@@ -201,7 +195,6 @@ function.keyword_kind(text.spelling) -> number {
 # human:   line:col kind [spelling]
 # machine: kind line col slen [raw spelling] — the exact protocol of
 #          bootstrap/src/selfhost_bridge.c (K L C S <S bytes> NL)
-
 function.emit_at(number.l, number.c, number.k, number.has_sp, text.sp) -> number {
     when (machine == 1) {
         write(k)
@@ -238,7 +231,6 @@ function.emit_at(number.l, number.c, number.k, number.has_sp, text.sp) -> number
 }
 
 # ---- literal scanners ----
-
 function.scan_text_lit() -> number {
     type.number s_off = pos
     type.number s_line = line
@@ -299,7 +291,7 @@ function.scan_ident() -> number {
     }
     type.text sp = text.slice(src, s_off, pos)
     type.number kw = keyword_kind(sp)
-    when (kw == -1) {
+    when (kw ==-1) {
         return emit_at(s_line, s_col, K_IDENT, 1, sp)
     }
     when (kw == K_RESERVED) {
@@ -310,7 +302,6 @@ function.scan_ident() -> number {
 }
 
 # ---- operators and punctuation ----
-
 function.scan_punct(number.c) -> number {
     type.number s_line = line
     type.number s_col = col
@@ -448,7 +439,6 @@ function.scan_punct(number.c) -> number {
 }
 
 # ---- one scan step: dispatch on the current byte ----
-
 function.scan_step() -> number {
     type.number c = cur()
 
@@ -484,7 +474,6 @@ function.scan_step() -> number {
 }
 
 # ---- entry: tokenize one file, return the token count ----
-
 function.tokenize(text.path) -> number {
     src = fs.read(path)
     len = text.length(src)

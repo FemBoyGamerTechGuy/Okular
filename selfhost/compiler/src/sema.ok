@@ -12,7 +12,6 @@
 #   N_CALL                    -> node.finfo, node.rtype
 #   all expressions           -> node.rtype
 #   global N_VARDECL          -> sym.cval (constant initializer)
-
 # ---- symbol kinds (symtab.h) ----
 const.SYM_FUNC = 0
 const.SYM_VAR = 1
@@ -48,10 +47,9 @@ const.SIGN_BIT = 0x8000000000000000
 const.MAX_STRUCT_BYTES = 1048576
 
 # ---- diagnostics ----
-
 type.number diag_n = 0
 type.number diag_cap = 0
-type.ptr<type.number> diag_sev = null     # 1 = error, 0 = warning
+type.ptr<type.number> diag_sev = null  # 1 = error, 0 = warning
 type.ptr<type.number> diag_line = null
 type.ptr<type.number> diag_col = null
 type.ptr<type.text> diag_file = null
@@ -239,7 +237,6 @@ function.note(type.ptr<type.Node>.n, text.msg) -> number {
 }
 
 # ---- the resolved type singletons ----
-
 type.ptr<type.Ty> T_NUMBER = null
 type.ptr<type.Ty> T_DECIMAL = null
 type.ptr<type.Ty> T_TEXT = null
@@ -291,7 +288,6 @@ function.init_types() -> number {
 }
 
 # ---- interned array/ptr types (pointer equality IS type equality) ----
-
 type.ptr<type.ptr<type.Ty>> it_elem = null
 type.ptr<type.number> it_count = null
 type.ptr<type.number> it_form = null
@@ -385,21 +381,21 @@ function.canon(type.ptr<type.Ty>.t) -> type.ptr<type.Ty> {
         else when (t.scalar == S_UINT32) { return T_UINT32 }
         else when (t.scalar == S_UINT64) { return T_UINT64 }
         else when (t.scalar == S_AUTO) { return T_AUTO }
-        else when (t.scalar == -1) { return T_VOID }
+        else when (t.scalar ==-1) { return T_VOID }
         return T_NUMBER
     }
     when (t.form == F_PTR) {
         return intern_ptr(canon(t.elem))
     }
     when (t.form == F_ARRAY) {
-        when (t.count == -1) {
+        when (t.count ==-1) {
             # constant length, unresolved: keep a FRESH (non-interned) type;
             # finalized to the interned form after all constants are
             # collected (finalize_array_lens, spec §8.4)
             type.ptr<type.Ty> r = parser.new_ty()
             r.form = F_ARRAY
             r.elem = canon(t.elem)
-            r.count = -1
+            r.count =-1
             r.count_node = t.count_node
             return r
         }
@@ -409,7 +405,6 @@ function.canon(type.ptr<type.Ty>.t) -> type.ptr<type.Ty> {
 }
 
 # ---- type classification helpers ----
-
 function.ty_kind(type.ptr<type.Ty>.t) -> number {
     when (t == null) {
         return F_VOID
@@ -607,7 +602,7 @@ function.scalar_from_name(text.s) -> number {
     else when (s == "uint16") { return S_UINT16 }
     else when (s == "uint32") { return S_UINT32 }
     else when (s == "uint64") { return S_UINT64 }
-    return -1
+    return-1
 }
 
 function.scalar_ty(number.code) -> type.ptr<type.Ty> {
@@ -664,7 +659,7 @@ function.sint_fits(number.v, type.ptr<type.Ty>.t) -> bool {
         return true
     }
     when (ty_signed(t)) {
-        type.number lo = -(1 << (b - 1))
+        type.number lo =-(1 << (b - 1))
         type.number hi = (1 << (b - 1)) - 1
         return v >= lo and v <= hi
     }
@@ -678,10 +673,10 @@ function.sint_fits(number.v, type.ptr<type.Ty>.t) -> bool {
 
 # min/max of an integer type as int64 (uint64 max reported as -1 sentinel)
 function.ty_min(number.code) -> number {
-    when (code == S_INT8) { return -128 }
-    else when (code == S_INT16) { return -32768 }
-    else when (code == S_INT32) { return -2147483648 }
-    return -9223372036854775808
+    when (code == S_INT8) { return-128 }
+    else when (code == S_INT16) { return-32768 }
+    else when (code == S_INT32) { return-2147483648 }
+    return-9223372036854775808
 }
 
 function.ty_max(number.code) -> number {
@@ -691,7 +686,7 @@ function.ty_max(number.code) -> number {
     else when (code == S_UINT8) { return 255 }
     else when (code == S_UINT16) { return 65535 }
     else when (code == S_UINT32) { return 4294967295 }
-    return -1
+    return-1
 }
 
 # re-encode a 64-bit register representation from one integer type's
@@ -736,7 +731,6 @@ function.dec_to_int(decimal.d, type.ptr<type.Ty>.t) -> number {
 # it is innocuous (Figueroa: p2 >= 2*p1+2), so folding f32 arithmetic in
 # f64 and rounding once per op is bit-identical to single-precision
 # hardware — f32 division stays unfolded (double rounding is possible).
-
 # one reusable scratch slot for reading a decimal's raw f64 bits
 type.ptr<type.decimal> dec_scratch = null
 
@@ -1037,7 +1031,6 @@ function.convertible(type.ptr<type.Ty>.frm, type.ptr<type.Ty>.dst) -> bool {
 }
 
 # ---- the constant value (symtab.h ConstVal) ----
-
 struct.ConstVal = {
     type.number valid
     type.ptr<type.Ty> ty
@@ -1065,7 +1058,6 @@ function.new_cv() -> type.ptr<type.ConstVal> {
 }
 
 # ---- symbols and scopes (symtab.h) ----
-
 struct.Symbol = {
     type.text name
     type.number kind
@@ -1205,7 +1197,6 @@ function.funcinfo_new(text.name, text.mangled, type.ptr<type.Ty>.ret, type.ptr<t
 }
 
 # ---- module record ----
-
 struct.Mod = {
     type.text name
     type.text path
@@ -1213,9 +1204,9 @@ struct.Mod = {
     type.ptr<type.Node> ast
     type.number required
     type.number broken
-    type.number state       # 1 = loaded ok, 0 = failed
+    type.number state  # 1 = loaded ok, 0 = failed
     type.ptr<type.FuncInfo> entry
-    type.number ftext       # type.text=1 feature flag
+    type.number ftext  # type.text=1 feature flag
     # IR-facing outputs (filled by ir.ok through these lists)
     type.ptr<type.ptr<type.Symbol>> globals
     type.number nglobals
@@ -1240,7 +1231,6 @@ function.new_mod(text.name, text.path, text.display, number.required) -> type.pt
 }
 
 # ---- sema context (module-level state) ----
-
 type.ptr<type.Scope> root_scope = null
 type.ptr<type.Mod> cur_mod = null
 type.ptr<type.Scope> cur_scope = null
@@ -1255,7 +1245,6 @@ function.cur_mod_display() -> text {
 }
 
 # ---- struct declaration sites (layout fixpoint) ----
-
 type.ptr<type.ptr<type.Node>> site_decls = null
 type.ptr<type.ptr<type.Mod>> site_mods = null
 type.ptr<type.ptr<type.Scope>> site_scopes = null
@@ -1297,7 +1286,6 @@ function.push_site(type.ptr<type.Node>.decl, type.ptr<type.Mod>.mod, type.ptr<ty
 }
 
 # ---- text literal unescaping (lexer.c's escape set) ----
-
 function.unescape(text.sp, number.uline, number.ucol) -> text {
     # sp is the raw spelling INCLUDING the surrounding quotes
     type.number n = text.length(sp)
@@ -1339,7 +1327,6 @@ function.unescape(text.sp, number.uline, number.ucol) -> text {
 }
 
 # ---- mangled assembly names: ok_<module>[_<col>...]<name> ----
-
 function.replace_dots(text.s) -> text {
     type.text out = ""
     type.number n = text.length(s)
@@ -1366,7 +1353,6 @@ function.mangle(text.mod, text.colpath, text.name) -> text {
 }
 
 # ---- name suggestions (edit distance <= 2, brief §42) ----
-
 function.edit_distance(text.a, text.b) -> number {
     type.number la = text.length(a)
     type.number lb = text.length(b)
@@ -1379,8 +1365,8 @@ function.edit_distance(text.a, text.b) -> number {
     when (lb >= 64) {
         return 99
     }
-    type.array<type.number, 64> prev = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-    type.array<type.number, 64> cur = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    type.array<type.number, 64> prev = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    type.array<type.number, 64> cur = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
     loop (j from 0 until lb + 1) {
         prev[j] = j
     }
@@ -1421,7 +1407,6 @@ function.suggest_name(type.ptr<type.Scope>.s, text.name) -> text {
 }
 
 # ---- the canonicalization + literal-value pass ----
-
 function.canon_node(type.ptr<type.Node>.n) -> number {
     when (n == null) {
         return 0
@@ -1454,7 +1439,6 @@ function.canon_node(type.ptr<type.Node>.n) -> number {
 }
 
 # ---------------- structs (spec §8.3/§8.5) ----------------
-
 function.is_record_decl(type.ptr<type.Node>.n) -> bool {
     return n.kind == parser.N_STRUCTDECL or n.kind == parser.N_UNIONDECL
 }
@@ -1539,7 +1523,7 @@ function.layout_one_struct(type.ptr<type.Node>.decl) -> number {
             }
         }
         else {
-            off = (off + fa - 1) & ~(fa - 1)
+            off = (off + fa - 1) &~(fa - 1)
             foffs[i] = off
             off = off + ty_bytes(ft)
             when (off > MAX_STRUCT_BYTES) {
@@ -1559,7 +1543,7 @@ function.layout_one_struct(type.ptr<type.Node>.decl) -> number {
         }
     }
     else {
-        size = (off + align - 1) & ~(align - 1)
+        size = (off + align - 1) &~(align - 1)
         when (size == 0) {
             size = align
         }
@@ -1614,18 +1598,17 @@ function.layout_all_structs() -> number {
 # struct field lookup by name (types.c ty_field); returns the field index
 function.ty_field(type.ptr<type.Ty>.t, text.name) -> number {
     when (t == null) {
-        return -1
+        return-1
     }
     loop (i from 0 until t.nfields) {
         when (t.fnames[i] == name) {
             return i
         }
     }
-    return -1
+    return-1
 }
 
 # ---- the sema context module list ----
-
 type.ptr<type.ptr<type.Mod>> all_mods = null
 type.number n_mods = 0
 type.number mods_cap = 0
@@ -1661,9 +1644,7 @@ function.find_mod(text.name) -> type.ptr<type.Mod> {
     return null
 }
 
-
 # ---------------- constant evaluation (globals + consts) ----------------
-
 function.is_space(number.b) -> bool {
     return b == 32 or b == 9 or b == 10 or b == 11 or b == 12 or b == 13
 }
@@ -2175,7 +2156,7 @@ function.const_eval(type.ptr<type.Node>.e) -> type.ptr<type.ConstVal> {
                 type.number a = l.i
                 type.number b = r.i
                 type.number q = a / b
-                when (a == 0 - 9223372036854775807 - 1 and b == -1) {
+                when (a == 0 - 9223372036854775807 - 1 and b ==-1) {
                     q = a
                 }
                 return cv_int(q, T_NUMBER)
@@ -2197,7 +2178,7 @@ function.const_eval(type.ptr<type.Node>.e) -> type.ptr<type.ConstVal> {
                 type.number a = l.i
                 type.number b = r.i
                 type.number m = a % b
-                when (a == 0 - 9223372036854775807 - 1 and b == -1) {
+                when (a == 0 - 9223372036854775807 - 1 and b ==-1) {
                     m = 0
                 }
                 return cv_int(m, T_NUMBER)
@@ -2314,7 +2295,6 @@ function.const_eval(type.ptr<type.Node>.e) -> type.ptr<type.ConstVal> {
 }
 
 # ---------------- assignment compatibility ----------------
-
 # Full assignment decision for a value expression (sema.c assignable_value)
 function.assignable_value(type.ptr<type.Node>.val, type.ptr<type.Ty>.frm, type.ptr<type.Ty>.dst) -> bool {
     when (frm == null) {
@@ -2365,7 +2345,6 @@ function.assignable_value(type.ptr<type.Node>.val, type.ptr<type.Ty>.frm, type.p
 }
 
 # ---------------- literal checking (arrays, structs, unions) ----------------
-
 function.check_array_lit_runtime(type.ptr<type.Node>.lit, type.ptr<type.Ty>.atype, text.what) -> bool {
     type.number ok = 1
     lit.rtype = atype
@@ -2541,7 +2520,6 @@ function.const_into_type(type.ptr<type.Node>.init, type.ptr<type.ConstVal>.cv, t
 }
 
 # ---------------- union literals (spec §8.5) ----------------
-
 function.check_union_lit_runtime(type.ptr<type.Node>.lit, type.ptr<type.Ty>.ut, text.what) -> bool {
     lit.rtype = ut
     when (lit.nargs != 1) {
@@ -2655,7 +2633,6 @@ function.check_union_lit_const(type.ptr<type.Node>.lit, type.ptr<type.Ty>.ut, te
 }
 
 # ---------------- struct literals (spec §8.3) ----------------
-
 function.check_struct_lit_runtime(type.ptr<type.Node>.lit, type.ptr<type.Ty>.st, text.what) -> bool {
     when (is_union(st)) {
         return check_union_lit_runtime(lit, st, what)
@@ -2799,7 +2776,6 @@ function.check_struct_lit_const(type.ptr<type.Node>.lit, type.ptr<type.Ty>.st, t
 }
 
 # ---------------- path helpers ----------------
-
 function.plural(number.n) -> text {
     when (n == 1) {
         return ""
@@ -2980,25 +2956,24 @@ function.require_text_feature(type.ptr<type.Node>.n) -> number {
 }
 
 # ---------------- conversion builtins (spec §4.4) ----------------
-
 # recognize `<typename>.to_<typename>`; returns the source code or -1
 function.conv_builtin_src(type.ptr<type.Node>.n) -> number {
     when (n.nparts != 2) {
-        return -1
+        return-1
     }
     when (text.length(n.parts[1]) < 3) {
-        return -1
+        return-1
     }
     when (text.slice(n.parts[1], 0, 3) != "to_") {
-        return -1
+        return-1
     }
     type.number src = scalar_from_name(n.parts[0])
     when (src < 0) {
-        return -1
+        return-1
     }
     type.number dst = scalar_from_name(text.slice(n.parts[1], 3, text.length(n.parts[1])))
     when (dst < 0) {
-        return -1
+        return-1
     }
     return src
 }
@@ -3058,7 +3033,6 @@ function.builtin_clash(type.ptr<type.Node>.n) -> number {
 }
 
 # ---------------- check_call: every builtin family + user calls ----------------
-
 function.check_call(type.ptr<type.Node>.n) -> type.ptr<type.Ty> {
     # pointer-address conversions (0.13, spec §12)
     when (n.nparts == 2 and n.parts[0] == "ptr" and n.parts[1] == "to_number") {
@@ -3112,7 +3086,7 @@ function.check_call(type.ptr<type.Node>.n) -> type.ptr<type.Ty> {
     }
     # text operation builtins (0.9, spec §4.5)
     when (n.nparts == 2 and n.parts[0] == "text") {
-        type.number op = -1
+        type.number op =-1
         type.number want_args = 0
         type.text sig = ""
         when (n.parts[1] == "length") {
@@ -3211,7 +3185,7 @@ function.check_call(type.ptr<type.Node>.n) -> type.ptr<type.Ty> {
     }
     # file operation builtins (0.10, spec §6.4)
     when (n.nparts == 2 and n.parts[0] == "fs") {
-        type.number op = -1
+        type.number op =-1
         type.number want_args = 0
         type.text sig = ""
         when (n.parts[1] == "read") {
@@ -3267,7 +3241,7 @@ function.check_call(type.ptr<type.Node>.n) -> type.ptr<type.Ty> {
     }
     # environment builtins (0.12, spec §6.5)
     when (n.nparts == 2 and n.parts[0] == "env") {
-        type.number op = -1
+        type.number op =-1
         type.number want_args = 0
         type.text sig = ""
         when (n.parts[1] == "arg_count") {
@@ -3308,7 +3282,7 @@ function.check_call(type.ptr<type.Node>.n) -> type.ptr<type.Ty> {
     }
     # system builtins (0.13, spec §6.6)
     when (n.nparts == 2 and n.parts[0] == "sys") {
-        type.number op = -1
+        type.number op =-1
         type.number want_args = 0
         type.text sig = ""
         type.ptr<type.Ty> rty = T_VOID
@@ -3524,7 +3498,6 @@ function.check_call(type.ptr<type.Node>.n) -> type.ptr<type.Ty> {
 }
 
 # ---------------- write checking ----------------
-
 function.check_write(type.ptr<type.Node>.n) -> type.ptr<type.Ty> {
     require_text_feature(n)
     when (n.nargs != 1) {
@@ -3588,7 +3561,6 @@ function.literal_as(type.ptr<type.Node>.e, type.ptr<type.Ty>.other) -> type.ptr<
 }
 
 # ---------------- binary operators ----------------
-
 function.binop_name(number.op) -> text {
     when (op == parser.OP_ADD) { return "+" }
     else when (op == parser.OP_SUB) { return "-" }
@@ -3636,67 +3608,67 @@ function.check_bin(type.ptr<type.Node>.e) -> type.ptr<type.Ty> {
     when (lt == T_NULL) { ln = 1 }
     when (rt == T_NULL) { rn = 1 }
     when (lp == 1 or rp == 1 or ln == 1 or rn == 1) {
-            when (e.op == parser.OP_EQ or e.op == parser.OP_NEQ) {
-                type.number ok_pairs = 0
-                when ((lp == 1 and rp == 1 and lt == rt) or (lp == 1 and rn == 1) or (rp == 1 and ln == 1) or (ln == 1 and rn == 1)) {
-                    ok_pairs = 1
-                }
-                when (ok_pairs == 0) {
-                    serr_node(e, "`" + ty_name(lt) + "` and `" + ty_name(rt) + "` cannot be compared — pointers compare only with pointers of the same type or with `null`.")
-                }
-                when (lp == 1) {
-                    e.otype = lt
-                }
-                else when (rp == 1) {
-                    e.otype = rt
-                }
-                else {
-                    e.otype = T_NUMBER
-                }
-                e.rtype = T_BOOL
-                return T_BOOL
+        when (e.op == parser.OP_EQ or e.op == parser.OP_NEQ) {
+            type.number ok_pairs = 0
+            when ((lp == 1 and rp == 1 and lt == rt) or (lp == 1 and rn == 1) or (rp == 1 and ln == 1) or (ln == 1 and rn == 1)) {
+                ok_pairs = 1
             }
-            when (e.op == parser.OP_ADD or e.op == parser.OP_SUB) {
-                when (lp == 1 and rp == 1) {
-                    when (e.op == parser.OP_ADD or lt != rt) {
-                        serr_node(e, "pointers do not add; `" + ty_name(lt) + "` and `" + ty_name(rt) + "` combine only as `p - q` (element difference).")
-                        e.rtype = T_NUMBER
-                        return T_NUMBER
-                    }
-                    e.otype = lt
+            when (ok_pairs == 0) {
+                serr_node(e, "`" + ty_name(lt) + "` and `" + ty_name(rt) + "` cannot be compared — pointers compare only with pointers of the same type or with `null`.")
+            }
+            when (lp == 1) {
+                e.otype = lt
+            }
+            else when (rp == 1) {
+                e.otype = rt
+            }
+            else {
+                e.otype = T_NUMBER
+            }
+            e.rtype = T_BOOL
+            return T_BOOL
+        }
+        when (e.op == parser.OP_ADD or e.op == parser.OP_SUB) {
+            when (lp == 1 and rp == 1) {
+                when (e.op == parser.OP_ADD or lt != rt) {
+                    serr_node(e, "pointers do not add; `" + ty_name(lt) + "` and `" + ty_name(rt) + "` combine only as `p - q` (element difference).")
                     e.rtype = T_NUMBER
                     return T_NUMBER
                 }
-                when (lp == 1 and rt != null and is_integer(rt)) {
-                    e.otype = lt
-                    e.rtype = lt
-                    return lt
-                }
-                when (rp == 1 and lt != null and is_integer(lt)) {
-                    when (e.op == parser.OP_SUB) {
-                        serr_node(e, "`integer - pointer` is not defined — subtract from the pointer instead (`p - n`).")
-                    }
-                    else {
-                        e.otype = rt
-                        e.rtype = rt
-                        return rt
-                    }
-                    e.rtype = T_NUMBER
-                    return T_NUMBER
-                }
-                serr_node(e, "`" + ty_name(lt) + "` and `" + ty_name(rt) + "` do not combine — pointers add or subtract integers, or subtract a matching pointer.")
+                e.otype = lt
                 e.rtype = T_NUMBER
                 return T_NUMBER
             }
-            when (e.op == parser.OP_AND or e.op == parser.OP_OR) {
-                serr_node(e, "`and`/`or` combine `bool` values — compare pointers with `==`/`!=` first.")
-                e.rtype = T_BOOL
-                return T_BOOL
+            when (lp == 1 and rt != null and is_integer(rt)) {
+                e.otype = lt
+                e.rtype = lt
+                return lt
             }
-            serr_node(e, "pointer values do not take arithmetic or ordering here — use `==`/`!=`, `p + n`, or `p - q`.")
+            when (rp == 1 and lt != null and is_integer(lt)) {
+                when (e.op == parser.OP_SUB) {
+                    serr_node(e, "`integer - pointer` is not defined — subtract from the pointer instead (`p - n`).")
+                }
+                else {
+                    e.otype = rt
+                    e.rtype = rt
+                    return rt
+                }
+                e.rtype = T_NUMBER
+                return T_NUMBER
+            }
+            serr_node(e, "`" + ty_name(lt) + "` and `" + ty_name(rt) + "` do not combine — pointers add or subtract integers, or subtract a matching pointer.")
             e.rtype = T_NUMBER
             return T_NUMBER
         }
+        when (e.op == parser.OP_AND or e.op == parser.OP_OR) {
+            serr_node(e, "`and`/`or` combine `bool` values — compare pointers with `==`/`!=` first.")
+            e.rtype = T_BOOL
+            return T_BOOL
+        }
+        serr_node(e, "pointer values do not take arithmetic or ordering here — use `==`/`!=`, `p + n`, or `p - q`.")
+        e.rtype = T_NUMBER
+        return T_NUMBER
+    }
 
     when (e.op == parser.OP_AND or e.op == parser.OP_OR) {
         when (lt != T_BOOL or rt != T_BOOL) {
@@ -3863,7 +3835,6 @@ function.check_bin(type.ptr<type.Node>.e) -> type.ptr<type.Ty> {
 }
 
 # ---------------- check_expr ----------------
-
 function.check_expr(type.ptr<type.Node>.e) -> type.ptr<type.Ty> {
     when (e.kind == parser.N_INT) {
         e.rtype = T_NUMBER
@@ -4052,7 +4023,6 @@ function.check_expr(type.ptr<type.Node>.e) -> type.ptr<type.Ty> {
 }
 
 # ---------------- statements ----------------
-
 # does a statement list always flow out (return/break/continue, when/else)?
 function.list_exits(type.ptr<type.ptr<type.Node>>.body, number.n) -> bool {
     loop (i from 0 until n) {
@@ -4146,7 +4116,6 @@ function.infer_auto_type(type.ptr<type.Node>.s) -> number {
 # <= hi`), multi-patterns (`or`), and guards (`pattern and guard`) — so
 # the whole existing typing/lattice/short-circuit/backend machinery applies
 # unchanged. Arm conditions land on arm.c for the IR builder.
-
 # coverage-analysis state (per match; keys and integer ranges)
 type.ptr<type.text> m_keys = null
 type.number m_nkeys = 0
@@ -4892,7 +4861,6 @@ function.check_func_body(type.ptr<type.Node>.fn, type.ptr<type.FuncInfo>.fi) -> 
 }
 
 # ---------------- constant array lengths (spec §8.4, 0.14) ----------------
-
 # resolve `type.array<T, NAME>` to a concrete interned array type once all
 # constants are collected. NAME is a (possibly dotted) const path resolved
 # from the module's scope: module-level and main.ok constants by their bare
@@ -4905,7 +4873,7 @@ function.finalize_ty(type.ptr<type.Ty>.t, type.ptr<type.Node>.at) -> type.ptr<ty
     }
     when (t.form == F_ARRAY) {
         type.ptr<type.Ty> elem = finalize_ty(t.elem, at)
-        when (t.count == -1) {
+        when (t.count ==-1) {
             type.ptr<type.ConstVal> cv = null
             when (t.count_node != null) {
                 cv = const_eval(t.count_node)
@@ -5023,7 +4991,6 @@ function.finalize_scope(type.ptr<type.Scope>.scope) -> number {
 }
 
 # ---------------- collect + check: columns, modules ----------------
-
 function.register_const_decl(type.ptr<type.Scope>.scope, type.ptr<type.Node>.n) -> number {
     type.ptr<type.Symbol> ex = scope_insert(scope, n.name, SYM_CONST, n.line, n.col)
     when (ex.kind != SYM_CONST or (ex.decl != null and ex.decl != n)) {
@@ -5098,7 +5065,7 @@ function.collect_devcol(type.ptr<type.Mod>.m, type.ptr<type.Node>.col, type.ptr<
             }
             ex.decl = n
             check_func_decl_shape(m, n)
-                        type.text mg = mangle(m.name, colpath, n.name)
+            type.text mg = mangle(m.name, colpath, n.name)
             type.ptr<type.Ty> fret = n.otype
             when (fret == null) {
                 fret = T_VOID
@@ -5199,7 +5166,7 @@ function.collect_toplevel(type.ptr<type.Mod>.m, type.ptr<type.Node>.file, type.p
             }
             ex.decl = n
             check_func_decl_shape(m, n)
-                        type.text mg = mangle(m.name, "", n.name)
+            type.text mg = mangle(m.name, "", n.name)
             type.ptr<type.Ty> fret = n.otype
             when (fret == null) {
                 fret = T_VOID
@@ -5434,7 +5401,6 @@ function.check_module(type.ptr<type.Mod>.m, type.ptr<type.Scope>.scope) -> numbe
 }
 
 # ---------------- the driver: sema_run ----------------
-
 function.sema_run() -> number {
     init_types()
     root_scope = scope_new(null)
@@ -5544,7 +5510,6 @@ function.sema_run() -> number {
 }
 
 # ---- driver-facing accessors ----
-
 function.mod_count() -> number {
     return n_mods
 }

@@ -2,10 +2,9 @@ type.text=1
 
 # Bitwise operations (Okular 0.11, spec §9): masks, flags, packing.
 # Everything here folds or wraps per the fixed-width rules (§4.2).
-
-const.READ    = 0x1
-const.WRITE   = 0x2
-const.EXEC    = 0x4
+const.READ = 0x1
+const.WRITE = 0x2
+const.EXEC = 0x4
 
 function.can(uint32.mode, uint32.want) -> bool {
     return mode & want == want

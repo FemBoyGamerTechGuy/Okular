@@ -11,11 +11,9 @@
 #
 # The buffer is a growable heap array: capacity doubles when full; blocks
 # are copied and the old one released.
-
 type.text=1
 
 # ---- token kinds (numbered to match bootstrap/src/lexer.c TokKind) ----
-
 const.K_EOF = 0
 const.K_NL = 1
 const.K_IDENT = 2
@@ -77,7 +75,6 @@ const.K_CONST = 57
 const.K_RESERVED = 58
 
 # ---- keyword table (spelling -> kind) ----
-
 type.array<type.text, 25> KEYWORDS = {
     "type", "function", "struct", "when", "else", "loop",
     "from", "to", "until", "break", "continue", "return",
@@ -97,7 +94,6 @@ type.array<type.text, 8> RESERVED_WORDS = {
 }
 
 # ---- the token record ----
-
 struct.Tok = {
     type.number kind
     type.number line
@@ -107,7 +103,6 @@ struct.Tok = {
 }.end
 
 # ---- token buffer (growable) ----
-
 type.text src = ""
 type.number len = 0
 type.ptr<type.Tok> buf = null
@@ -150,7 +145,6 @@ function.get_err_byte() -> number {
 }
 
 # ---- accessors (index is expected in range; EOF token pads the end) ----
-
 function.kind(number.i) -> number {
     return buf[i].kind
 }
@@ -179,7 +173,6 @@ function.split_gt(number.i) -> number {
 }
 
 # ---- buffer growth ----
-
 function.push_tok(number.k, number.l, number.c, number.off, number.slen) -> number {
     when (ntok == cap) {
         type.number newcap = 256
@@ -205,7 +198,6 @@ function.push_tok(number.k, number.l, number.c, number.off, number.slen) -> numb
 }
 
 # ---- byte helpers ----
-
 function.cur() -> number {
     when (s_pos < len) {
         return text.byte_at(src, s_pos)
@@ -259,11 +251,10 @@ function.keyword_kind(text.spelling) -> number {
             return K_RESERVED
         }
     }
-    return -1
+    return-1
 }
 
 # ---- literal scanners ----
-
 function.scan_text_lit() -> number {
     type.number s_off = s_pos
     type.number s_line0 = s_line
@@ -323,137 +314,137 @@ function.scan_ident() -> number {
     }
     type.text sp = text.slice(src, s_off, s_pos)
     type.number kw = keyword_kind(sp)
-    when (kw == -1) {
+    when (kw ==-1) {
         return push_tok(K_IDENT, s_line0, s_col0, s_off, s_pos - s_off)
     }
     return push_tok(kw, s_line0, s_col0, s_off, s_pos - s_off)
 }
 
 # ---- operators and punctuation ----
-
 function.scan_punct(number.c) -> number {
     type.number l = s_line
     type.number cl = s_col
+    type.number t_off = s_pos
 
     when (c == 43) {
         advance()
-        return push_tok(K_PLUS, l, cl, 0, 0)
+        return push_tok(K_PLUS, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 42) {
         advance()
-        return push_tok(K_STAR, l, cl, 0, 0)
+        return push_tok(K_STAR, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 47) {
         advance()
-        return push_tok(K_SLASH, l, cl, 0, 0)
+        return push_tok(K_SLASH, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 37) {
         advance()
-        return push_tok(K_PERCENT, l, cl, 0, 0)
+        return push_tok(K_PERCENT, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 45) {
         advance()
         when (cur() == 62) {
             advance()
-            return push_tok(K_ARROW, l, cl, 0, 0)
+            return push_tok(K_ARROW, l, cl, t_off, s_pos - t_off)
         }
-        return push_tok(K_MINUS, l, cl, 0, 0)
+        return push_tok(K_MINUS, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 61) {
         advance()
         when (cur() == 61) {
             advance()
-            return push_tok(K_EQEQ, l, cl, 0, 0)
+            return push_tok(K_EQEQ, l, cl, t_off, s_pos - t_off)
         }
-        return push_tok(K_EQ, l, cl, 0, 0)
+        return push_tok(K_EQ, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 33) {
         advance()
         when (cur() == 61) {
             advance()
-            return push_tok(K_BANGEQ, l, cl, 0, 0)
+            return push_tok(K_BANGEQ, l, cl, t_off, s_pos - t_off)
         }
-        return push_tok(K_NOT, l, cl, 0, 0)
+        return push_tok(K_NOT, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 60) {
         advance()
         when (cur() == 61) {
             advance()
-            return push_tok(K_LE, l, cl, 0, 0)
+            return push_tok(K_LE, l, cl, t_off, s_pos - t_off)
         }
         when (cur() == 60) {
             advance()
-            return push_tok(K_SHL, l, cl, 0, 0)
+            return push_tok(K_SHL, l, cl, t_off, s_pos - t_off)
         }
-        return push_tok(K_LT, l, cl, 0, 0)
+        return push_tok(K_LT, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 62) {
         advance()
         when (cur() == 61) {
             advance()
-            return push_tok(K_GE, l, cl, 0, 0)
+            return push_tok(K_GE, l, cl, t_off, s_pos - t_off)
         }
         when (cur() == 62) {
             advance()
-            return push_tok(K_SHR, l, cl, 0, 0)
+            return push_tok(K_SHR, l, cl, t_off, s_pos - t_off)
         }
-        return push_tok(K_GT, l, cl, 0, 0)
+        return push_tok(K_GT, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 124) {
         advance()
-        return push_tok(K_PIPE, l, cl, 0, 0)
+        return push_tok(K_PIPE, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 94) {
         advance()
-        return push_tok(K_CARET, l, cl, 0, 0)
+        return push_tok(K_CARET, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 126) {
         advance()
-        return push_tok(K_TILDE, l, cl, 0, 0)
+        return push_tok(K_TILDE, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 46) {
         advance()
-        return push_tok(K_DOT, l, cl, 0, 0)
+        return push_tok(K_DOT, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 44) {
         advance()
-        return push_tok(K_COMMA, l, cl, 0, 0)
+        return push_tok(K_COMMA, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 38) {
         advance()
-        return push_tok(K_AMP, l, cl, 0, 0)
+        return push_tok(K_AMP, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 40) {
         advance()
         s_depth = s_depth + 1
-        return push_tok(K_LPAREN, l, cl, 0, 0)
+        return push_tok(K_LPAREN, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 41) {
         advance()
         when (s_depth > 0) {
             s_depth = s_depth - 1
         }
-        return push_tok(K_RPAREN, l, cl, 0, 0)
+        return push_tok(K_RPAREN, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 123) {
         advance()
-        return push_tok(K_LBRACE, l, cl, 0, 0)
+        return push_tok(K_LBRACE, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 125) {
         advance()
-        return push_tok(K_RBRACE, l, cl, 0, 0)
+        return push_tok(K_RBRACE, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 91) {
         advance()
         s_depth = s_depth + 1
-        return push_tok(K_LBRACKET, l, cl, 0, 0)
+        return push_tok(K_LBRACKET, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 93) {
         advance()
         when (s_depth > 0) {
             s_depth = s_depth - 1
         }
-        return push_tok(K_RBRACKET, l, cl, 0, 0)
+        return push_tok(K_RBRACKET, l, cl, t_off, s_pos - t_off)
     }
 
     # an unexpected byte: record the lexical error (reported by the
@@ -469,7 +460,6 @@ function.scan_punct(number.c) -> number {
 }
 
 # ---- one scan step ----
-
 function.scan_step() -> number {
     type.number c = cur()
 
@@ -505,7 +495,6 @@ function.scan_step() -> number {
 }
 
 # ---- entry: tokenize one file into the buffer; returns the token count ----
-
 function.load(text.path) -> number {
     src = fs.read(path)
     len = text.length(src)
@@ -525,4 +514,17 @@ function.load(text.path) -> number {
     }
     push_tok(K_EOF, s_line, s_col, 0, 0)
     return ntok
+}
+
+# ---- raw-span accessors (the formatter's comment recovery) ----
+function.toff(number.i) -> number {
+    return buf[i].off
+}
+
+function.tlen(number.i) -> number {
+    return buf[i].len
+}
+
+function.tsrc() -> text {
+    return src
 }

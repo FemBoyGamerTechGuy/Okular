@@ -5,29 +5,29 @@ const.PASS = 50
 function.grade(number.score) -> text {
     when (score) {
         90 to 100 { return "A" }
-        80 to 89  { return "B" }
-        70 to 79  { return "C" }
+        80 to 89 { return "B" }
+        70 to 79 { return "C" }
         PASS to 69 { return "D" }
-        else      { return "F" }
+        else { return "F" }
     }
 }
 
 function.describe(text.word) -> text {
     when (word) {
-        "yes"   { return "affirmative" }
-        "no"    { return "negative" }
+        "yes" { return "affirmative" }
+        "no" { return "negative" }
         "maybe" { return "uncertain" }
-        else    { return "unknown" }
+        else { return "unknown" }
     }
 }
 
 # a guard runs only after its pattern matched
 function.evenclass(number.n) -> text {
     when (n) {
-        0        { return "zero" }
+        0 { return "zero" }
         1 to 99 when (n % 2 == 0) { return "small even" }
-        1 to 99  { return "small odd" }
-        else     { return "large" }
+        1 to 99 { return "small odd" }
+        else { return "large" }
     }
 }
 
@@ -57,6 +57,6 @@ print
 # bool subjects are exhaustive with both arms
 type.bool ready = false
 when (ready) {
-    true  { write("ready") print }
+    true { write("ready") print }
     false { write("not ready") print }
 }

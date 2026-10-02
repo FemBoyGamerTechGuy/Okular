@@ -1,7 +1,6 @@
 # variables — declarations, types, assignment (spec §8.1, §4.1).
 #
 # Okular 0.1 requires explicit initialization: no silent defaults.
-
 type.text=1
 
 # the four 0.1 types

@@ -5,7 +5,6 @@
 #
 # (text + number concatenation is deliberately not implicit in Okular:
 #  compose output with write() or use the planned conversion builtins.)
-
 function.hello() -> text {
     return "Hello "
 }

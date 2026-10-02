@@ -1,7 +1,6 @@
 # control_flow — when/else, loops, break/continue (spec §10).
 #
 # The conditional is `when (cond) { } else { }` — deliberately not C's `if`.
-
 type.text=1
 
 # counted loop: `to` is INCLUSIVE, `until` is EXCLUSIVE (both documented)
@@ -25,10 +24,10 @@ print
 # break and continue
 loop (i from 1 until 20) {
     when (i % 2 == 0) {
-        continue          # skip even numbers
+        continue  # skip even numbers
     }
     when (i > 9) {
-        break             # stop past 9
+        break  # stop past 9
     }
     write(i)
     write(" ")

@@ -3,7 +3,6 @@
 # Pure Okular on the language floor: no syscalls, no runtime calls —
 # arithmetic, Newton iterations, and Euclid. Integer functions wrap like
 # all Okular integer arithmetic; decimal functions compute in f64.
-
 type.text=1
 
 function.abs(number.n) -> number {
@@ -18,7 +17,7 @@ function.sign(number.n) -> number {
         return 1
     }
     else when (n < 0) {
-        return -1
+        return-1
     }
     return 0
 }
@@ -113,7 +112,7 @@ function.sqrt(decimal.x) -> decimal {
         return 0.0
     }
     type.decimal g = x
-    type.decimal last = -1.0
+    type.decimal last =-1.0
     loop (g != last) {
         last = g
         g = (g + x / g) / 2.0

@@ -1,30 +1,29 @@
 # pointers.ok — manual memory in Okular 0.4 (spec §12).
 # Address-of, dereference, pointer arithmetic, alloc/release, null.
-
 type.text=1
 
 type.number hits = 0
 
 function.bump(ptr<number>.p, number.by) {
-    *p = *p + by
+    * p =*p + by
 }
 
 function.max_of(ptr<number>.a, ptr<number>.b) -> ptr<number> {
-    when (*a >= *b) { return a }
+    when (*a >=*b) { return a }
     return b
 }
 
 function.swap(ptr<number>.a, ptr<number>.b) {
-    type.number tmp = *a
-    *a = *b
-    *b = tmp
+    type.number tmp =*a
+    * a =*b
+    * b = tmp
 }
 
 function.walk_sum(ptr<number>.cells, number.n) -> number {
     type.number total = 0
     type.ptr<type.number> cur = cells
     loop (i from 0 until n) {
-        total = total + *cur
+        total = total +*cur
         cur = cur + 1
     }
     return total
@@ -44,13 +43,13 @@ function.run() -> number {
 
     write("--- pointers as function results ---")
     print
-    type.ptr<type.number> best = max_of(&x, &y)
+    type.ptr<type.number> best = max_of(&x,&y)
     write(*best)
     print
 
     write("--- swap through pointers ---")
     print
-    swap(&x, &y)
+    swap(&x,&y)
     write(x)
     print
     write(y)

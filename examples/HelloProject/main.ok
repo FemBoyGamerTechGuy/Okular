@@ -2,7 +2,6 @@
 #
 # Shows: main.ok as the composition root, [source.files.use] module loading,
 # a developer column as a namespace, and functions from src/ components.
-
 type.text=1
 
 [source.files.use] = {

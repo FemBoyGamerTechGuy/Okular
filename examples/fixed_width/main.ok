@@ -1,11 +1,10 @@
 # fixed_width.ok — the 0.3 fixed-width integer family in one program.
 # Every width, wrapping arithmetic, the conversion lattice, and the
 # T.to_U(x) conversion builtins (specs/spec-v0.3.md §4.2/§4.4).
-
 type.text=1
 
 type.uint64 world_population = 8000000000
-type.array<type.uint8, 4> magic = {0x11, 0x22, 0x33, 0x44}
+type.array<type.uint8, 4> magic = { 0x11, 0x22, 0x33, 0x44 }
 
 function.clamp(type.int8.v, type.int8.lo, type.int8.hi) -> int8 {
     when (v < lo) { return lo }
@@ -55,7 +54,7 @@ function.run() -> number {
 
     write("--- widening lattice (implicit, lossless) ---")
     print
-    type.int8 small = -100
+    type.int8 small =-100
     type.number wide = small
     type.decimal wider = int32.to_decimal(number.to_int32(small))
     write("int8 -100 widened: ")
@@ -109,10 +108,10 @@ function.run() -> number {
     write("--- helpers with narrow signatures ---")
     print
     write("clamp(50, -100, 100) = ")
-    write(clamp(50, -100, 100))
+    write(clamp(50,-100, 100))
     print
     write("clamp(-99, -100, 100) = ")
-    write(clamp(-99, -100, 100))
+    write(clamp(-99,-100, 100))
     print
 
     loop (y from 1896 to 1908) {

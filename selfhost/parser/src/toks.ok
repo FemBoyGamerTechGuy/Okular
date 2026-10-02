@@ -11,11 +11,9 @@
 #
 # The buffer is a growable heap array: capacity doubles when full; blocks
 # are copied and the old one released.
-
 type.text=1
 
 # ---- token kinds (numbered to match bootstrap/src/lexer.c TokKind) ----
-
 const.K_EOF = 0
 const.K_NL = 1
 const.K_IDENT = 2
@@ -77,7 +75,6 @@ const.K_CONST = 57
 const.K_RESERVED = 58
 
 # ---- keyword table (spelling -> kind) ----
-
 type.array<type.text, 25> KEYWORDS = {
     "type", "function", "struct", "when", "else", "loop",
     "from", "to", "until", "break", "continue", "return",
@@ -97,7 +94,6 @@ type.array<type.text, 8> RESERVED_WORDS = {
 }
 
 # ---- the token record ----
-
 struct.Tok = {
     type.number kind
     type.number line
@@ -107,7 +103,6 @@ struct.Tok = {
 }.end
 
 # ---- token buffer (growable) ----
-
 type.text src = ""
 type.number len = 0
 type.ptr<type.Tok> buf = null
@@ -150,7 +145,6 @@ function.get_err_byte() -> number {
 }
 
 # ---- accessors (index is expected in range; EOF token pads the end) ----
-
 function.kind(number.i) -> number {
     return buf[i].kind
 }
@@ -179,7 +173,6 @@ function.split_gt(number.i) -> number {
 }
 
 # ---- buffer growth ----
-
 function.push_tok(number.k, number.l, number.c, number.off, number.slen) -> number {
     when (ntok == cap) {
         type.number newcap = 256
@@ -205,7 +198,6 @@ function.push_tok(number.k, number.l, number.c, number.off, number.slen) -> numb
 }
 
 # ---- byte helpers ----
-
 function.cur() -> number {
     when (s_pos < len) {
         return text.byte_at(src, s_pos)
@@ -259,11 +251,10 @@ function.keyword_kind(text.spelling) -> number {
             return K_RESERVED
         }
     }
-    return -1
+    return-1
 }
 
 # ---- literal scanners ----
-
 function.scan_text_lit() -> number {
     type.number s_off = s_pos
     type.number s_line0 = s_line
@@ -323,14 +314,13 @@ function.scan_ident() -> number {
     }
     type.text sp = text.slice(src, s_off, s_pos)
     type.number kw = keyword_kind(sp)
-    when (kw == -1) {
+    when (kw ==-1) {
         return push_tok(K_IDENT, s_line0, s_col0, s_off, s_pos - s_off)
     }
     return push_tok(kw, s_line0, s_col0, s_off, s_pos - s_off)
 }
 
 # ---- operators and punctuation ----
-
 function.scan_punct(number.c) -> number {
     type.number l = s_line
     type.number cl = s_col
@@ -469,7 +459,6 @@ function.scan_punct(number.c) -> number {
 }
 
 # ---- one scan step ----
-
 function.scan_step() -> number {
     type.number c = cur()
 
@@ -505,7 +494,6 @@ function.scan_step() -> number {
 }
 
 # ---- entry: tokenize one file into the buffer; returns the token count ----
-
 function.load(text.path) -> number {
     src = fs.read(path)
     len = text.length(src)

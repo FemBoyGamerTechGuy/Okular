@@ -3,7 +3,6 @@
 # Note the two type spellings, both pinned by the language's own examples:
 #   statement declarations:  type.number x = 1
 #   signatures:              function.add(number.a, number.b) -> number
-
 type.text=1
 
 function.add(number.a, number.b) -> number {

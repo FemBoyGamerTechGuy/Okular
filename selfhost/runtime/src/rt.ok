@@ -13,13 +13,11 @@
 #   free block:  payload[0..8) = size (mirrors the header),
 #                payload[8..16) = next free block's address bits
 #   text arena:  bump region; text values are (ptr, len) views into it
-
 type.text=1
 
 const.MI_B = 1048576
 
 # ---- byte-level memory access over ptr<byte> ----
-
 function.rd64(ptr<byte>.p, number.off) -> number {
     # little-endian u64: byte i weighs 256^i
     type.number v = 0
@@ -56,7 +54,6 @@ function.wr_byte(ptr<byte>.p, number.off, number.v) -> number {
 }
 
 # ---- the output buffer ----
-
 type.ptr<type.byte> out_buf = null
 type.number out_len = 0
 const.OUT_CAP = 65536
@@ -88,7 +85,7 @@ function.put_byte(number.b) -> number {
 
 function.put_dec_digits(number.v) -> number {
     # decimal digits of v, most-significant first
-    type.array<type.number, 20> tmp = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    type.array<type.number, 20> tmp = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
     type.number n = 0
     loop (v > 0) {
         tmp[n] = v - (v / 10) * 10
@@ -105,7 +102,6 @@ function.put_dec_digits(number.v) -> number {
 }
 
 # ---- write family (statement-level formatting into the buffer) ----
-
 function.write_number(number.v) -> number {
     out_ensure()
     when (v < 0) {
@@ -129,7 +125,7 @@ function.write_uint(number.v) -> number {
     # unsigned digit extraction: v rides as uint64 bits (v may be "negative"
     # as int64 when the top bit is set)
     type.uint64 uv = number.to_uint64(v)
-    type.array<type.number, 20> tmp = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    type.array<type.number, 20> tmp = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
     type.number n = 0
     loop (uv > 0) {
         tmp[n] = uint64.to_number(uv - uv / 10 * 10)
@@ -194,7 +190,7 @@ function.write_decimal(decimal.d) -> number {
     write_number(ip)
     write_text(".")
     # six fractional digits, zero padded
-    type.array<type.number, 6> dg = {0, 0, 0, 0, 0, 0}
+    type.array<type.number, 6> dg = { 0, 0, 0, 0, 0, 0 }
     loop (i from 0 until 6) {
         dg[5 - i] = f6 - (f6 / 10) * 10
         f6 = f6 / 10
@@ -219,10 +215,9 @@ function.print_flush() -> number {
 }
 
 # ---- the text arena ----
-
 type.ptr<type.byte> arena = null
 type.number arena_used = 0
-const.ARENA_CAP = 16777216   # 16 MiB: the compiler itself is the heaviest Okular program
+const.ARENA_CAP = 16777216  # 16 MiB: the compiler itself is the heaviest Okular program
 
 function.arena_ensure() -> number {
     when (arena == null) {
@@ -245,7 +240,6 @@ function.arena_take(number.len) -> type.ptr<type.byte> {
 }
 
 # ---- to_text family (text results live in the arena) ----
-
 function.number_to_text(number.v) -> text {
     # format through the output buffer, then copy into the arena (owned)
     type.number save = out_len
@@ -297,12 +291,11 @@ function.bool_to_text(number.b) -> text {
 }
 
 # ---- parsing (text -> number / decimal) ----
-
 function.digit(number.b) -> number {
     when (b >= 48 and b <= 57) {
         return b - 48
     }
-    return -1
+    return-1
 }
 
 function.text_to_number(text.s) -> number {
@@ -409,7 +402,6 @@ function.text_number_trap(text.s) -> number {
 }
 
 # ---- text equality and concatenation ----
-
 function.text_eq(text.a, text.b) -> number {
     type.number la = text.length(a)
     type.number lb = text.length(b)
@@ -438,7 +430,6 @@ function.concat(text.a, text.b) -> text {
 }
 
 # ---- stderr + traps ----
-
 type.ptr<type.byte> err_buf = null
 
 function.write_err(text.s) -> number {
@@ -469,7 +460,6 @@ function.raw_die() -> number {
 # of 16. Free blocks carry (size, next) in their first 16 payload bytes;
 # the list is address-ordered, first-fit, with splitting and both-way
 # coalescing. Chunks come from sys.mmap (1 MiB growth unit).
-
 type.ptr<type.byte> heap_free = null
 type.number heap_total = 0
 const.CHUNK = 1048576
@@ -632,7 +622,6 @@ function.mem_release(ptr<byte>.data) -> number {
 }
 
 # ---- file operations (fs.*, built on the system module) ----
-
 const.O_RDONLY = 0
 const.O_WRONLY_CREAT_TRUNC = 577
 const.MODE_644 = 420
@@ -645,7 +634,7 @@ function.fs_read(text.path) -> text {
     type.number size = sys.size(fd)
     when (size < 0) {
         sys.close(fd)
-        fs_trap("cannot stat file: ", path, -1)
+        fs_trap("cannot stat file: ", path,-1)
     }
     type.ptr<type.byte> dst = arena_take(size)
     type.number got = 0
@@ -712,7 +701,6 @@ function.fs_trap(text.what, text.path, number.err) -> number {
 
 # ---- process entry support (M5): argv forwarding + exit + env builtins ----
 # rt_start (emitted by the backend as machine code) hands argc/argv here.
-
 type.number rt_argc_v = 0
 type.ptr<type.byte> rt_argv_v = null
 
@@ -751,7 +739,6 @@ function.env_arg(number.i) -> text {
 }
 
 # ---- the trap family (exact rt.c messages and exit codes) ----
-
 function.div_trap() -> number {
     write_err("okular runtime error: ")
     write_err("integer division by zero\n")

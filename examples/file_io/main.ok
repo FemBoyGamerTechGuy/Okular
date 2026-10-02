@@ -1,7 +1,6 @@
 # file_io.ok — Okular 0.10 file builtins (spec §6.4).
 # Read whole files as text, save text back, probe existence —
 # raw syscalls under the hood, loud failures by design.
-
 type.text=1
 
 function.main() -> number {

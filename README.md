@@ -117,9 +117,22 @@ build/        build artifacts
 ```console
 $ make test
 selfbuild: seed self-reproduction byte-identical ...
-selfhost differential: passed 191   failed 0
+selfhost differential: passed 233   failed 0
 ALL SELFHOST TESTS PASSED
 ```
+
+## Formatting
+
+`okular fmt` is the official formatter — token-based, comment-preserving,
+and semantics-preserving by construction (it never changes the token
+sequence or the statement boundaries):
+
+```console
+$ bin/okular fmt main.ok           # format in place
+$ bin/okular fmt --check main.ok   # CI: exit 1 when not formatted
+```
+
+The whole repository (compiler, stdlib, examples) is formatted with it.
 
 ## License
 

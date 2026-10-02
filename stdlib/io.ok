@@ -4,7 +4,6 @@
 # the raw syscall floor (spec §6.6). `puts`-style functions compose the
 # buffer flush exactly like hand-written write+print would — no hidden
 # buffering, no second output path.
-
 type.text=1
 
 function.puts(text.s) -> number {

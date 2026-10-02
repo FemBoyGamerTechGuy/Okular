@@ -2,7 +2,6 @@
 #
 # `type.text=1` activates the text output subsystem for this file.
 # `write(...)` appends to the output buffer; `print` flushes it as a line.
-
 type.text=1
 
 write("Hello Okular")

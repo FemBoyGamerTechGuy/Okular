@@ -120,6 +120,10 @@ for large magnitudes (`specs/spec-v0.15.md` §4.2).
 12. **ARM64 backend** — second target proves the backend abstraction.
 13. **Optimizer framework** — register allocation, DCE, inlining on the IR;
     constant folding already exists as the first pass.
+14. ~~**Formatter**~~ **done in 0.15**: `okular fmt` — token-based,
+    comment-preserving, semantics-preserving (byte-identical binaries
+    from formatted sources), `--check` for CI; the repository formats
+    itself with it.
 
 ## M3/M4 work items (self-hosting)
 

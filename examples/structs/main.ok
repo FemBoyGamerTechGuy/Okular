@@ -1,7 +1,6 @@
 # structs.ok — Okular 0.5 records (spec §8.3).
 # Declaration, positional literals, field access, value semantics,
 # nesting, arrays of structs, structs on the heap.
-
 type.text=1
 
 struct.Point = {
@@ -44,13 +43,13 @@ function.record_hit(ptr<Stats>.s) {
 function.run() -> number {
     write("--- declaration and literals ---")
     print
-    type.Point pt = {3, 4}
+    type.Point pt = { 3, 4 }
     write(pt.x)
     print
     write(pt.y)
     print
 
-    type.Rect r = {{1, 2}, 10, 20, true}
+    type.Rect r = { { 1, 2 }, 10, 20, true }
     write(r.corner.x)
     print
     write(r.corner.y)
@@ -80,7 +79,7 @@ function.run() -> number {
     write(area(&r))
     print
 
-    type.Stats s = {0, 0, 0.0}
+    type.Stats s = { 0, 0, 0.0 }
     record_hit(&s)
     record_hit(&s)
     s.misses = 1
@@ -94,7 +93,7 @@ function.run() -> number {
 
     write("--- arrays of structs ---")
     print
-    type.array<type.Point, 3> pts = {{1, 2}, {3, 4}, {5, 6}}
+    type.array<type.Point, 3> pts = { { 1, 2 }, { 3, 4 }, { 5, 6 } }
     type.number sum = 0
     loop (i from 0 until 3) {
         sum = sum + pts[i].x + pts[i].y

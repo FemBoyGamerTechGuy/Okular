@@ -1,7 +1,6 @@
 # consts.ok — Okular 0.8 constants and type.auto (spec §8.1).
 # `const.name = value` folds at compile time; `type.auto x = init`
 # infers the type from the initializer.
-
 type.text=1
 
 const.limit = 100
@@ -44,7 +43,7 @@ function.main() -> number {
     type.auto t = greeting + "!"
     write(t)
     print
-    type.auto p = &origin.y
+    type.auto p =&origin.y
     write(*p)
     print
     return 0

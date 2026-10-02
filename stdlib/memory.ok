@@ -5,7 +5,6 @@
 # dirent records, ELF structures). All bounds discipline stays with the
 # caller — pointer indexing is unchecked by design (spec §12); these
 # helpers add no hidden checks and no hidden allocations.
-
 type.text=1
 
 function.fill(ptr<byte>.p, number.n, number.v) -> number {
@@ -47,7 +46,6 @@ function.zero(ptr<byte>.p, number.n) -> number {
 }
 
 # ---- little-endian integer views ----
-
 function.read_u16le(ptr<byte>.p, number.off) -> number {
     return p[off] + 256 * p[off + 1]
 }

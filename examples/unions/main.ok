@@ -1,7 +1,6 @@
 # unions.ok — Okular 0.7 overlap types (spec §8.5).
 # One storage, several member views; the type-directed literal
 # activates the first member that accepts the value.
-
 type.text=1
 
 union.Word = {

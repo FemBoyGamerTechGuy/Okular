@@ -9,7 +9,6 @@
 #
 # The runtime module (src/rt.ok) is compiled into every emitted program;
 # it is located relative to this executable (build/output/ -> ../../src/).
-
 type.text=1
 
 [source.files.use] = {
@@ -19,11 +18,11 @@ type.text=1
     "ir",
     "emit",
     "elf",
+    "fmt",
     "rt"
 }.end
 
 # ---- small path helpers ----
-
 function.dirname(text.path) -> text {
     type.number n = text.length(path)
     loop (i from 0 until n) {
@@ -66,13 +65,11 @@ function.strip_quotes(text.sp) -> text {
 }
 
 # ---- flags ----
-
 type.number dump_ir_flag = 0
 type.number strict_mode = 0
 type.number warn_mode = 0
 
 # ---- the used-module collection (prescan over the token buffer) ----
-
 type.ptr<type.text> uses = null
 type.number n_uses = 0
 type.number uses_cap = 0
@@ -83,7 +80,6 @@ function.uses_reset() -> number {
 }
 
 # ---- the [libs.use] collection (spec §6.3): accumulates project-wide ----
-
 type.ptr<type.text> libs = null
 type.number n_libs = 0
 type.number libs_cap = 0
@@ -209,7 +205,6 @@ function.prescan_uses() -> number {
 }
 
 # ---- project loading ----
-
 type.text proj_root = "."
 
 type.number load_errors = 0
@@ -353,7 +348,6 @@ function.inject_runtime(text.exe_path) -> number {
 }
 
 # ---- the optional-source scan (spec §36) ----
-
 # every src/*.ok file that is not in any [source.files.use] list is
 # loaded as an OPTIONAL module: parsed and checked (errors downgraded to
 # warnings), never linked. Broken ones are reported as skipped. Uses
@@ -408,7 +402,6 @@ function.scan_optional_sources() -> number {
 }
 
 # ---- phase B: parse every module ----
-
 function.parse_all() -> number {
     loop (i from 0 until sema.mod_count()) {
         type.ptr<type.Mod> m = sema.mod_at(i)
@@ -438,7 +431,6 @@ function.parse_all() -> number {
 }
 
 # ---- IR + emission ----
-
 type.ptr<type.ptr<type.IrModule>> irmods = null
 type.number n_irmods = 0
 type.number irmods_cap = 0
@@ -498,10 +490,66 @@ function.mkdir_p(text.path) -> number {
     return 0
 }
 
-# ---- the driver ----
+# ---- the formatter mode (`okular fmt`) ----
+#
+# okular fmt <file>... [--check]   — formats files in place; --check
+# reports and exits 1 when a file differs from its formatted form
+# (never rewrites). The formatter is token-based and preserves line
+# structure, so a formatted file always parses to the same AST.
+function.run_fmt(number.argc) -> number {
+    type.number check = 0
+    type.number n_paths = 0
+    type.ptr<type.text> paths = alloc<type.text>(argc)
+    loop (ai from 2 until argc) {
+        type.text a = env.arg(ai)
+        when (a == "--check" or a == "-c") {
+            check = 1
+        }
+        else {
+            paths[n_paths] = a
+            n_paths = n_paths + 1
+        }
+    }
+    when (n_paths == 0) {
+        sys.write(2, "usage: okular fmt <file.ok>... [--check]\n")
+        return 2
+    }
+    type.number bad = 0
+    loop (p from 0 until n_paths) {
+        type.text path = paths[p]
+        type.text formatted = fmt.format_file(path)
+        when (formatted == "") {
+            sys.write(2, "okular fmt: cannot read or tokenize `" + path + "`.\n")
+            return 1
+        }
+        when (check == 1) {
+            type.text orig = fs.read(path)
+            when (orig != formatted) {
+                sys.write(1, path + ": not formatted\n")
+                bad = bad + 1
+            }
+        }
+        else {
+            type.text orig = fs.read(path)
+            when (orig != formatted) {
+                fs.save(path, formatted)
+                sys.write(1, "okular fmt: formatted " + path + "\n")
+            }
+        }
+    }
+    when (check == 1 and bad > 0) {
+        sys.write(2, "okular fmt: " + number.to_text(bad) + " file(s) need formatting\n")
+        return 1
+    }
+    return 0
+}
 
+# ---- the driver ----
 function.main() -> number {
     type.number argc = env.arg_count()
+    when (argc >= 2 and env.arg(1) == "fmt") {
+        return run_fmt(argc)
+    }
     when (argc < 2) {
         sys.write(2, "usage: okc <main.ok> [--out <path>] [--dump-ir] [-s | --strict] [-w | --warnings]\n")
         return 2

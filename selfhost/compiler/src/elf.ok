@@ -5,13 +5,11 @@
 # globals + zero-fill bss), symbols across both, and two fixup kinds
 # (REL32 for calls/jumps, ABS64 for absolute addresses in code and data).
 # No `as`, no `ld` — the emitted file is the executable.
-
-const.BASE = 4194304          # 0x400000 — the traditional static base
-const.CODE_OFF = 176          # 64 (ehdr) + 56 (phdr) + 56 (phdr)
+const.BASE = 4194304  # 0x400000 — the traditional static base
+const.CODE_OFF = 176  # 64 (ehdr) + 56 (phdr) + 56 (phdr)
 const.PAGE = 4096
 
 # ---- growable byte buffers ----
-
 struct.Buf = {
     type.ptr<type.byte> data
     type.number len
@@ -98,16 +96,14 @@ function.buf_wr64_at(type.ptr<type.Buf>.b, number.off, number.v) -> number {
 }
 
 # ---- the image under construction ----
-
-type.ptr<type.Buf> code = null       # RX: machine code
-type.ptr<type.Buf> rodata = null     # RX: text literals + trap strings
-type.ptr<type.Buf> dat = null        # RW: initialized globals
+type.ptr<type.Buf> code = null  # RX: machine code
+type.ptr<type.Buf> rodata = null  # RX: text literals + trap strings
+type.ptr<type.Buf> dat = null  # RW: initialized globals
 type.number bss_size = 0
-type.number entry_off = 0            # code offset of _start
+type.number entry_off = 0  # code offset of _start
 
 # ---- symbols ----
 # segment: 0 = code (RX), 1 = rodata (RX), 2 = data (RW)
-
 type.ptr<type.text> sym_name = null
 type.ptr<type.number> sym_seg = null
 type.ptr<type.number> sym_off = null
@@ -180,7 +176,6 @@ function.sym_addr(number.id) -> number {
 
 # ---- fixups ----
 # kind 0 = REL32 (call/jmp, in code), kind 1 = ABS64 (code or data)
-
 type.ptr<type.number> fx_kind = null
 type.ptr<type.number> fx_seg = null
 type.ptr<type.number> fx_off = null
@@ -254,9 +249,8 @@ function.fx_abs64(number.seg, number.off, number.sym, number.addend) -> number {
 }
 
 # ---- segment geometry ----
-
 function.align_up(number.v, number.a) -> number {
-    return (v + a - 1) & ~(a - 1)
+    return (v + a - 1) &~(a - 1)
 }
 
 # RX segment: [ehdr][phdrs][code][rodata]
@@ -273,7 +267,6 @@ function.data_file_off() -> number {
 }
 
 # ---- the ELF emitter ----
-
 function.emit_elf(text.path) -> number {
     type.number rx_filesz = rx_end()
     type.number dv = data_vaddr()
@@ -286,50 +279,50 @@ function.emit_elf(text.path) -> number {
     type.ptr<type.Buf> img = buf_new()
 
     # ELF64 header
-    buf_put(img, 127)          # EI_MAG0 \x7f
-    buf_put(img, 69)           # 'E'
-    buf_put(img, 76)           # 'L'
-    buf_put(img, 70)           # 'F'
-    buf_put(img, 2)            # EI_CLASS: 64-bit
-    buf_put(img, 1)            # EI_DATA: little endian
-    buf_put(img, 1)            # EI_VERSION
-    buf_put(img, 0)            # EI_OSABI: SYSV
+    buf_put(img, 127)  # EI_MAG0 \x7f
+    buf_put(img, 69)  # 'E'
+    buf_put(img, 76)  # 'L'
+    buf_put(img, 70)  # 'F'
+    buf_put(img, 2)  # EI_CLASS: 64-bit
+    buf_put(img, 1)  # EI_DATA: little endian
+    buf_put(img, 1)  # EI_VERSION
+    buf_put(img, 0)  # EI_OSABI: SYSV
     loop (i from 8 until 16) {
         buf_put(img, 0)
     }
-    buf_put16(img, 2)          # e_type: ET_EXEC
-    buf_put16(img, 62)         # e_machine: x86-64
-    buf_put32(img, 1)          # e_version
-    buf_put64(img, BASE + CODE_OFF + entry_off)   # e_entry
-    buf_put64(img, 64)         # e_phoff
-    buf_put64(img, 0)          # e_shoff
-    buf_put32(img, 0)          # e_flags
-    buf_put16(img, 64)         # e_ehsize
-    buf_put16(img, 56)         # e_phentsize
-    buf_put16(img, 2)          # e_phnum
-    buf_put16(img, 0)          # e_shentsize
-    buf_put16(img, 0)          # e_shnum
-    buf_put16(img, 0)          # e_shstrndx
+    buf_put16(img, 2)  # e_type: ET_EXEC
+    buf_put16(img, 62)  # e_machine: x86-64
+    buf_put32(img, 1)  # e_version
+    buf_put64(img, BASE + CODE_OFF + entry_off)  # e_entry
+    buf_put64(img, 64)  # e_phoff
+    buf_put64(img, 0)  # e_shoff
+    buf_put32(img, 0)  # e_flags
+    buf_put16(img, 64)  # e_ehsize
+    buf_put16(img, 56)  # e_phentsize
+    buf_put16(img, 2)  # e_phnum
+    buf_put16(img, 0)  # e_shentsize
+    buf_put16(img, 0)  # e_shnum
+    buf_put16(img, 0)  # e_shstrndx
 
     # program header 1: R+X at BASE, covers headers+code+rodata
-    buf_put32(img, 1)          # p_type: PT_LOAD
-    buf_put32(img, 5)          # p_flags: R+X
-    buf_put64(img, 0)          # p_offset
-    buf_put64(img, BASE)       # p_vaddr
-    buf_put64(img, BASE)       # p_paddr
+    buf_put32(img, 1)  # p_type: PT_LOAD
+    buf_put32(img, 5)  # p_flags: R+X
+    buf_put64(img, 0)  # p_offset
+    buf_put64(img, BASE)  # p_vaddr
+    buf_put64(img, BASE)  # p_paddr
     buf_put64(img, rx_filesz)  # p_filesz
     buf_put64(img, rx_filesz)  # p_memsz
-    buf_put64(img, PAGE)       # p_align
+    buf_put64(img, PAGE)  # p_align
 
     # program header 2: RW at page-aligned vaddr, data + bss
-    buf_put32(img, 1)          # p_type: PT_LOAD
-    buf_put32(img, 6)          # p_flags: R+W
-    buf_put64(img, dfo)        # p_offset
-    buf_put64(img, dv)         # p_vaddr
-    buf_put64(img, dv)         # p_paddr
-    buf_put64(img, dfilesz)    # p_filesz
-    buf_put64(img, dmemsz)     # p_memsz
-    buf_put64(img, PAGE)       # p_align
+    buf_put32(img, 1)  # p_type: PT_LOAD
+    buf_put32(img, 6)  # p_flags: R+W
+    buf_put64(img, dfo)  # p_offset
+    buf_put64(img, dv)  # p_vaddr
+    buf_put64(img, dv)  # p_paddr
+    buf_put64(img, dfilesz)  # p_filesz
+    buf_put64(img, dmemsz)  # p_memsz
+    buf_put64(img, PAGE)  # p_align
 
     # code bytes
     loop (i from 0 until code.len) {
@@ -394,7 +387,6 @@ function.buf_put16(type.ptr<type.Buf>.b, number.v) -> number {
 }
 
 # ---- accessors for the backend (emit.ok) ----
-
 function.code_len() -> number {
     return code.len
 }
