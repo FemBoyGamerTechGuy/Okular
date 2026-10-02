@@ -1,6 +1,6 @@
-# Okular Language Basics (0.12)
+# Okular Language Basics (0.15)
 
-A tour of what Okular 0.11 does today. The specification
+A tour of what Okular 0.15 does today. The specification
 (`specs/spec-v0.15.md`) is the source of truth; this page is the friendly
 version. Everything shown here compiles and runs with the bootstrap
 compiler.
