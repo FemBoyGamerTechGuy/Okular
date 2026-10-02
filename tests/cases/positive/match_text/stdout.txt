@@ -1,0 +1,2 @@
+affirmative negative empty other
+self

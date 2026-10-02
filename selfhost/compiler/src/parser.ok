@@ -53,6 +53,9 @@ const.N_CONSTDECL = 37
 const.N_FUNC = 38
 const.N_FILE = 39
 const.N_SYSOP = 40   # sema-created (machine AST protocol append-only)
+const.N_MATCH = 41   # when (subject) { arms } — match-style when (0.15)
+const.N_MATCHARM = 42   # one arm: patterns (args), guard (a), body; bval=1 -> else-arm
+const.N_MATCHRANGE = 43   # lo to hi — one range pattern alternative (a=lo, b=hi)
 
 # binary operators (ast.h BinOp order)
 const.OP_ADD = 0
@@ -1324,7 +1327,12 @@ function.parse_stmt_list(type.ptr<type.Node>.out) -> bool {
     return false
 }
 
-# `when (cond) { } else { }` (spec §10)
+# `when (cond) { } else { }` (spec §10) — and, since 0.15, match-style:
+# `when (subject) { pattern { } ... else { } }` (spec §10.1). The body is
+# disambiguated by one 2-token lookahead: a literal start, `else {`, or
+# `IDENT {`/`to`/`,`/`when` opens the arm grammar; anything else is the
+# ordinary conditional body. The two forms share the keyword, the parens,
+# and the block shape — one conditional construct, two reading modes.
 function.parse_when() -> type.ptr<type.Node> {
     type.number tline = cur_line()
     type.number tcol = cur_col()
@@ -1340,6 +1348,13 @@ function.parse_when() -> type.ptr<type.Node> {
     }
     when (expect(toks.K_RPAREN) == false) {
         sync_stmt()
+        return n
+    }
+    when (peek_is_match_body()) {
+        n.kind = N_MATCH
+        parse_match_arms(n)
+        # a match carries its own `else` arm; a trailing `else` here belongs
+        # to no open `when` and is reported by the statement parser
         return n
     }
     parse_stmt_list(n)
@@ -1368,6 +1383,166 @@ function.parse_when() -> type.ptr<type.Node> {
         pos = mark
     }
     return n
+}
+
+# ---- match-style `when` (0.15, spec §10.1) ----
+#
+# One 2-token lookahead decides the body's reading mode. A literal start
+# (`1 {`, `-2 to 5 {`, `"yes" {`, `true {`, `null {`), `else {`, or an
+# identifier directly followed by `{`, `to`, `,`, or a guard `when` opens
+# the arm grammar; anything else is the ordinary conditional body. The
+# pattern and its `{`/`to`/`,`/guard sit on the same line — the newline
+# separator keeps the two readings unambiguous without lookahead tricks.
+function.peek_is_match_body() -> bool {
+    when (is_at(toks.K_LBRACE) == false) {
+        return false
+    }
+    # first meaningful token after `{` (newlines after the brace are fine)
+    type.number i = pos + 1
+    loop (toks.kind(i) == toks.K_NL and i + 1 < toks.count()) {
+        i = i + 1
+    }
+    type.number k1 = toks.kind(i)
+    type.number k2 = toks.kind(i + 1)
+    when (k1 == toks.K_ELSE) {
+        return k2 == toks.K_LBRACE
+    }
+    when (k1 == toks.K_INT or k1 == toks.K_DEC or k1 == toks.K_TEXT or k1 == toks.K_TRUE or k1 == toks.K_FALSE or k1 == toks.K_NULL or k1 == toks.K_MINUS) {
+        return true
+    }
+    when (k1 == toks.K_IDENT) {
+        return k2 == toks.K_LBRACE or k2 == toks.K_TO or k2 == toks.K_COMMA or k2 == toks.K_WHEN
+    }
+    return false
+}
+
+# one pattern alternative: `expr` or `expr to expr` (inclusive, like the
+# counted loop's `from ... to ...`). `to` between the bounds — and the
+# bounds themselves — are validated by sema (literals, constants, null)
+function.parse_pattern() -> type.ptr<type.Node> {
+    type.ptr<type.Node> lo = parse_expr()
+    when (lo == null) {
+        return null
+    }
+    when (is_at(toks.K_TO)) {
+        advance()
+        type.ptr<type.Node> hi = parse_expr()
+        when (hi == null) {
+            return null
+        }
+        type.ptr<type.Node> r = new_node(N_MATCHRANGE, lo.line, lo.col)
+        r.a = lo
+        r.b = hi
+        return r
+    }
+    return lo
+}
+
+# the arm grammar: `pattern[, pattern...] [when (guard)] { stmts }`,
+# plus `else { stmts }` as the wildcard arm. Arms are tried in source
+# order; `else` must be the last arm.
+function.parse_match_arms(type.ptr<type.Node>.n) -> bool {
+    when (expect(toks.K_LBRACE) == false) {
+        sync_stmt()
+        return false
+    }
+    type.ptr<type.ptr<type.Node>> arms = alloc<type.ptr<type.Node>>(8)
+    type.number acap = 8
+    type.number an = 0
+    type.number saw_else = 0
+    loop (true) {
+        skip_nl()
+        when (is_at(toks.K_EOF)) {
+            perr(cur_line(), cur_col(), "the match starting earlier is never closed (missing `}`).")
+            break
+        }
+        when (is_at(toks.K_RBRACE)) {
+            advance()
+            break
+        }
+        when (saw_else == 1) {
+            perr(cur_line(), cur_col(), "the `else` arm must be the last arm — this arm can never run.")
+        }
+        type.ptr<type.Node> arm = new_node(N_MATCHARM, cur_line(), cur_col())
+        when (is_at(toks.K_ELSE)) {
+            advance()
+            arm.bval = 1
+            saw_else = 1
+            parse_stmt_list(arm)
+        }
+        else {
+            type.ptr<type.ptr<type.Node>> pats = alloc<type.ptr<type.Node>>(4)
+            type.number pcap = 4
+            type.number pn = 0
+            type.number pat_ok = 1
+            loop (true) {
+                type.ptr<type.Node> p = parse_pattern()
+                when (p == null) {
+                    perr(cur_line(), cur_col(), "match patterns are literals, constants, `null`, and `lo to hi` ranges — followed by `{`.")
+                    sync_stmt()
+                    pat_ok = 0
+                    break
+                }
+                when (pn == pcap) {
+                    type.ptr<type.ptr<type.Node>> np = alloc<type.ptr<type.Node>>(pcap * 2)
+                    loop (i from 0 until pn) {
+                        np[i] = pats[i]
+                    }
+                    type.ptr<type.ptr<type.Node>> old = pats
+                    pats = np
+                    pcap = pcap * 2
+                    release(old)
+                }
+                pats[pn] = p
+                pn = pn + 1
+                when (is_at(toks.K_COMMA)) {
+                    advance()
+                    skip_nl()
+                    continue
+                }
+                break
+            }
+            arm.args = pats
+            arm.nargs = pn
+            when (pat_ok == 1) {
+                # optional guard: `pattern when (cond) { ... }` — the guard
+                # runs only when the pattern matched (spec §10.1)
+                when (is_at(toks.K_WHEN)) {
+                    advance()
+                    when (expect(toks.K_LPAREN) == false) {
+                        sync_stmt()
+                    }
+                    else {
+                        arm.a = parse_expr()
+                        when (arm.a == null) {
+                            sync_stmt()
+                        }
+                        else {
+                            when (expect(toks.K_RPAREN) == false) {
+                                sync_stmt()
+                            }
+                        }
+                    }
+                }
+                parse_stmt_list(arm)
+            }
+        }
+        when (an == acap) {
+            type.ptr<type.ptr<type.Node>> na = alloc<type.ptr<type.Node>>(acap * 2)
+            loop (i from 0 until an) {
+                na[i] = arms[i]
+            }
+            type.ptr<type.ptr<type.Node>> old = arms
+            arms = na
+            acap = acap * 2
+            release(old)
+        }
+        arms[an] = arm
+        an = an + 1
+    }
+    n.body = arms
+    n.nbody = an
+    return true
 }
 
 # `loop (...) { }` — counted or conditional (spec §10)

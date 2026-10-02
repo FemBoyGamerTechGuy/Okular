@@ -1,0 +1,9 @@
+type.text=1
+function.f(number.n) -> number {
+    when (n) {
+        1 { return 10 }
+        2 { return 20 }
+    }
+}
+write(f(1))
+print

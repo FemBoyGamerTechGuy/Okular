@@ -1,0 +1,27 @@
+type.text=1
+
+# no arm matches and there is no else: the whole match falls through
+type.number n = 50
+type.text got = "before"
+when (n) {
+    1 to 10 { got = "small" }
+    20 { got = "twenty" }
+}
+write(got)
+print
+
+# negative literals and negative ranges
+type.number m = -5
+when (m) {
+    -10 to -1 { write("negative") print }
+    0 { write("zero") print }
+    1 to 10 { write("positive") print }
+}
+
+# decimal subjects and decimal patterns
+type.decimal d = 2.5
+when (d) {
+    1.5 { write("one point five") print }
+    2.5 { write("two point five") print }
+    else { write("other") print }
+}

@@ -3,7 +3,7 @@
 A simple, fast programming language designed for building large
 applications with minimal code.
 
-**Status:** Okular 0.14 — milestones M5, M6, and M7 are **done**:
+**Status:** Okular 0.15 — milestones M5, M6, and M7 are **done**:
 **the compiler is written in Okular and compiles itself.** One native
 executable (`selfhost/compiler`, ~14k lines of Okular) contains the
 complete pipeline — tokenizer, parser, semantic analysis, IR with
@@ -22,8 +22,9 @@ pointers with manual memory (`&x`, `*p`, `alloc<T>(n)` /
 arithmetic), records with predictable layout, unions with
 type-directed literals, the full conversion builtin set, **bitwise
 operations** with range-checked shifts, **short-circuit `and`/`or`**,
-and the raw syscall floor (`sys.*` — write/read/open/close/size/mmap/
-exit/chmod/mkdir/getdents) that the runtime itself rides on.
+**match-style `when`** (ranges, guards, `else`, exhaustiveness — spec
+§10.1), and the raw syscall floor (`sys.*` — write/read/open/close/size/
+mmap/exit/chmod/mkdir/getdents) that the runtime itself rides on.
 
 ```ok
 type.text=1
@@ -47,6 +48,13 @@ when (flags & 0x8000_0000 == 0x8000_0000) {
 }
 write(1 << 20)
 print
+
+# match-style when: one keyword, two readings (0.15)
+when (scores[2]) {
+    90 to 100 { write("grade A") print }
+    0 to 89   { write("grade B") print }
+    else      { write("impossible") print }
+}
 ```
 
 Okular is a natively compiled, general-purpose systems language:

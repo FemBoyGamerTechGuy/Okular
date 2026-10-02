@@ -105,6 +105,43 @@ loop (lives > 0) { ... }          # condition loop
 `break` and `continue` work as usual. Loop bounds evaluate once, before
 the first iteration.
 
+## Match-style `when` (0.15)
+
+The same `when` keyword also reads a **value** instead of testing a
+condition — the body's first tokens decide the reading:
+
+```ok
+when (score) {
+    90 to 100 { write("A") print }     # inclusive range, like loop's `to`
+    80 to 89  { write("B") print }
+    75, 76    { write("C") print }     # several patterns share one body
+    else      { write("F") print }     # wildcard; must be the last arm
+}
+```
+
+* Patterns are literals, constants, and `null` — never variables
+  (`when (x == y)` stays the conditional's job for comparing two values).
+* `lo to hi` ranges match numbers, inclusively; `text`, `bool`, and
+  pointers take equality patterns (`"yes" { ... }`, `true { ... }`,
+  `null { ... }`).
+* A **guard** runs only after the pattern matched:
+
+  ```ok
+  when (n) {
+      1 to 100 when (n % 2 == 0) { write("even") print }
+      1 to 100                   { write("odd")  print }
+      else                       { write("out")  print }
+  }
+  ```
+
+* The subject is evaluated exactly once; arms are tried top to bottom
+  and the first match wins; no match and no `else` falls through.
+* An exhaustive match (an `else` arm, or `true`+`false` for a `bool`
+  subject) satisfies the function return analysis like a full
+  `when`/`else` chain.
+* Text compares for equality only: `"a" < "z"` is a compile error, not a
+  silent false. See `specs/spec-v0.15.md` §10.1.
+
 ## Output
 
 ```ok
@@ -387,11 +424,10 @@ declaration's type from its initializer (locals, globals, column
 members); literals and `null` cannot drive inference, and params/returns/
 members stay explicit. See `specs/spec-v0.12.md` §8.1.
 
-## What 0.11 does not have (yet)
+## What 0.15 does not have (yet)
 
-Dynamic-length arrays, FFI, threads, match expressions, aliases, and
-visibility modifiers are all
-**designed** (see `specs/spec-v0.12.md` §20 and
-`docs/roadmap.md`) and **not implemented**. The same goes for `f32` (a true
-32-bit float). The compiler says so plainly
+Dynamic-length arrays, FFI, threads, aliases, struct-pattern matching
+(destructuring), and visibility modifiers are all **designed** (see
+`specs/spec-v0.15.md` §20 and `docs/roadmap.md`) and **not implemented**.
+The same goes for `f32` (a true 32-bit float). The compiler says so plainly
 when you use a reserved construct — it never pretends.

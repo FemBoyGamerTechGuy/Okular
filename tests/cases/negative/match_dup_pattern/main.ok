@@ -1,0 +1,8 @@
+type.text=1
+type.number x = 5
+when (x) {
+    3 { write("three") print }
+    1 to 5 { write("range") print }
+    3 { write("three again") print }
+    else { write("other") print }
+}

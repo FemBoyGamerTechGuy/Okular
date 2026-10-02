@@ -1,0 +1,2 @@
+cannot match on `Point`
+match compares scalars, `text`, and pointers

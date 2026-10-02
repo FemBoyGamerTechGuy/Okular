@@ -1,0 +1,62 @@
+type.text=1
+
+const.PASS = 50
+
+function.grade(number.score) -> text {
+    when (score) {
+        90 to 100 { return "A" }
+        80 to 89  { return "B" }
+        70 to 79  { return "C" }
+        PASS to 69 { return "D" }
+        else      { return "F" }
+    }
+}
+
+function.describe(text.word) -> text {
+    when (word) {
+        "yes"   { return "affirmative" }
+        "no"    { return "negative" }
+        "maybe" { return "uncertain" }
+        else    { return "unknown" }
+    }
+}
+
+# a guard runs only after its pattern matched
+function.evenclass(number.n) -> text {
+    when (n) {
+        0        { return "zero" }
+        1 to 99 when (n % 2 == 0) { return "small even" }
+        1 to 99  { return "small odd" }
+        else     { return "large" }
+    }
+}
+
+loop (s from 45 to 95) {
+    write(s)
+    write(" ")
+    write(grade(s))
+    print
+}
+
+write(describe("yes"))
+write(" ")
+write(describe("maybe"))
+write(" ")
+write(describe("banana"))
+print
+
+write(evenclass(0))
+write(" ")
+write(evenclass(42))
+write(" ")
+write(evenclass(43))
+write(" ")
+write(evenclass(1000))
+print
+
+# bool subjects are exhaustive with both arms
+type.bool ready = false
+when (ready) {
+    true  { write("ready") print }
+    false { write("not ready") print }
+}

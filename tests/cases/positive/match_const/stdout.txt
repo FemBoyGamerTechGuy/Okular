@@ -1,0 +1,3 @@
+high
+outside
+self

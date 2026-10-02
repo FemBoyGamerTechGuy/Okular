@@ -1,0 +1,1 @@
+promises a `number` result, but some paths fall off the end

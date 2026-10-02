@@ -1,0 +1,24 @@
+type.text=1
+
+type.bool flag = true
+when (flag) {
+    true { write("T") print }
+    false { write("F") print }
+}
+
+flag = false
+when (flag) {
+    true { write("T") print }
+    false { write("F") print }
+}
+
+# an exhaustive bool match with returns satisfies the return analysis
+function.sign(bool.b) -> text {
+    when (b) {
+        true { return "yes" }
+        false { return "no" }
+    }
+}
+write(sign(true))
+write(sign(false))
+print

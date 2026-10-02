@@ -1,0 +1,15 @@
+type.text=1
+
+type.ptr<type.number> p = null
+when (p) {
+    null { write("null") print }
+    else { write("live") print }
+}
+
+p = alloc<type.number>(1)
+p[0] = 5
+when (p) {
+    null { write("null") print }
+    else { write("live ") write(p[0]) print }
+}
+release(p)

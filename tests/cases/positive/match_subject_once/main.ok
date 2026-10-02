@@ -1,0 +1,20 @@
+type.text=1
+
+type.number calls = 0
+
+function.next(number.seed) -> number {
+    calls = calls + 1
+    return seed
+}
+
+# the subject is evaluated exactly once, no matter how many arms exist
+when (next(7)) {
+    1 { write("one") print }
+    2 { write("two") print }
+    3 to 6 { write("small") print }
+    7 { write("seven") print }
+    else { write("other") print }
+}
+write("evaluations: ")
+write(calls)
+print

@@ -1,0 +1,6 @@
+type.text=1
+type.text s = "abc"
+when (s) {
+    "a" to "z" { write("range") print }
+    else { write("other") print }
+}

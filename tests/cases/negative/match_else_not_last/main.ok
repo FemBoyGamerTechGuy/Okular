@@ -1,0 +1,6 @@
+type.text=1
+type.number x = 5
+when (x) {
+    else { write("other") print }
+    5 { write("five") print }
+}

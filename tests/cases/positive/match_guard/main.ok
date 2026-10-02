@@ -1,0 +1,28 @@
+type.text=1
+
+type.number score = 87
+type.number extra = 1
+
+# the guard runs only after the pattern matched — arms tried in order
+when (score) {
+    80 to 100 when (extra == 1) { write("high with bonus") print }
+    80 to 100 { write("high") print }
+    else { write("low") print }
+}
+
+extra = 0
+when (score) {
+    80 to 100 when (extra == 1) { write("high with bonus") print }
+    80 to 100 { write("high") print }
+    else { write("low") print }
+}
+
+# guard may read the subject's source variable and call functions
+function.is_even(number.n) -> bool {
+    return n % 2 == 0
+}
+type.number n = 42
+when (n) {
+    1 to 100 when (is_even(n)) { write("even and in range") print }
+    else { write("something else") print }
+}

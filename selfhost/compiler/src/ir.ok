@@ -1174,6 +1174,40 @@ function.build_stmt(type.ptr<type.Node>.s) -> number {
         }
         return 0
     }
+    when (s.kind == parser.N_MATCH) {
+        # when (subject) { arms } — the subject is evaluated ONCE into the
+        # hidden slot (sema's s.sym); every arm's synthesized condition
+        # (arm.c: patterns `or`ed, guard `and`ed — short-circuit) decides,
+        # first match wins, no match falls through (spec §10.1)
+        type.ptr<type.Symbol> subj = s.sym
+        when (subj == null) {
+            return 0
+        }
+        build_expr(s.a)
+        build_store(subj)
+        type.number l_end = new_label()
+        loop (i from 0 until s.nbody) {
+            type.ptr<type.Node> arm = s.body[i]
+            type.number l_next = new_label()
+            when (arm.c != null) {
+                build_expr(arm.c)
+                type.ptr<type.IrInst> jf = mkinst(I_JMPF, arm.line, arm.col)
+                jf.label = l_next
+                emit(jf)
+            }
+            build_stmt_list(arm.body, arm.nbody)
+            type.ptr<type.IrInst> j = mkinst(I_JMP, arm.line, arm.col)
+            j.label = l_end
+            emit(j)
+            type.ptr<type.IrInst> ln = mkinst(I_LABEL, 0, 0)
+            ln.label = l_next
+            emit(ln)
+        }
+        type.ptr<type.IrInst> lend = mkinst(I_LABEL, 0, 0)
+        lend.label = l_end
+        emit(lend)
+        return 0
+    }
     when (s.kind == parser.N_LOOP_COUNT) {
         # loop (i from A to B) — inclusive; `until` exclusive (spec §10)
         type.ptr<type.Symbol> ivar = s.sym

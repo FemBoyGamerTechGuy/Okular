@@ -1,0 +1,7 @@
+type.text=1
+type.number x = 5
+type.number y = 3
+when (x) {
+    y { write("var") print }
+    else { write("other") print }
+}

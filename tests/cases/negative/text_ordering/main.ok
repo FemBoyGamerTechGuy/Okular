@@ -1,0 +1,7 @@
+type.text=1
+type.text a = "apple"
+type.text b = "banana"
+when (a < b) {
+    write("ordered")
+    print
+}

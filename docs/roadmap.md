@@ -5,6 +5,17 @@ before the test suite proves it.**
 
 ## Where we are
 
+**Okular 0.15 — match-style `when`.** In addition to everything below,
+0.15 gives the `when` keyword a second reading: `when (subject) {
+pattern { ... } ... else { ... } }` — equality patterns for integers,
+decimals, `text`, `bool`, and pointers (`null`), inclusive `lo to hi`
+ranges, comma-separated alternatives, constant patterns, arm guards
+(`pattern when (guard)`) that run only after the pattern matched,
+subject-evaluated-once semantics, first-match-wins, and exhaustiveness
+that satisfies the return analysis (17 new test cases). The same release
+fixes a real correctness defect: text ordering (`"a" < "z"`) was silently
+accepted and compiled as equality — it is now a precise compile error.
+
 **Okular 0.13 — milestone M4 (the parser runs in Okular).** In addition to
 everything below, 0.13 makes **`and`/`or` short-circuit** (§9 — guards like
 `p != null and *p == x` no longer trap), and **the parser itself is now
@@ -80,8 +91,12 @@ status table.
    `number.to_text`, `uint64.to_text`, `decimal.to_text`, `bool.to_text`,
    `text.to_number`, `text.to_decimal` — constant folding included,
    strict parsing with loud failures (`specs/spec-v0.11.md` §4.4).
-8. **Match-style selection** on the `when` foundation (`else when` chains,
-   value matching) — extends, never breaks, existing syntax.
+8. ~~**Match-style selection**~~ **done in 0.15**: `when (subject) {
+pattern { ... } ... }` — literals, constants, `null`, inclusive `lo to hi`
+ranges, comma-separated alternatives, guards, exhaustiveness for `bool`
+subjects, duplicate/empty-range/misplaced-`else` diagnostics
+(`specs/spec-v0.15.md` §10.1). Struct patterns and destructuring remain
+designed, not implemented.
 9. **`f32`** — true 32-bit float (needs its own ABI/register path).
 10. ~~**Constants** (`const`), **type inference** (`type.auto`)~~ **done in 0.8**: `const.name = value` folds and inlines at compile time; `type.auto x = init` infers from the initializer (`specs/spec-v0.11.md` §8.1). ~~Const array lengths~~ **done in 0.14**: `type.array<T, NAME>` with module-visible constant names and dotted module paths (`specs/spec-v0.14.md` §8.4).
 11. **Standard library beginnings** — `io`, `text`, `math`, `memory` modules,

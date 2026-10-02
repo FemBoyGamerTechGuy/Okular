@@ -1,0 +1,7 @@
+type.text=1
+struct.Point = { type.number x  type.number y }.end
+type.Point p = {3, 4}
+when (p) {
+    1 { write("one") print }
+    else { write("other") print }
+}

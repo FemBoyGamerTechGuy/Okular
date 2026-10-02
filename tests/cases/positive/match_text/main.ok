@@ -1,0 +1,25 @@
+type.text=1
+
+function.describe(text.word) -> text {
+    when (word) {
+        "yes" { return "affirmative" }
+        "no" { return "negative" }
+        "" { return "empty" }
+        else { return "other" }
+    }
+}
+
+write(describe("yes"))
+write(" ")
+write(describe("no"))
+write(" ")
+write(describe(""))
+write(" ")
+write(describe("banana"))
+print
+
+type.text name = "okular"
+when (name) {
+    "okular" { write("self") print }
+    else { write("foreign") print }
+}

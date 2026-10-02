@@ -1,0 +1,24 @@
+type.text=1
+
+const.LOW = 3
+const.HIGH = 7
+const.NAME = "okular"
+
+type.number x = 7
+when (x) {
+    LOW { write("low") print }
+    HIGH { write("high") print }
+    else { write("other") print }
+}
+
+x = 2
+when (x) {
+    LOW to HIGH { write("between") print }
+    else { write("outside") print }
+}
+
+type.text s = "okular"
+when (s) {
+    NAME { write("self") print }
+    else { write("foreign") print }
+}

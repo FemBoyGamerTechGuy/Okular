@@ -84,6 +84,10 @@ function.mod_downgrade(type.ptr<type.Mod>.m) -> number {
 
 type.number warn_enabled = 0
 
+# hidden match-subject slots get `__ok_match_<n>` names (the `__ok_` prefix
+# is reserved for compiler internals, spec §1.4); one counter for the file
+type.number match_counter = 0
+
 function.set_warn(number.v) -> number {
     warn_enabled = v
     return 0
@@ -2679,6 +2683,9 @@ function.sym_kind_name(number.kind) -> text {
     else when (kind == SYM_TYPE) {
         return "type"
     }
+    else when (kind == SYM_VAR) {
+        return "variable"
+    }
     return "constant"
 }
 
@@ -3434,6 +3441,14 @@ function.check_bin(type.ptr<type.Node>.e) -> type.ptr<type.Ty> {
         return T_BOOL
     }
     when (e.op == parser.OP_LT or e.op == parser.OP_LE or e.op == parser.OP_GT or e.op == parser.OP_GE) {
+        when (lt == T_TEXT or rt == T_TEXT) {
+            # 0.15 correctness fix: text ordering was silently accepted and
+            # compiled as equality — it is now a precise error (spec §4.5)
+            serr_node(e, "text is compared for equality only (`==`, `!=`) — `" + binop_name(e.op) + "` is not defined for text.")
+            note(e, "compare lengths or bytes explicitly (`text.length`, `text.byte_at`), or use a match arm per value.")
+            e.rtype = T_BOOL
+            return T_BOOL
+        }
         when (ct != null and ct != T_DECIMAL) {
             when (lt != rt and warn_enabled == 1 and e.a.kind != parser.N_INT and e.b.kind != parser.N_INT) {
                 swarn_node(e, "comparison mixes `" + ty_name(lt) + "` and `" + ty_name(rt) + "` — the narrower operand widens.")
@@ -3753,8 +3768,23 @@ function.list_exits(type.ptr<type.ptr<type.Node>>.body, number.n) -> bool {
         when (s.kind == parser.N_WHEN and s.nbody_else > 0 and list_exits(s.body, s.nbody) and list_exits(s.body_else, s.nbody_else)) {
             return true
         }
+        when (s.kind == parser.N_MATCH and s.bval == 1 and match_arms_exit(s)) {
+            return true
+        }
     }
     return false
+}
+
+# an exhaustive match (else arm present, or `bool` with both arms) exits
+# when every arm body exits
+function.match_arms_exit(type.ptr<type.Node>.m) -> bool {
+    loop (i from 0 until m.nbody) {
+        type.ptr<type.Node> arm = m.body[i]
+        when (list_exits(arm.body, arm.nbody) == false) {
+            return false
+        }
+    }
+    return true
 }
 
 function.list_returns(type.ptr<type.ptr<type.Node>>.body, number.n) -> bool {
@@ -3766,8 +3796,21 @@ function.list_returns(type.ptr<type.ptr<type.Node>>.body, number.n) -> bool {
         when (s.kind == parser.N_WHEN and s.nbody_else > 0 and list_returns(s.body, s.nbody) and list_returns(s.body_else, s.nbody_else)) {
             return true
         }
+        when (s.kind == parser.N_MATCH and s.bval == 1 and match_arms_return(s)) {
+            return true
+        }
     }
     return false
+}
+
+function.match_arms_return(type.ptr<type.Node>.m) -> bool {
+    loop (i from 0 until m.nbody) {
+        type.ptr<type.Node> arm = m.body[i]
+        when (list_returns(arm.body, arm.nbody) == false) {
+            return false
+        }
+    }
+    return true
 }
 
 # `type.auto name = init` (0.8, spec §8.1): infer + patch in place
@@ -3797,6 +3840,349 @@ function.infer_auto_type(type.ptr<type.Node>.s) -> number {
     when (s.sym != null) {
         s.sym.ty = s.otype
     }
+    return 0
+}
+
+# ---- match-style `when` (0.15, spec §10.1) ----
+#
+# The subject is evaluated ONCE into a hidden local (`__ok_match_<n>`), and
+# every arm lowers to an ordinary checked boolean expression synthesized
+# here: equality (`hidden == pattern`), ranges (`lo <= hidden and hidden
+# <= hi`), multi-patterns (`or`), and guards (`pattern and guard`) — so
+# the whole existing typing/lattice/short-circuit/backend machinery applies
+# unchanged. Arm conditions land on arm.c for the IR builder.
+
+# coverage-analysis state (per match; keys and integer ranges)
+type.ptr<type.text> m_keys = null
+type.number m_nkeys = 0
+type.number m_kcap = 0
+type.ptr<type.number> m_rlo = null
+type.ptr<type.number> m_rhi = null
+type.number m_nranges = 0
+type.number m_rcap = 0
+
+function.match_key_seen(text.key) -> number {
+    loop (i from 0 until m_nkeys) {
+        when (m_keys[i] == key) {
+            return 1
+        }
+    }
+    return 0
+}
+
+function.match_push_key(text.key) -> number {
+    when (m_nkeys == m_kcap) {
+        type.number newcap = 16
+        when (m_kcap > 0) {
+            newcap = m_kcap * 2
+        }
+        type.ptr<type.text> nk = alloc<type.text>(newcap)
+        loop (i from 0 until m_nkeys) {
+            nk[i] = m_keys[i]
+        }
+        type.ptr<type.text> old = m_keys
+        m_keys = nk
+        m_kcap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    m_keys[m_nkeys] = key
+    m_nkeys = m_nkeys + 1
+    return 0
+}
+
+function.match_range_covers(number.lo, number.hi, number.v) -> bool {
+    when (v >= lo and v <= hi) {
+        return true
+    }
+    return false
+}
+
+function.match_push_range(number.lo, number.hi) -> number {
+    when (m_nranges == m_rcap) {
+        type.number newcap = 16
+        when (m_rcap > 0) {
+            newcap = m_rcap * 2
+        }
+        type.ptr<type.number> nl = alloc<type.number>(newcap)
+        type.ptr<type.number> nh = alloc<type.number>(newcap)
+        loop (i from 0 until m_nranges) {
+            nl[i] = m_rlo[i]
+            nh[i] = m_rhi[i]
+        }
+        type.ptr<type.number> ol = m_rlo
+        type.ptr<type.number> oh = m_rhi
+        m_rlo = nl
+        m_rhi = nh
+        m_rcap = newcap
+        when (ol != null) {
+            release(ol)
+            release(oh)
+        }
+    }
+    m_rlo[m_nranges] = lo
+    m_rhi[m_nranges] = hi
+    m_nranges = m_nranges + 1
+    return 0
+}
+
+function.match_range_seen_contains(number.lo, number.hi) -> bool {
+    loop (i from 0 until m_nranges) {
+        when (lo >= m_rlo[i] and hi <= m_rhi[i]) {
+            return true
+        }
+    }
+    return false
+}
+
+# a load of the hidden subject slot — an ordinary N_PATH that resolves
+# against the match's scope, so every existing checker applies to it
+function.match_hidden_load(type.ptr<type.Symbol>.hidden) -> type.ptr<type.Node> {
+    type.ptr<type.Node> ld = parser.new_node(parser.N_PATH, hidden.line, hidden.col)
+    type.ptr<type.text> parts = alloc<type.text>(1)
+    parts[0] = hidden.name
+    ld.parts = parts
+    ld.nparts = 1
+    ld.name = hidden.name
+    return ld
+}
+
+# one pattern operand must be a literal, a constant, or `null`
+function.match_validate_operand(type.ptr<type.Node>.p) -> number {
+    when (p == null) {
+        return 0
+    }
+    when (p.kind == parser.N_INT or p.kind == parser.N_DEC or p.kind == parser.N_TEXT or p.kind == parser.N_BOOL or p.kind == parser.N_NULL) {
+        return 1
+    }
+    when (p.kind == parser.N_UN and p.uop == parser.UN_NEG) {
+        when (p.a != null and (p.a.kind == parser.N_INT or p.a.kind == parser.N_DEC)) {
+            return 1
+        }
+        return 0
+    }
+    when (p.kind == parser.N_PATH) {
+        type.ptr<type.Symbol> s = resolve_path(p, 0)
+        when (s == null) {
+            return 0
+        }
+        when (s.kind == SYM_CONST) {
+            return 1
+        }
+        serr_node(p, "pattern `" + path_join(p.parts, p.nparts) + "` is a " + sym_kind_name(s.kind) + ", not a constant — patterns match literals, constants, and `null`.")
+        note(p, "to compare against a variable, use a conditional `when (x == name)` (spec §10).")
+        return 0
+    }
+    return 0
+}
+
+# `hidden == pattern` — one equality alternative
+function.match_eq_cond(type.ptr<type.Symbol>.hidden, type.ptr<type.Node>.pat) -> type.ptr<type.Node> {
+    when (match_validate_operand(pat) == 0) {
+        when (pat.kind != parser.N_PATH) {
+            serr_node(pat, "match patterns are literals, constants, `null`, and `lo to hi` ranges — not computed expressions.")
+            note(pat, "match on a computed value with a conditional `when (cond)` instead (spec §10).")
+        }
+        return null
+    }
+    type.ptr<type.Node> eq = parser.mkbin(match_hidden_load(hidden), parser.OP_EQ, pat)
+    check_bin(eq)
+    return eq
+}
+
+# `lo <= hidden <= hi` — one range alternative (inclusive, like `loop`'s `to`)
+function.match_range_cond(type.ptr<type.Symbol>.hidden, type.ptr<type.Node>.r) -> type.ptr<type.Node> {
+    when (hidden.ty == T_TEXT or hidden.ty == T_BOOL or hidden.ty == T_NULL or is_ptr(hidden.ty)) {
+        serr_node(r, "ranges match numbers — `" + ty_name(hidden.ty) + "` cannot range-match; use equality patterns.")
+        note(r, "list the values as separate patterns: `\"a\", \"b\" { ... }` (spec §10.1).")
+        return null
+    }
+    when (match_validate_operand(r.a) == 0 or match_validate_operand(r.b) == 0) {
+        serr_node(r, "range bounds must be literals or constants — `lo to hi`.")
+        return null
+    }
+    type.ptr<type.Node> c1 = parser.mkbin(r.a, parser.OP_LE, match_hidden_load(hidden))
+    type.ptr<type.Node> c2 = parser.mkbin(match_hidden_load(hidden), parser.OP_LE, r.b)
+    check_bin(c1)
+    check_bin(c2)
+    type.ptr<type.Node> both = parser.mkbin(c1, parser.OP_AND, c2)
+    check_bin(both)
+    return both
+}
+
+# duplicate / unreachable-pattern bookkeeping for one alternative
+function.match_cover_pattern(type.ptr<type.Node>.alt) -> number {
+    when (alt.kind == parser.N_MATCHRANGE) {
+        type.ptr<type.ConstVal> lo = const_eval(alt.a)
+        type.ptr<type.ConstVal> hi = const_eval(alt.b)
+        when (lo == null or hi == null or lo.valid == 0 or hi.valid == 0) {
+            return 0
+        }
+        when ((lo.ty == T_DECIMAL and hi.ty != T_DECIMAL) or (lo.ty != T_DECIMAL and hi.ty == T_DECIMAL)) {
+            return 0
+        }
+        when (lo.ty == T_DECIMAL) {
+            return 0
+        }
+        when (lo.ty != T_NUMBER and is_integer(lo.ty) == false or hi.ty != T_NUMBER and is_integer(hi.ty) == false) {
+            return 0
+        }
+        when (lo.i > hi.i) {
+            serr_node(alt, "the range `" + number.to_text(lo.i) + " to " + number.to_text(hi.i) + "` is empty — no value can match it.")
+            return 0
+        }
+        when (match_range_seen_contains(lo.i, hi.i)) {
+            swarn_node(alt, "this range is fully covered by an earlier arm — it can never run.")
+        }
+        match_push_range(lo.i, hi.i)
+        return 0
+    }
+    type.ptr<type.ConstVal> cv = const_eval(alt)
+    when (cv == null or cv.valid == 0) {
+        return 0
+    }
+    type.text key = ""
+    when (cv.ty == T_DECIMAL) {
+        key = "d:" + decimal.to_text(cv.d)
+    }
+    else when (cv.ty == T_TEXT) {
+        key = "t:" + cv.t
+    }
+    else when (cv.ty == T_BOOL) {
+        key = "b:" + number.to_text(cv.b)
+    }
+    else when (cv.ty == T_NULL) {
+        key = "n"
+    }
+    else {
+        key = "i:" + number.to_text(cv.i)
+    }
+    when (match_key_seen(key) == 1) {
+        serr_node(alt, "duplicate pattern — an earlier arm already matches this value.")
+        note(alt, "arms are tried in order; remove the duplicate pattern.")
+        return 0
+    }
+    loop (i from 0 until m_nranges) {
+        when (match_range_covers(m_rlo[i], m_rhi[i], cv.i)) {
+            swarn_node(alt, "this pattern is covered by an earlier range arm — it can never run.")
+        }
+    }
+    match_push_key(key)
+    return 0
+}
+
+# `when (subject) { arms }` — match-style selection (0.15, spec §10.1)
+#
+# The subject is evaluated once into a hidden local; each arm's patterns,
+# guard, and body are checked; the arm's full condition (patterns `or`ed,
+# guard `and`ed — short-circuit) is synthesized and stashed on arm.c.
+# bval=1 marks an exhaustive match (an `else` arm, or `bool` with both
+# `true` and `false` arms) for the return analysis.
+function.check_match(type.ptr<type.Node>.s) -> number {
+    type.ptr<type.Ty> st = check_expr(s.a)
+    when (st == null or st == T_VOID or st == T_AUTO) {
+        st = T_NUMBER
+    }
+    when (st.form == F_ARRAY or is_record(st)) {
+        serr_node(s.a, "cannot match on `" + ty_name(st) + "` — match compares scalars, `text`, and pointers.")
+        note(s.a, "match a discriminator value, or compare records field by field in a conditional `when` (spec §10).")
+        st = T_NUMBER
+    }
+
+    # the match gets its own scope; the hidden subject slot lives there
+    type.ptr<type.Scope> sc = scope_new(cur_scope)
+    cur_scope = sc
+    type.ptr<type.Symbol> hidden = scope_insert(sc, "__ok_match_" + number.to_text(match_counter), SYM_VAR, s.line, s.col)
+    match_counter = match_counter + 1
+    hidden.ty = st
+    hidden.used = 1
+    s.sym = hidden
+
+    # per-match coverage state
+    m_nkeys = 0
+    m_nranges = 0
+
+    type.number exhaustive = 0
+    type.number seen_true = 0
+    type.number seen_false = 0
+
+    loop (i from 0 until s.nbody) {
+        type.ptr<type.Node> arm = s.body[i]
+        when (arm.bval == 1) {
+            exhaustive = 1
+            when (i + 1 != s.nbody) {
+                serr_node(arm, "the `else` arm must be the last arm — later arms can never run.")
+            }
+        }
+        else {
+            type.ptr<type.Node> cond = null
+            loop (k from 0 until arm.nargs) {
+                type.ptr<type.Node> alt = arm.args[k]
+                type.ptr<type.Node> term = null
+                when (alt.kind == parser.N_MATCHRANGE) {
+                    term = match_range_cond(hidden, alt)
+                }
+                else {
+                    term = match_eq_cond(hidden, alt)
+                }
+                when (term != null) {
+                    when (cond == null) {
+                        cond = term
+                    }
+                    else {
+                        type.ptr<type.Node> ornode = parser.mkbin(cond, parser.OP_OR, term)
+                        check_bin(ornode)
+                        cond = ornode
+                    }
+                }
+                match_cover_pattern(alt)
+                when (alt.kind == parser.N_BOOL) {
+                    when (alt.bval == 1) {
+                        seen_true = 1
+                    }
+                    else {
+                        seen_false = 1
+                    }
+                }
+            }
+            when (arm.a != null) {
+                # guard: runs only after the pattern matched (short-circuit `and`)
+                when (cond != null) {
+                    type.ptr<type.Node> andnode = parser.mkbin(cond, parser.OP_AND, arm.a)
+                    check_bin(andnode)
+                    cond = andnode
+                }
+                else {
+                    type.ptr<type.Ty> gt = check_expr(arm.a)
+                    when (gt != T_BOOL) {
+                        serr_node(arm.a, "the arm guard must be `bool`, but `" + ty_name(gt) + "` was given.")
+                    }
+                }
+            }
+            arm.c = cond
+        }
+        type.ptr<type.Scope> sc2 = scope_new(cur_scope)
+        cur_scope = sc2
+        check_stmt_list(arm.body, arm.nbody)
+        cur_scope = sc2.parent
+    }
+    cur_scope = sc.parent
+
+    # `bool` subjects are exhaustively matched by both literals
+    when (exhaustive == 0 and st == T_BOOL) {
+        when (seen_true == 1 and seen_false == 1) {
+            exhaustive = 1
+        }
+        else {
+            type.text missing = "true"
+            when (seen_true == 1) {
+                missing = "false"
+            }
+            swarn_node(s, "match on `bool` is not exhaustive — add the missing `" + missing + "` arm (or an `else` arm).")
+        }
+    }
+    s.bval = exhaustive
     return 0
 }
 
@@ -4048,6 +4434,9 @@ function.check_stmt(type.ptr<type.Node>.s) -> number {
             cur_scope = sc2.parent
         }
         return 0
+    }
+    when (s.kind == parser.N_MATCH) {
+        return check_match(s)
     }
     when (s.kind == parser.N_LOOP_COUNT) {
         type.ptr<type.Ty> ft = check_expr(s.a)
