@@ -5,6 +5,27 @@ before the test suite proves it.**
 
 ## Where we are
 
+**Okular 0.18 — the language server.** In addition to everything
+below, 0.18 gives Okular editor integration: `okular lsp` speaks
+JSON-RPC 2.0 over stdio — initialize/shutdown/exit lifecycle, full-text
+document sync (didOpen/didChange/didClose), publishDiagnostics (0-based
+lines, UTF-16 code-unit characters, severity mapping, per-file
+attribution including src/ dependencies and standalone files), and
+hover with full signatures from the checker's symbol tables
+(`function greet(name: text) -> text`). Every change recompiles the
+project through the SAME phases a CLI compile runs — the open
+document's buffer virtualized over its file via a generic tokenizer
+source override, so nothing is written to disk — reusing the entire
+frontend with a per-check state reset. The protocol suite (47 checks)
+is adversarial: malformed JSON, lying Content-Length framing, binary
+garbage, wrong parameter shapes, unknown methods — every one degrades
+to a JSON-RPC error or a dropped notification; the server never
+crashes. Recompiles allocate from a rewound scratch region — ~8 KiB of
+residual growth per change, 8 ms per check, hover intact across
+400-change endurance runs — and the runtime's text arena became a
+growable region chain (long-lived processes no longer cliff at
+16 MiB).
+
 **Okular 0.17 — the ARM64 backend.** In addition to everything below,
 0.17 gives Okular a second native target: `okular main.ok --target
 arm64` emits a native linux-aarch64 ELF64 executable from the same

@@ -494,9 +494,57 @@ function.scan_step() -> number {
     return scan_punct(c)
 }
 
+# ---- virtual source override (`okular lsp`, 0.18) ----
+#
+# The LSP server compiles the OPEN DOCUMENT's in-memory text in place of
+# the on-disk file: load() checks the override before touching the file
+# system. A generic mechanism (any path can be virtualized), not an LSP
+# special case.
+type.text vsrc_path = ""
+type.text vsrc_text = ""
+type.number vsrc_on = 0
+
+function.set_override(text.path, text.s) -> number {
+    vsrc_path = path
+    vsrc_text = s
+    vsrc_on = 1
+    return 0
+}
+
+function.clear_override() -> number {
+    vsrc_on = 0
+    vsrc_path = ""
+    vsrc_text = ""
+    return 0
+}
+
+function.override_active() -> number {
+    return vsrc_on
+}
+
+# HARD reset for recompiles (the scratch region was rewound): the token
+# buffer's stale pointer and capacity must be forgotten — the release()
+# of a region pointer is a no-op, and cap must not survive as a stale
+# bound the next scan would trust
+function.reset_recheck() -> number {
+    buf = null
+    cap = 0
+    ntok = 0
+    return 0
+}
+
 # ---- entry: tokenize one file into the buffer; returns the token count ----
 function.load(text.path) -> number {
-    src = fs.read(path)
+    when (vsrc_on == 1 and path == vsrc_path) {
+        return load_text(vsrc_text)
+    }
+    return load_text(fs.read(path))
+}
+
+# tokenize an in-memory source string (same discipline as load; the
+# scanner state is fully reset first)
+function.load_text(text.s) -> number {
+    src = s
     len = text.length(src)
     s_pos = 0
     s_line = 1

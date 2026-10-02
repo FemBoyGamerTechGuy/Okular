@@ -2468,3 +2468,25 @@ function.parse_file() -> type.ptr<type.Node> {
     }
     return file
 }
+
+# ---- LSP support (0.18): recompile reset ----
+#
+# The named-type registry (F_NAMED placeholders, filled in place by
+# sema) must not survive an LSP recompile: a stale filled record from
+# the previous check would answer the next check's forward references
+# with the OLD struct layout. begin() already resets the parse cursor
+# and error list per module.
+function.reset_recheck() -> number {
+    # HARD reset (the scratch region was rewound): stale pointers and
+    # capacities must be forgotten, not just the counts
+    nt_len = 0
+    nt_cap = 0
+    nt_names = null
+    nt_types = null
+    nerr = 0
+    err_cap = 0
+    err_lines = null
+    err_cols = null
+    err_msgs = null
+    return 0
+}

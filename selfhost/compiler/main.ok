@@ -21,6 +21,7 @@ type.text=1
     "arm",
     "elf",
     "fmt",
+    "lsp",
     "rt"
 }.end
 
@@ -217,11 +218,20 @@ function.report_load_error(text.display, text.msg, number.required) -> number {
     # load-time errors carry no position; for optional modules (spec §36)
     # they are warnings and do not fail the build
     when (required == 1) {
-        sys.write(2, display + ": error: " + msg + "\n")
+        when (lsp_mode == 1) {
+            # the LSP server captures them as diagnostics instead of
+            # writing to stderr (which the client never sees)
+            sema.serr_file(display, msg)
+        }
+        else {
+            sys.write(2, display + ": error: " + msg + "\n")
+        }
         load_errors = 1
     }
     else {
-        sys.write(2, display + ": warning: " + msg + "\n")
+        when (lsp_mode == 0) {
+            sys.write(2, display + ": warning: " + msg + "\n")
+        }
     }
     return 0
 }
@@ -548,11 +558,557 @@ function.run_fmt(number.argc) -> number {
     return 0
 }
 
+# ---- the language server mode (`okular lsp`, 0.18) ----
+#
+# A stdio JSON-RPC 2.0 server over the existing frontend. The driver
+# owns the dispatch (it needs this file's project-loading state); the
+# protocol layer (JSON, framing, positions, documents) is src/lsp.ok.
+#
+# Lifecycle: initialize -> (documents, diagnostics, hover) -> shutdown
+# -> exit. Every document change recompiles the project through the
+# SAME phases a CLI compile runs — the open document's text virtualized
+# over its file via toks.set_override, so nothing is ever written to
+# disk and the editor's unsaved buffer is exactly what gets checked.
+#
+# Robustness contract: malformed JSON, bad framing, wrong parameter
+# shapes, unknown methods, pre-initialize requests — each degrades to
+# the matching JSON-RPC error response or a dropped notification; the
+# server never crashes and keeps serving.
+type.number lsp_mode = 0
+
+function.reset_compile_globals() -> number {
+    # HARD reset (the scratch region was rewound before this runs):
+    # stale pointers and capacities must be forgotten
+    uses_reset()
+    n_uses = 0
+    uses_cap = 0
+    uses = null
+    n_libs = 0
+    libs_cap = 0
+    libs = null
+    n_irmods = 0
+    irmods_cap = 0
+    irmods = null
+    proj_root = "."
+    load_errors = 0
+    return 0
+}
+
+# the JSON id text of a message ("null" when absent) + presence
+function.lsp_id_text(type.ptr<type.JV>.msg) -> text {
+    type.ptr<type.JV> idv = lsp.jv_get(msg, "id")
+    when (idv == null) {
+        return "null"
+    }
+    when (idv.kind != lsp.J_NUM and idv.kind != lsp.J_STR) {
+        # JSON-RPC ids must be numbers or strings
+        return ""
+    }
+    type.ptr<type.SB> b = lsp.sb_new()
+    lsp.jv_write(b, idv)
+    return lsp.sb_text(b)
+}
+
+# one recompile of the project around the open document `d`
+#
+# Memory discipline: every allocation made below comes from the
+# runtime's scratch region (rt.check_begin rewinds it HERE, at the
+# start of the next check — the previous check's ASTs, scopes, and
+# sources become reusable bytes). Everything the outside world still
+# needs after a check survives by construction: diagnostics texts and
+# hover type names are arena/rodata views read between checks (the
+# region is still mapped then), the document table and JSON I/O live
+# in the ordinary heap/arena (allocated outside check mode), and the
+# hover token buffer is reloaded below with the check mode OFF.
+function.lsp_recheck(type.ptr<type.Doc>.d) -> number {
+    sys.write(2, "DBG A\n")
+    rt.check_begin()
+    sys.write(2, "DBG B\n")
+    reset_compile_globals()
+    sema.reset_recheck()
+    parser.reset_recheck()
+    toks.reset_recheck()
+    toks.clear_override()
+    sys.write(2, "DBG C\n")
+
+    when (basename(d.path) == "main.ok") {
+        toks.set_override(d.path, d.text)
+        load_project(d.path)
+        resolve_libraries(env.arg(0))
+        inject_runtime(env.arg(0))
+        scan_optional_sources()
+    }
+    else {
+        # a plain .ok file: checked standalone as its own module (no
+        # project context — honest single-file diagnostics)
+        toks.set_override(d.path, d.text)
+        load_module("lspsingle", d.path, basename(d.path), 1)
+    }
+    sys.write(2, "DBG D\n")
+    parse_all()
+    sys.write(2, "DBG E\n")
+    sema.sema_run()
+    sys.write(2, "DBG F\n")
+    rt.check_end()
+    # keep the document's own tokens resident for hover lookups —
+    # loaded from the ORDINARY heap now that the check mode is off
+    toks.reset_recheck()
+    toks.load_text(d.text)
+    return 0
+}
+
+# the URI a module display name maps to (diagnostics attribution):
+# the open document itself, a project file, or "" when unresolvable
+function.lsp_uri_for(text.display, type.ptr<type.Doc>.d) -> text {
+    when (d.path != "" and display == "main.ok") {
+        return d.uri
+    }
+    when (d.path != "" and display == basename(d.path)) {
+        # the standalone single-file check
+        return d.uri
+    }
+    # a src/ dependency or library: resolve under the project root
+    type.text p = path_join(proj_root, display)
+    when (fs.exists(p) == true) {
+        return "file://" + p
+    }
+    when (fs.exists(display) == true) {
+        return "file://" + display
+    }
+    return ""
+}
+
+function.lsp_publish_diagnostics(type.ptr<type.Doc>.d) -> number {
+    type.number n = sema.diag_count()
+    # collect the distinct URIs that carry diagnostics
+    type.ptr<type.ptr<type.SB>> outs = null
+    type.ptr<type.text> uris = null
+    type.number nuri = 0
+    when (n > 0) {
+        outs = alloc<type.ptr<type.SB>>(n + 1)
+        uris = alloc<type.text>(n + 1)
+    }
+    loop (i from 0 until n) {
+        type.text display = sema.diag_file_at(i)
+        type.text uri = lsp_uri_for(display, d)
+        # the text that owns the positions
+        type.text dtxt = ""
+        when (uri == "" or uri == d.uri) {
+            # unresolvable attributions (the internal rt module, a
+            # library display name) surface on the open document —
+            # a diagnostic is never silently dropped
+            uri = d.uri
+            dtxt = d.text
+        }
+        else {
+            type.text p = lsp.uri_to_path(uri)
+            dtxt = fs.read(p)
+        }
+        # find or create the URI bucket
+        type.number bucket =-1
+        loop (k from 0 until nuri) {
+            when (uris[k] == uri) {
+                bucket = k
+            }
+        }
+        when (bucket < 0) {
+            uris[nuri] = uri
+            outs[nuri] = lsp.sb_new()
+            bucket = nuri
+            nuri = nuri + 1
+        }
+        type.ptr<type.SB> b = outs[bucket]
+        when (b.len > 0) {
+            lsp.sb_put(b, 44)
+        }
+        # one diagnostic object
+        type.number line = sema.diag_line_at(i)
+        type.number col = sema.diag_col_at(i)
+        type.number lchar = 0
+        type.number cchar = 0
+        when (line > 0 and dtxt != "") {
+            lchar = lsp.col_to_char16(dtxt, line, col)
+            cchar = lsp.col_to_char16(dtxt, line, col + 1)
+            when (lchar < 0) {
+                lchar = 0
+            }
+            when (cchar < 0) {
+                cchar = lchar
+            }
+        }
+        type.number lline = line - 1
+        when (line <= 0) {
+            lline = 0
+        }
+        type.number sev = 1
+        when (sema.diag_sev_at(i) == 0) {
+            sev = 2
+        }
+        else when (sema.diag_sev_at(i) == 2) {
+            sev = 3
+        }
+        lsp.sb_app(b, "{\"range\":{\"start\":{\"line\":")
+        lsp.sb_num(b, lline)
+        lsp.sb_app(b, ",\"character\":")
+        lsp.sb_num(b, lchar)
+        lsp.sb_app(b, "},\"end\":{\"line\":")
+        lsp.sb_num(b, lline)
+        lsp.sb_app(b, ",\"character\":")
+        lsp.sb_num(b, cchar)
+        lsp.sb_app(b, "}},\"severity\":")
+        lsp.sb_num(b, sev)
+        lsp.sb_app(b, ",\"source\":\"okular\",\"message\":")
+        lsp.sb_json_str(b, sema.diag_msg_at(i))
+        lsp.sb_app(b, "}")
+    }
+    # publish each bucket (and an empty list for the document itself
+    # when it carries no diagnostics — clears the client's view)
+    loop (k from 0 until nuri) {
+        type.ptr<type.SB> params = lsp.sb_new()
+        lsp.sb_app(params, "{\"uri\":")
+        lsp.sb_json_str(params, uris[k])
+        lsp.sb_app(params, ",\"diagnostics\":[")
+        loop (j from 0 until outs[k].len) {
+            lsp.sb_put(params, outs[k].data[j])
+        }
+        lsp.sb_app(params, "]}")
+        lsp.send_notification("textDocument/publishDiagnostics", params)
+    }
+    when (nuri == 0) {
+        type.ptr<type.SB> params = lsp.sb_new()
+        lsp.sb_app(params, "{\"uri\":")
+        lsp.sb_json_str(params, d.uri)
+        lsp.sb_app(params, ",\"diagnostics\":[]}")
+        lsp.send_notification("textDocument/publishDiagnostics", params)
+    }
+    return 0
+}
+
+# hover: the identifier under the cursor, resolved against the last
+# check's symbol tables (top-level declarations of the main module and
+# every module namespace)
+function.lsp_hover(type.ptr<type.Doc>.d, number.line0, number.char0, type.ptr<type.SB>.out) -> number {
+    type.number off = lsp.char16_to_off(d.text, line0, char0)
+    when (off < 0) {
+        return 0
+    }
+    # the token covering the offset (toks holds the document's tokens)
+    type.number nt = toks.count()
+    type.number hit =-1
+    loop (i from 0 until nt) {
+        type.number t_off = toks.toff(i)
+        type.number tl = toks.tlen(i)
+        when (tl > 0 and off >= t_off and off < t_off + tl) {
+            hit = i
+            break
+        }
+    }
+    when (hit < 0 or toks.kind(hit) != toks.K_IDENT) {
+        return 0
+    }
+    type.text name = toks.spelling(hit)
+    # resolve: root scope directly (the main module's top level), then
+    # every module namespace bound at the root
+    type.ptr<type.Scope> root = sema.root_scope_of()
+    when (root == null) {
+        return 0
+    }
+    type.ptr<type.Symbol> sym = sema.scope_local(root, name)
+    when (sym == null) {
+        type.number nroot = 0
+        # iterate root symbols via repeated local finds of namespaces:
+        # the root scope is walked through its symbol count
+        nroot = sema.scope_len(root)
+        loop (i from 0 until nroot) {
+            type.ptr<type.Symbol> s2 = sema.scope_sym_at(root, i)
+            when (s2 != null and s2.ns != null) {
+                type.ptr<type.Symbol> inner = sema.scope_local(s2.ns, name)
+                when (inner != null) {
+                    sym = inner
+                    break
+                }
+            }
+        }
+    }
+    when (sym == null) {
+        return 0
+    }
+    # render by kind
+    when (sym.kind == sema.SYM_FUNC and sym.func != null) {
+        lsp.sb_app(out, "function ")
+        lsp.sb_app(out, name)
+        lsp.sb_app(out, "(")
+        loop (i from 0 until sym.func.nparams) {
+            when (i > 0) {
+                lsp.sb_app(out, ", ")
+            }
+            lsp.sb_app(out, sym.func.pnames[i])
+            lsp.sb_app(out, ": ")
+            lsp.sb_app(out, sema.ty_name(sym.func.ptypes[i]))
+        }
+        lsp.sb_app(out, ") -> ")
+        lsp.sb_app(out, sema.ty_name(sym.func.ret))
+        return 1
+    }
+    when (sym.kind == sema.SYM_VAR) {
+        lsp.sb_app(out, "variable ")
+        lsp.sb_app(out, name)
+        when (sym.ty != null) {
+            lsp.sb_app(out, ": ")
+            lsp.sb_app(out, sema.ty_name(sym.ty))
+        }
+        return 1
+    }
+    when (sym.kind == sema.SYM_CONST) {
+        lsp.sb_app(out, "constant ")
+        lsp.sb_app(out, name)
+        when (sym.ty != null) {
+            lsp.sb_app(out, ": ")
+            lsp.sb_app(out, sema.ty_name(sym.ty))
+        }
+        return 1
+    }
+    when (sym.kind == sema.SYM_TYPE) {
+        lsp.sb_app(out, "type ")
+        lsp.sb_app(out, name)
+        return 1
+    }
+    when (sym.kind == sema.SYM_NS) {
+        lsp.sb_app(out, "module ")
+        lsp.sb_app(out, name)
+        return 1
+    }
+    lsp.sb_app(out, sema.sym_kind_name(sym.kind))
+    lsp.sb_app(out, " ")
+    lsp.sb_app(out, name)
+    return 1
+}
+
+# the server loop
+# dispatch one parsed message. Returns: 0 = keep serving, 1 = exit the
+# server with code 0 (exit after shutdown), 2 = exit with code 1.
+function.lsp_dispatch(type.ptr<type.JV>.msg) -> number {
+    when (msg.kind != lsp.J_OBJ) {
+        lsp.send_error("null",-32600, "Invalid Request: a message must be a JSON object")
+        return 0
+    }
+    type.text method = lsp.jv_str(msg, "method")
+    when (method == "") {
+        # no method: either a stray response to a request this
+        # server never sent (has result/error — ignored) or an
+        # invalid request
+        when (lsp.jv_get(msg, "result") == null and lsp.jv_get(msg, "error") == null and lsp.jv_get(msg, "id") != null) {
+            type.text nid = lsp_id_text(msg)
+            when (nid == "") {
+                nid = "null"
+            }
+            lsp.send_error(nid,-32600, "Invalid Request: a request must carry a method")
+        }
+        return 0
+    }
+    type.text id_text = lsp_id_text(msg)
+    type.number has_id = 0
+    when (lsp.jv_get(msg, "id") != null) {
+        has_id = 1
+    }
+    when (has_id == 1 and id_text == "") {
+        # id present but neither number nor string
+        lsp.send_error("null",-32600, "Invalid Request: id must be a number or a string")
+        return 0
+    }
+    type.ptr<type.JV> params = lsp.jv_get(msg, "params")
+
+    # ---- lifecycle ----
+    when (method == "exit") {
+        when (lsp.shutdown_seen == 1) {
+            return 1
+        }
+        return 2
+    }
+    when (method == "initialize") {
+        when (lsp.initialized == 1) {
+            lsp.send_error(id_text,-32600, "Invalid Request: the server is already initialized")
+            return 0
+        }
+        lsp.initialized = 1
+        type.ptr<type.SB> res = lsp.sb_new()
+        lsp.sb_app(res, "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true},")
+        lsp.sb_app(res, "\"serverInfo\":{\"name\":")
+        lsp.sb_json_str(res, lsp.SERVER_NAME)
+        lsp.sb_app(res, ",\"version\":")
+        lsp.sb_json_str(res, lsp.SERVER_VERSION)
+        lsp.sb_app(res, "}}")
+        lsp.send_result(id_text, res)
+        return 0
+    }
+    when (lsp.initialized == 0) {
+        # before initialize: requests are refused, notifications
+        # dropped (except exit, handled above)
+        when (has_id == 1) {
+            lsp.send_error(id_text,-32002, "ServerNotInitialized: initialize first")
+        }
+        return 0
+    }
+    when (method == "shutdown") {
+        lsp.shutdown_seen = 1
+        lsp.send_result(id_text, null)
+        return 0
+    }
+    when (lsp.shutdown_seen == 1) {
+        # after shutdown: requests get InvalidRequest, the exit
+        # notification is the only thing honored (handled above)
+        when (has_id == 1) {
+            lsp.send_error(id_text,-32600, "Invalid Request: the server is shut down")
+        }
+        return 0
+    }
+    when (method == "initialized" or method == "$/setWorkspaceFolders" or method == "$/cancelRequest" or method == "$/logLoadedFeatures") {
+        # acknowledged no-op notifications
+        return 0
+    }
+
+    # ---- documents ----
+    when (method == "textDocument/didOpen") {
+        type.ptr<type.JV> td = lsp.jv_get(params, "textDocument")
+        type.text uri = lsp.jv_str(td, "uri")
+        type.number has_text = 0
+        type.text text = ""
+        type.number version = 0
+        when (td != null) {
+            version = lsp.jv_int(td, "version", 0)
+            type.ptr<type.JV> tv = lsp.jv_get(td, "text")
+            when (tv != null and tv.kind == lsp.J_STR) {
+                text = tv.str
+                has_text = 1
+            }
+        }
+        when (uri != "" and has_text == 1) {
+            # a present-but-empty text is a legitimate new document
+            type.ptr<type.Doc> d = lsp.doc_open(uri, text, version)
+            lsp_recheck(d)
+            lsp_publish_diagnostics(d)
+        }
+        return 0
+    }
+    when (method == "textDocument/didChange") {
+        type.ptr<type.JV> td = lsp.jv_get(params, "textDocument")
+        type.text uri = lsp.jv_str(td, "uri")
+        type.ptr<type.Doc> d = lsp.doc_find(uri)
+        when (d != null) {
+            type.number version = lsp.jv_int(td, "version", 0)
+            # full sync: take the LAST content change carrying text
+            type.ptr<type.JV> changes = lsp.jv_get(params, "contentChanges")
+            type.number has_text = 0
+            type.text text = ""
+            when (changes != null and changes.kind == lsp.J_ARR) {
+                loop (i from 0 until changes.nitems) {
+                    type.ptr<type.JV> c = changes.items[i]
+                    type.ptr<type.JV> tv = lsp.jv_get(c, "text")
+                    when (tv != null and tv.kind == lsp.J_STR and c.kind == lsp.J_OBJ) {
+                        text = tv.str
+                        has_text = 1
+                    }
+                }
+            }
+            when (has_text == 1) {
+                # a change to the empty text is still a change
+                d.text = text
+                d.version = version
+                lsp_recheck(d)
+                lsp_publish_diagnostics(d)
+            }
+        }
+        return 0
+    }
+    when (method == "textDocument/didClose") {
+        type.text uri = lsp.jv_str(lsp.jv_get(params, "textDocument"), "uri")
+        when (uri != "") {
+            lsp.doc_close(uri)
+            # clear the client's diagnostics for the closed file
+            type.ptr<type.SB> p2 = lsp.sb_new()
+            lsp.sb_app(p2, "{\"uri\":")
+            lsp.sb_json_str(p2, uri)
+            lsp.sb_app(p2, ",\"diagnostics\":[]}")
+            lsp.send_notification("textDocument/publishDiagnostics", p2)
+        }
+        return 0
+    }
+
+    # ---- hover ----
+    when (method == "textDocument/hover") {
+        when (has_id == 0) {
+            return 0
+        }
+        type.text uri = lsp.jv_str(lsp.jv_get(params, "textDocument"), "uri")
+        type.ptr<type.JV> posv = lsp.jv_get(params, "position")
+        type.number line0 = lsp.jv_int(posv, "line",-1)
+        type.number char0 = lsp.jv_int(posv, "character",-1)
+        type.ptr<type.Doc> d = lsp.doc_find(uri)
+        type.ptr<type.SB> val = lsp.sb_new()
+        type.number found = 0
+        when (d != null and d.open == 1 and line0 >= 0 and char0 >= 0) {
+            found = lsp_hover(d, line0, char0, val)
+        }
+        when (found == 1) {
+            type.ptr<type.SB> res = lsp.sb_new()
+            lsp.sb_app(res, "{\"contents\":{\"kind\":\"plaintext\",\"value\":")
+            lsp.sb_json_str(res, lsp.sb_text(val))
+            lsp.sb_app(res, "}}")
+            lsp.send_result(id_text, res)
+        }
+        else {
+            lsp.send_result(id_text, null)
+        }
+        return 0
+    }
+
+    # ---- unknown ----
+    when (has_id == 1) {
+        lsp.send_error(id_text,-32601, "Method not found: " + method)
+    }
+    # unknown notifications (and $/ server-specific ones) are
+    # ignored per the protocol
+    return 0
+}
+
+# the server loop: read -> parse -> dispatch -> release. The message
+# tree is released after EVERY dispatch (the dispatch function returns
+# instead of continuing, so no path skips the release).
+function.run_lsp() -> number {
+    lsp_mode = 1
+    sema.init_types()
+    type.number running = 1
+    loop (running == 1) {
+        type.text body = lsp.read_msg()
+        when (body == "") {
+            # the client closed stdin
+            break
+        }
+        type.ptr<type.JV> msg = lsp.parse(body)
+        when (msg == null) {
+            lsp.send_error("null",-32700, "Parse error: malformed JSON")
+            continue
+        }
+        type.number rc = lsp_dispatch(msg)
+        lsp.jv_release(msg)
+        when (rc == 1) {
+            return 0
+        }
+        when (rc == 2) {
+            return 1
+        }
+    }
+    return 0
+}
 # ---- the driver ----
 function.main() -> number {
     type.number argc = env.arg_count()
     when (argc >= 2 and env.arg(1) == "fmt") {
         return run_fmt(argc)
+    }
+    when (argc >= 2 and env.arg(1) == "lsp") {
+        # the language server (spec §15): JSON-RPC 2.0 over stdio
+        return run_lsp()
     }
     when (argc < 2) {
         sys.write(2, "usage: okc <main.ok> [--out <path>] [--dump-ir] [-O1 | -O2] [--opt-stats] [-s | --strict] [-w | --warnings]\n")

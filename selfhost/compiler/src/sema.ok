@@ -5546,3 +5546,126 @@ function.render_all() -> number {
     }
     return 0
 }
+
+# ---- LSP support (0.18): diagnostics out, recompile reset ----
+#
+# The LSP server recompiles the project on every document change inside
+# one long-lived process. reset_recheck() returns sema to a fresh-
+# process state (module table, intern cache, diagnostics, one-shot
+# flags); scalar type singletons survive (init_types is idempotent).
+# The previous compile's scopes, symbols, and AST records are simply
+# abandoned — allocation is bounded by the sources checked, and the
+# arena/heap grow on demand (rt.ok); a fresh process would free them,
+# an editing session trades bounded growth for never crashing.
+function.diag_count() -> number {
+    return diag_n
+}
+
+function.diag_sev_at(number.i) -> number {
+    return diag_sev[i]
+}
+
+function.diag_line_at(number.i) -> number {
+    return diag_line[i]
+}
+
+function.diag_col_at(number.i) -> number {
+    return diag_col[i]
+}
+
+function.diag_file_at(number.i) -> text {
+    return diag_file[i]
+}
+
+function.diag_msg_at(number.i) -> text {
+    return diag_msg[i]
+}
+
+# a load-time failure (missing file, unreadable byte) with no position;
+# used by the driver in LSP mode instead of writing to stderr
+function.serr_file(text.file, text.msg) -> number {
+    when (diag_n == diag_cap) {
+        diag_grow()
+    }
+    diag_sev[diag_n] = 1
+    diag_line[diag_n] = 0
+    diag_col[diag_n] = 0
+    diag_file[diag_n] = file
+    diag_msg[diag_n] = msg
+    diag_n = diag_n + 1
+    n_errors = n_errors + 1
+    return 0
+}
+
+function.reset_recheck() -> number {
+    # HARD reset: the previous check's memory lives in the runtime's
+    # scratch region (rewound by the next check), so every growable
+    # buffer must forget its stale pointers AND capacities — writing
+    # through a stale pointer would corrupt the region's new contents
+    diag_n = 0
+    diag_cap = 0
+    diag_sev = null
+    diag_line = null
+    diag_col = null
+    diag_file = null
+    diag_msg = null
+    n_errors = 0
+    n_mods = 0
+    mods_cap = 0
+    all_mods = null
+    it_len = 0
+    it_cap = 0
+    it_elem = null
+    it_count = null
+    it_form = null
+    root_scope = null
+    cur_mod = null
+    cur_scope = null
+    cur_func = null
+    in_loop = 0
+    n_sites = 0
+    sites_cap = 0
+    site_decls = null
+    site_mods = null
+    site_scopes = null
+    downgrade = 0
+    downgraded_hit = 0
+    len_fail_reported = 0
+    match_counter = 0
+    m_nkeys = 0
+    m_kcap = 0
+    m_keys = null
+    m_nranges = 0
+    m_rcap = 0
+    m_rlo = null
+    m_rhi = null
+    dec_scratch = null
+    return 0
+}
+
+# the root scope of the last completed check (hover lookups)
+function.root_scope_of() -> type.ptr<type.Scope> {
+    return root_scope
+}
+
+# a scope-local lookup that does not walk parents (hover: module
+# namespaces bound at the root)
+function.scope_local(type.ptr<type.Scope>.s, text.name) -> type.ptr<type.Symbol> {
+    return scope_find_local(s, name)
+}
+
+# hover support: iterate a scope's symbols (the root's module
+# namespaces without exposing the Scope struct's array)
+function.scope_len(type.ptr<type.Scope>.s) -> number {
+    when (s == null) {
+        return 0
+    }
+    return s.n
+}
+
+function.scope_sym_at(type.ptr<type.Scope>.s, number.i) -> type.ptr<type.Symbol> {
+    when (s == null or i < 0 or i >= s.n) {
+        return null
+    }
+    return s.syms[i]
+}

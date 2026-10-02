@@ -3,12 +3,13 @@
 A simple, fast programming language designed for building large
 applications with minimal code.
 
-**Status:** Okular 0.17 — milestones M5, M6, and M7 are **done**:
+**Status:** Okular 0.18 — milestones M5, M6, and M7 are **done**:
 **the compiler is written in Okular and compiles itself — on two CPU
 architectures.** One native executable (`selfhost/compiler`, ~16k lines
 of Okular) contains the complete pipeline — tokenizer, parser, semantic
 analysis, IR with constant folding and an optimization pass framework,
-**two native backends (x86-64 and ARM64)**, and direct ELF64 emission.
+**two native backends (x86-64 and ARM64)**, direct ELF64 emission, and
+a **language server** (`okular lsp`) for editors.
 `make` builds it with the committed native seed (`bin/okular`):
 **no C compiler, no `as`, no `ld`** anywhere in the repository, and the
 build is proven deterministic (the seed reproduces itself byte-for-bit
@@ -32,7 +33,9 @@ mmap/exit/chmod/mkdir/getdents) that the runtime itself rides on.
 Since 0.17 the same compiler targets **two architectures**: x86-64
 Linux and ARM64 (aarch64) Linux, with cross-compilation in both
 directions (`--target arm64` / `--target x86-64`) and releases for both
-(`okular-linux-x86_64` and `okular-linux-arm64`).
+(`okular-linux-x86_64` and `okular-linux-arm64`). Since 0.18 it also
+speaks the Language Server Protocol: `okular lsp` gives any LSP-capable
+editor live diagnostics and hover signatures while you edit.
 
 ```ok
 type.text=1
@@ -132,7 +135,8 @@ okular!
 bin/          okular — the committed native seed compiler (self-built,
               byte-reproducible from selfhost/compiler sources)
 selfhost/     the compiler written in Okular (toks, parser, sema, ir,
-              opt, emit, arm, elf, rt, and the M3/M4 component lineage)
+              opt, emit, arm, elf, fmt, lsp, rt, and the M3/M4
+              component lineage)
 specs/        the language specification (versioned, honest status table)
 stdlib/       the standard library (math, text, io, memory)
 docs/         getting started, language basics, architecture, roadmap
@@ -140,6 +144,7 @@ examples/     runnable Okular programs (HelloProject = full project)
 tests/        the test suite (positive / negative / policy)
 tools/        run_selfbuild_check.sh, run_selfhost_tests.sh,
               run_arm64_tests.sh + emu64.py (aarch64 emulator),
+              run_lsp_tests.sh + lsp_test.py (protocol client),
               update_seed.sh, package_release.sh
 build/        build artifacts
 ```
@@ -148,7 +153,7 @@ build/        build artifacts
 
 * [Getting started](docs/getting-started.md) — build, compile, run
 * [Language basics](docs/language-basics.md) — a tour of Okular 0.12
-* [Specification v0.17](specs/spec-v0.17.md) — the definition, with an
+* [Specification v0.18](specs/spec-v0.18.md) — the definition, with an
   implementation status table that says exactly what works
 * [Architecture](docs/architecture.md) — how the bootstrap compiler is
   built and how it will self-host
@@ -163,6 +168,8 @@ selfhost differential: passed 503   failed 0
 ALL SELFHOST TESTS PASSED
 arm64 differential: passed 264   failed 0
 ALL ARM64 TESTS PASSED (compiled with --target arm64, executed under tools/emu64.py)
+lsp protocol: passed 47   failed 0
+ALL LSP PROTOCOL TESTS PASSED
 ```
 
 ## Formatting
@@ -177,6 +184,23 @@ $ bin/okular fmt --check main.ok   # CI: exit 1 when not formatted
 ```
 
 The whole repository (compiler, stdlib, examples) is formatted with it.
+
+## Editor integration (`okular lsp`)
+
+The compiler is also a language server: JSON-RPC 2.0 over stdio, per
+the Language Server Protocol. Live diagnostics on every change (the
+project recompiles through the full pipeline — dependencies, libraries,
+the runtime — with your unsaved buffer, nothing written to disk), hover
+with full signatures (`function greet(name: text) -> text`), and the
+lifecycle editors expect:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}
+```
+
+Wire it into any LSP-capable editor by launching `okular lsp` over
+stdio for `.ok` files. The protocol suite (47 checks) tests it
+adversarially — malformed input never crashes the server.
 
 ## License
 

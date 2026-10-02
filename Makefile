@@ -11,10 +11,12 @@
 #                     byte-for-byte, and the compiler must pass the full
 #                     differential suite (positive / negative / policy;
 #                     every positive case is also re-verified at -O1 and
-#                     -O2 — optimization must not change behavior), and
-#                     every positive case again as ARM64 code executed
-#                     under tools/emu64.py (the aarch64 user-mode emulator;
-#                     python3 is a test tool, not a build dependency).
+#                     -O2 — optimization must not change behavior), every
+#                     positive case again as ARM64 code executed under
+#                     tools/emu64.py (the aarch64 user-mode emulator), and
+#                     the LSP protocol suite (okular lsp driven by a real
+#                     JSON-RPC client; python3 is a test tool, not a build
+#                     dependency).
 #   make release      package + end-to-end test the downloadable compiler.
 #   make update-seed  after editing compiler sources: rebuild to the new fixed
 #                     point, verify, and install it as bin/okular.
@@ -45,6 +47,7 @@ arm64: build/okular-arm64
 test: all
 	bash tools/run_selfbuild_check.sh
 	bash tools/run_arm64_tests.sh
+	bash tools/run_lsp_tests.sh
 
 arm64-test: build/okular
 	bash tools/run_arm64_tests.sh

@@ -1,6 +1,6 @@
 # Okular Compiler — Architecture
 
-**Version:** 0.17
+**Version:** 0.18
 **Applies to:** `selfhost/compiler` (the Okular implementation)
 
 > The compiler is written in Okular and compiles itself. The C bootstrap
@@ -70,6 +70,8 @@
 | `ir.ok` | IR construction (stack-machine form), constant folding, `--dump-ir` |
 | `opt.ok` | the optimizer (0.16): the `-O1` pass pipeline — DCE, jump simplification, peephole; pass statistics |
 | `arm.ok` | the ARM64 backend (0.17): the same typed stack IR lowered to AArch64 machine code — instruction selection, frames, fixups, syscall numbers |
+| `lsp.ok` | the language server protocol half (0.18): a robust JSON parser/writer, Content-Length framing with garbage resynchronization, UTF-8↔UTF-16 position mapping, the open-document table |
+| `rt.ok` | gains the recompile scratch region: during LSP checks the allocator and text arena route into one 16 MiB region the next check rewinds (~8 KiB residual growth per change) |
 | `emit.ok` | the x86-64 backend: every IR instruction, frame layout, call discipline, inline syscalls, trap sequences, label backpatching |
 | `elf.ok` | native ELF64 emission: segments, symbols, fixups, entry |
 | `rt.ok` | the runtime compiled into every program: output formatters, text arena, conversions, the free-list heap allocator, file operations — on the `sys.*` syscall floor |
@@ -155,10 +157,15 @@
   must match the x86-64 expectations exactly.
 * `tools/run_selfbuild_check.sh` — the acceptance gate: seed
   self-reproduction + the full suite.
+* `tools/run_lsp_tests.sh` + `tools/lsp_test.py` — 47 protocol
+  checks: a real JSON-RPC client drives `okular lsp` through the
+  lifecycle, document sync, diagnostics (UTF-16 positions, dependency
+  attribution), hover signatures — and the robustness clause (malformed
+  anything degrades to an error response, never a crash).
 * CI (`.github/workflows/ci.yml`) runs the gate, the emulated ARM64
-  suite, the self-cross-compilation test, AND a native
-  `ubuntu-24.04-arm` job (the ARM64 compiler self-compiles byte-
-  identically on real hardware; the full positive suite is compiled
-  and executed natively), then packages and end-to-end tests both
+  suite, the self-cross-compilation test, a native `ubuntu-24.04-arm`
+  job (the ARM64 compiler self-compiles byte-identically on real
+  hardware; the full positive suite is compiled and executed natively),
+  and the LSP protocol suite, then packages and end-to-end tests both
   downloadable compilers (build -> unpack -> compile hello -> run it)
   on every push, and publishes releases on `v*` tags.

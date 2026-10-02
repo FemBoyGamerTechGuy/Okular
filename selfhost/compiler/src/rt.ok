@@ -215,24 +215,72 @@ function.print_flush() -> number {
 }
 
 # ---- the text arena ----
-type.ptr<type.byte> arena = null
-type.number arena_used = 0
-const.ARENA_CAP = 16777216  # 16 MiB: the compiler itself is the heaviest Okular program
+#
+# A chain of mmap'd regions (0.18): long-running programs — the LSP
+# server above all — construct text for every document check, and one
+# fixed 16 MiB region would cliff. Regions are never freed; a text
+# value is (ptr, len), so any region can serve any allocation; a single
+# text never spans two regions (an oversized request gets its own).
+type.ptr<type.ptr<type.byte>> arena_list = null
+type.number arena_nregions = 0
+type.number arena_rcap = 0
+type.ptr<type.byte> arena = null  # the current region
+type.number arena_used = 0  # bump offset into it
+const.ARENA_CAP = 16777216  # 16 MiB per region
+const.ARENA_MAX_ALLOC = 1073741824  # single-allocation ceiling: 1 GiB
+
+function.arena_add_region(number.need) -> number {
+    type.number want = ARENA_CAP
+    when (need > want) {
+        want = need
+    }
+    type.ptr<type.byte> base = sys.mmap(want)
+    when (base == null) {
+        raw_die()
+    }
+    when (arena_nregions == arena_rcap) {
+        type.number newcap = 4
+        when (arena_rcap > 0) {
+            newcap = arena_rcap * 2
+        }
+        type.ptr<type.ptr<type.byte>> nl = alloc<type.ptr<type.byte>>(newcap)
+        loop (i from 0 until arena_nregions) {
+            nl[i] = arena_list[i]
+        }
+        type.ptr<type.ptr<type.byte>> old = arena_list
+        arena_list = nl
+        arena_rcap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    arena_list[arena_nregions] = base
+    arena_nregions = arena_nregions + 1
+    arena = base
+    arena_used = 0
+    return 0
+}
 
 function.arena_ensure() -> number {
     when (arena == null) {
-        arena = sys.mmap(ARENA_CAP)
-        when (arena == null) {
-            raw_die()
-        }
+        arena_add_region(ARENA_CAP)
     }
     return 0
 }
 
 function.arena_take(number.len) -> type.ptr<type.byte> {
+    when (len < 0 or len > ARENA_MAX_ALLOC) {
+        trap("text allocation too large", 71)
+    }
+    when (check_mode == 1) {
+        # per-check texts live in the scratch region too (the next
+        # check rewinds them); texts that must survive a check are
+        # built outside check mode by construction
+        return check_take(len)
+    }
     arena_ensure()
     when (arena_used + len > ARENA_CAP) {
-        trap("text arena exhausted (16 MiB of text per run)", 71)
+        arena_add_region(len)
     }
     type.ptr<type.byte> p = arena + arena_used
     arena_used = arena_used + len
@@ -565,6 +613,71 @@ function.raw_die() -> number {
     return 0
 }
 
+# ---- the recompile scratch region (`okular lsp`, 0.18) ----
+#
+# A long-lived LSP server recompiles the project on every document
+# change; per-check structures (ASTs, scopes, symbols, sources, token
+# buffers) are garbage the moment the next check begins. Instead of
+# tracking ownership through the deeply shared sema graph, every
+# allocation made while a check runs comes from ONE reusable scratch
+# region that the next check simply rewinds — constant memory, no
+# dangling-pointer discipline beyond "region memory is invalid after
+# the next check_begin". The heap allocator and the text arena both
+# route here while check_mode is on; release() of a region pointer is
+# a no-op (the region is bump-allocated, never free-listed). A check
+# that outgrows the region falls back to the ordinary heap (bounded
+# leak for oversized projects, never a crash).
+type.number check_mode = 0
+type.ptr<type.byte> check_base = null
+type.number check_used = 0
+const.CHECK_CAP = 16777216  # 16 MiB scratch: one full check of a large project
+
+function.check_begin() -> number {
+    when (check_base == null) {
+        check_base = sys.mmap(CHECK_CAP)
+        # mmap failure: fall back to the ordinary heap permanently
+    }
+    check_used = 0
+    check_mode = 1
+    return 0
+}
+
+function.check_end() -> number {
+    check_mode = 0
+    return 0
+}
+
+function.check_in_region(ptr<byte>.p) -> bool {
+    when (check_base == null) {
+        return false
+    }
+    type.number n = ptr.to_number(p)
+    when (n < ptr.to_number(check_base)) {
+        return false
+    }
+    when (n >= ptr.to_number(check_base) + CHECK_CAP) {
+        return false
+    }
+    return true
+}
+
+# bump allocation, 16-byte aligned; overflow falls back to the heap
+function.check_take(number.bytes) -> type.ptr<type.byte> {
+    type.number need = bytes
+    type.number rem = need - (need / 16) * 16
+    when (rem > 0) {
+        need = need + 16 - rem
+    }
+    when (check_base == null or check_used + need > CHECK_CAP) {
+        # oversized checks fall back to the ordinary heap (bounded leak,
+        # never a crash); check_mode stays on, so this must bypass it
+        return free_list_alloc(bytes)
+    }
+    type.ptr<type.byte> p = check_base + check_used
+    check_used = check_used + need
+    return p
+}
+
 # ---- the heap allocator (spec §12; the 0.13 block geometry) ----
 #
 # Blocks: [ header 16B: payload size ][ payload ... ]; all sizes multiple
@@ -638,6 +751,15 @@ function.heap_grow(number.need) -> number {
 }
 
 function.mem_alloc(number.bytes) -> type.ptr<type.byte> {
+    when (check_mode == 1) {
+        return check_take(bytes)
+    }
+    return free_list_alloc(bytes)
+}
+
+# the ordinary free-list allocator (the alloc<T> builtin lands in
+# mem_alloc above, which routes to the scratch region during checks)
+function.free_list_alloc(number.bytes) -> type.ptr<type.byte> {
     when (bytes == 0) {
         trap("allocation of zero bytes", 74)
     }
@@ -681,11 +803,15 @@ function.mem_alloc(number.bytes) -> type.ptr<type.byte> {
         fb = next_free(fb)
     }
     heap_grow(need + 16)
-    return mem_alloc(bytes)
+    return free_list_alloc(bytes)
 }
 
 function.mem_release(ptr<byte>.data) -> number {
     when (data == null) {
+        return 0
+    }
+    when (check_in_region(data) == true) {
+        # scratch-region memory is rewound wholesale, never free-listed
         return 0
     }
     type.number size = hdr_size(data)

@@ -1,6 +1,6 @@
 # Getting Started with Okular
 
-**Okular 0.17** — a natively compiled systems language. This guide takes
+**Okular 0.18** — a natively compiled systems language. This guide takes
 you from zero to a running executable.
 
 ## Requirements
@@ -87,6 +87,14 @@ $ okular [-s | --strict] [--out PATH] [--dump-ir] [--target ARCH] [-O level] pat
 | `--target ARCH` | output architecture: `x86-64` (the default) or `arm64` / `aarch64` — cross-compile in either direction from either host |
 | `-O0` / `-O1` / `-O2` | optimization level (`-O` = `-O1`): `-O1` IR pass pipeline (DCE, control-flow simplification, peephole); `-O2` additionally register-cached code generation (x86-64; on arm64 `-O2` honestly falls back to the `-O1` passes) |
 
+## Editor integration
+
+`okular lsp` runs the compiler as a Language Server Protocol server
+(JSON-RPC 2.0 over stdio): live diagnostics on every save-free edit —
+the project recompiles with your unsaved buffer, dependencies and
+libraries included — plus hover signatures. Launch it from any
+LSP-capable editor over stdio for `.ok` files.
+
 ## Projects with source components
 
 ```
@@ -120,7 +128,7 @@ the build always fails.
 ## Where to go next
 
 * `docs/language-basics.md` — a tour of the language
-* `specs/spec-v0.17.md` — the specification (with an honest status table)
+* `specs/spec-v0.18.md` — the specification (with an honest status table)
 * `docs/architecture.md` — how the compiler works
 * `docs/roadmap.md` — what comes next (heap, pointers, structs, arrays…)
 * `examples/` — runnable programs (`examples/HelloProject` shows a full
@@ -133,4 +141,5 @@ $ make test
 ...
 selfhost differential: passed 503   failed 0
 arm64 differential: passed 264   failed 0
+lsp protocol: passed 47   failed 0
 ```

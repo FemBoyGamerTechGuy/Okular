@@ -1,0 +1,1407 @@
+# lsp.ok — the Language Server Protocol foundation (0.18, `okular lsp`).
+#
+# A stdio JSON-RPC 2.0 server riding on the existing frontend (toks ->
+# parser -> sema; the driver in main.ok orchestrates the recompile per
+# document change through the same phases a CLI compile runs — including
+# [source.files.use] dependencies, [libs.use] libraries, and the runtime
+# module — with the open document's text virtualized over its file via
+# toks.set_override, so no file is ever written).
+#
+# This file is the protocol half:
+#   * a complete, robust JSON parser and writer (JV tree: null/false/
+#     true/number/string/array/object; \uXXXX escapes with surrogate
+#     pairs; depth- and node-capped so malformed input can never crash
+#     or exhaust the server);
+#   * Content-Length framing over fd 0/fd 1 (tolerant of LF-only
+#     headers; garbage is skipped byte-by-byte until the next valid
+#     frame — resynchronization, never a crash);
+#   * UTF-8 <-> UTF-16 position mapping (LSP positions are line +
+#     UTF-16 code units; compiler columns are 1-based byte counts);
+#   * the open-document table (URI <-> path, percent-decoding).
+#
+# The dispatch and the recompile live in main.ok's run_lsp() (it needs
+# the driver's own module-level state). The contract with the driver:
+#   lsp.read_msg()          -> text body, "" on EOF
+#   lsp.parse(body)         -> ptr<JV> tree, null on malformed JSON
+#   lsp.write_msg(text)     -> framed stdout write
+#   lsp.send_response(id_text, result_or_error...)
+# Malformed input at any layer degrades to a JSON-RPC error response
+# (-32700/-32600/-32602) or a dropped notification — the server lives.
+# ---- JSON value kinds ----
+const.J_NULL = 0
+const.J_FALSE = 1
+const.J_TRUE = 2
+const.J_NUM = 3
+const.J_STR = 4
+const.J_ARR = 5
+const.J_OBJ = 6
+
+const.JSON_MAX_DEPTH = 64
+const.JSON_MAX_NODES = 1048576
+
+struct.JV = {
+    type.number kind
+    type.number inum  # integer form (valid when is_dec == 0)
+    type.decimal dnum  # decimal form (valid when is_dec == 1)
+    type.number is_dec
+    type.text str  # J_STR value
+    type.ptr<type.ptr<type.JV>> items  # J_ARR elements
+    type.number nitems
+    type.ptr<type.text> keys  # J_OBJ keys
+    type.ptr<type.ptr<type.JV>> vals  # J_OBJ values
+    type.number nkeys
+}.end
+
+function.new_jv(number.kind) -> type.ptr<type.JV> {
+    type.ptr<type.JV> v = alloc<type.JV>(1)
+    v.kind = kind
+    v.inum = 0
+    v.dnum = 0.0
+    v.is_dec = 0
+    v.str = ""
+    v.items = null
+    v.nitems = 0
+    v.keys = null
+    v.vals = null
+    v.nkeys = 0
+    return v
+}
+
+# ---- the JSON parser (recursive descent over a text) ----
+#
+# Failure is a single flag: every helper checks jp_bad before doing
+# anything, so a mid-tree failure unwinds without further work.
+type.number jp_bad = 0
+type.number jp_pos = 0
+type.text jp_src = ""
+type.number jp_len = 0
+type.number jp_depth = 0
+type.number jp_nodes = 0
+
+# scratch for string unescaping (growable bytes, adopted into the
+# arena on completion — same discipline as the formatter's output)
+type.ptr<type.byte> jp_sbuf = null
+type.number jp_slen = 0
+type.number jp_scap = 0
+
+function.jp_reset_scratch() -> number {
+    jp_slen = 0
+    return 0
+}
+
+function.jp_scratch_put(number.b) -> number {
+    when (jp_slen == jp_scap) {
+        type.number newcap = 64
+        when (jp_scap > 0) {
+            newcap = jp_scap * 2
+        }
+        type.ptr<type.byte> nb = alloc<type.byte>(newcap)
+        loop (i from 0 until jp_slen) {
+            nb[i] = jp_sbuf[i]
+        }
+        type.ptr<type.byte> old = jp_sbuf
+        jp_sbuf = nb
+        jp_scap = newcap
+        when (old != null) {
+            release(old)
+        }
+    }
+    jp_sbuf[jp_slen] = number.to_uint8(b)
+    jp_slen = jp_slen + 1
+    return 0
+}
+
+function.jp_at(number.off) -> number {
+    when (off < jp_len) {
+        return text.byte_at(jp_src, off)
+    }
+    return-1
+}
+
+function.jp_ws() -> number {
+    loop (jp_pos < jp_len) {
+        type.number b = text.byte_at(jp_src, jp_pos)
+        when (b == 32 or b == 9 or b == 10 or b == 13) {
+            jp_pos = jp_pos + 1
+        }
+        else {
+            break
+        }
+    }
+    return 0
+}
+
+# hex digit value, -1 when invalid
+function.jp_hex(number.b) -> number {
+    when (b >= 48 and b <= 57) {
+        return b - 48
+    }
+    when (b >= 97 and b <= 102) {
+        return b - 87
+    }
+    when (b >= 65 and b <= 70) {
+        return b - 55
+    }
+    return-1
+}
+
+# parse one \uXXXX escape starting AT the 'u'; appends UTF-8 bytes to
+# the scratch buffer; surrogate pairs combine; broken escapes set jp_bad
+function.jp_uni_escape() -> number {
+    jp_pos = jp_pos + 1
+    when (jp_pos + 4 > jp_len) {
+        jp_bad = 1
+        return 0
+    }
+    type.number cp = 0
+    loop (i from 0 until 4) {
+        type.number h = jp_hex(text.byte_at(jp_src, jp_pos + i))
+        when (h < 0) {
+            jp_bad = 1
+            return 0
+        }
+        cp = cp * 16 + h
+    }
+    jp_pos = jp_pos + 4
+    # high surrogate: try to combine with a following \uDC00-\uDFFF
+    when (cp >= 55296 and cp <= 56319) {
+        when (jp_pos + 6 <= jp_len and text.byte_at(jp_src, jp_pos) == 92 and text.byte_at(jp_src, jp_pos + 1) == 117) {
+            type.number lo = 0
+            type.number ok = 1
+            loop (i from 0 until 4) {
+                type.number h = jp_hex(text.byte_at(jp_src, jp_pos + 2 + i))
+                when (h < 0) {
+                    ok = 0
+                }
+                lo = lo * 16 + h
+            }
+            when (ok == 1 and lo >= 56320 and lo <= 57343) {
+                cp = 65536 + (cp - 55296) * 1024 + (lo - 56320)
+                jp_pos = jp_pos + 6
+            }
+        }
+    }
+    # a lone low surrogate passes through as its code point (lenient)
+    jp_put_utf8(cp)
+    return 0
+}
+
+# append one code point to the scratch buffer as UTF-8
+function.jp_put_utf8(number.cp) -> number {
+    when (cp < 0) {
+        jp_bad = 1
+        return 0
+    }
+    when (cp < 128) {
+        jp_scratch_put(cp)
+        return 0
+    }
+    when (cp < 2048) {
+        jp_scratch_put(192 + cp / 64)
+        jp_scratch_put(128 + cp % 64)
+        return 0
+    }
+    when (cp < 65536) {
+        jp_scratch_put(224 + cp / 4096)
+        jp_scratch_put(128 + (cp / 64) % 64)
+        jp_scratch_put(128 + cp % 64)
+        return 0
+    }
+    when (cp < 1114112) {
+        jp_scratch_put(240 + cp / 262144)
+        jp_scratch_put(128 + (cp / 4096) % 64)
+        jp_scratch_put(128 + (cp / 64) % 64)
+        jp_scratch_put(128 + cp % 64)
+        return 0
+    }
+    jp_bad = 1
+    return 0
+}
+
+# parse a JSON string literal (opening quote at jp_pos); returns the
+# unescaped text; sets jp_bad on any malformed shape
+function.jp_string() -> text {
+    jp_pos = jp_pos + 1
+    jp_reset_scratch()
+    loop (jp_pos < jp_len) {
+        type.number b = text.byte_at(jp_src, jp_pos)
+        when (b == 34) {
+            jp_pos = jp_pos + 1
+            type.text s = rt.arena_text(jp_sbuf, jp_slen)
+            return s
+        }
+        when (b < 32) {
+            # raw control characters are invalid inside JSON strings
+            jp_bad = 1
+            return ""
+        }
+        when (b == 92) {
+            jp_pos = jp_pos + 1
+            when (jp_pos >= jp_len) {
+                jp_bad = 1
+                return ""
+            }
+            type.number e = text.byte_at(jp_src, jp_pos)
+            when (e == 34) {
+                jp_scratch_put(34)
+                jp_pos = jp_pos + 1
+            }
+            else when (e == 92) {
+                jp_scratch_put(92)
+                jp_pos = jp_pos + 1
+            }
+            else when (e == 47) {
+                jp_scratch_put(47)
+                jp_pos = jp_pos + 1
+            }
+            else when (e == 98) {
+                jp_scratch_put(8)
+                jp_pos = jp_pos + 1
+            }
+            else when (e == 102) {
+                jp_scratch_put(12)
+                jp_pos = jp_pos + 1
+            }
+            else when (e == 110) {
+                jp_scratch_put(10)
+                jp_pos = jp_pos + 1
+            }
+            else when (e == 114) {
+                jp_scratch_put(13)
+                jp_pos = jp_pos + 1
+            }
+            else when (e == 116) {
+                jp_scratch_put(9)
+                jp_pos = jp_pos + 1
+            }
+            else when (e == 117) {
+                jp_uni_escape()
+            }
+            else {
+                jp_bad = 1
+                return ""
+            }
+        }
+        else {
+            # any other byte passes through (UTF-8 sequences included)
+            jp_scratch_put(b)
+            jp_pos = jp_pos + 1
+        }
+    }
+    jp_bad = 1
+    return ""
+}
+
+function.jp_push_item(type.ptr<type.JV>.arr, type.ptr<type.JV>.v) -> number {
+    type.number newcap = 8
+    when (arr.nitems > 0) {
+        newcap = arr.nitems * 2
+    }
+    type.ptr<type.ptr<type.JV>> ni = alloc<type.ptr<type.JV>>(newcap)
+    loop (i from 0 until arr.nitems) {
+        ni[i] = arr.items[i]
+    }
+    type.ptr<type.ptr<type.JV>> old = arr.items
+    arr.items = ni
+    ni[arr.nitems] = v
+    arr.nitems = arr.nitems + 1
+    when (old != null) {
+        release(old)
+    }
+    return 0
+}
+
+function.jp_push_key(type.ptr<type.JV>.obj, text.key, type.ptr<type.JV>.v) -> number {
+    type.number n = obj.nkeys
+    type.number newcap = 8
+    when (n > 0) {
+        newcap = n * 2
+    }
+    type.ptr<type.text> nk = alloc<type.text>(newcap)
+    type.ptr<type.ptr<type.JV>> nv = alloc<type.ptr<type.JV>>(newcap)
+    loop (i from 0 until n) {
+        nk[i] = obj.keys[i]
+        nv[i] = obj.vals[i]
+    }
+    type.ptr<type.text> oldk = obj.keys
+    type.ptr<type.ptr<type.JV>> oldv = obj.vals
+    obj.keys = nk
+    obj.vals = nv
+    nk[n] = key
+    nv[n] = v
+    obj.nkeys = n + 1
+    when (oldk != null) {
+        release(oldk)
+        release(oldv)
+    }
+    return 0
+}
+
+# parse a number literal into a JV (integer fast path; decimal via
+# rt.text_to_decimal when a fraction or exponent is present)
+function.jp_number() -> type.ptr<type.JV> {
+    type.number start = jp_pos
+    when (jp_pos < jp_len and text.byte_at(jp_src, jp_pos) == 45) {
+        jp_pos = jp_pos + 1
+    }
+    type.number ndigits = 0
+    loop (jp_pos < jp_len) {
+        type.number b = text.byte_at(jp_src, jp_pos)
+        when (b >= 48 and b <= 57) {
+            jp_pos = jp_pos + 1
+            ndigits = ndigits + 1
+        }
+        else {
+            break
+        }
+    }
+    when (ndigits == 0) {
+        jp_bad = 1
+        return null
+    }
+    type.number isdec = 0
+    when (jp_pos < jp_len and text.byte_at(jp_src, jp_pos) == 46) {
+        isdec = 1
+        jp_pos = jp_pos + 1
+        type.number fd = 0
+        loop (jp_pos < jp_len) {
+            type.number b = text.byte_at(jp_src, jp_pos)
+            when (b >= 48 and b <= 57) {
+                jp_pos = jp_pos + 1
+                fd = fd + 1
+            }
+            else {
+                break
+            }
+        }
+        when (fd == 0) {
+            jp_bad = 1
+            return null
+        }
+    }
+    when (jp_pos < jp_len) {
+        type.number b = text.byte_at(jp_src, jp_pos)
+        when (b == 101 or b == 69) {
+            isdec = 1
+            jp_pos = jp_pos + 1
+            when (jp_pos < jp_len) {
+                type.number s = text.byte_at(jp_src, jp_pos)
+                when (s == 43 or s == 45) {
+                    jp_pos = jp_pos + 1
+                }
+            }
+            type.number ed = 0
+            loop (jp_pos < jp_len) {
+                type.number b2 = text.byte_at(jp_src, jp_pos)
+                when (b2 >= 48 and b2 <= 57) {
+                    jp_pos = jp_pos + 1
+                    ed = ed + 1
+                }
+                else {
+                    break
+                }
+            }
+            when (ed == 0) {
+                jp_bad = 1
+                return null
+            }
+        }
+    }
+    type.ptr<type.JV> v = new_jv(J_NUM)
+    when (isdec == 0) {
+        # integer fast path; overflow beyond 2^53 falls back to decimal
+        type.number neg = 0
+        type.number p = start
+        when (text.byte_at(jp_src, p) == 45) {
+            neg = 1
+            p = p + 1
+        }
+        type.number acc = 0
+        type.number overflow = 0
+        loop (i from p until jp_pos) {
+            type.number d = text.byte_at(jp_src, i) - 48
+            # acc * 10 + d, watching the 2^53 JSON-safe ceiling
+            when (acc > 900719925474099 or (acc == 900719925474099 and d > 2)) {
+                overflow = 1
+            }
+            acc = acc * 10 + d
+        }
+        when (overflow == 1) {
+            v.is_dec = 1
+            v.dnum = rt.text_to_decimal(text.slice(jp_src, start, jp_pos))
+            return v
+        }
+        when (neg == 1) {
+            acc =-acc
+        }
+        v.inum = acc
+        return v
+    }
+    v.is_dec = 1
+    v.dnum = rt.text_to_decimal(text.slice(jp_src, start, jp_pos))
+    return v
+}
+
+function.jp_value() -> type.ptr<type.JV> {
+    when (jp_bad == 1 or jp_nodes >= JSON_MAX_NODES or jp_depth >= JSON_MAX_DEPTH) {
+        jp_bad = 1
+        return null
+    }
+    jp_ws()
+    when (jp_pos >= jp_len) {
+        jp_bad = 1
+        return null
+    }
+    type.number b = text.byte_at(jp_src, jp_pos)
+    when (b == 123) {
+        # object
+        jp_pos = jp_pos + 1
+        jp_nodes = jp_nodes + 1
+        type.ptr<type.JV> obj = new_jv(J_OBJ)
+        jp_depth = jp_depth + 1
+        jp_ws()
+        when (jp_pos < jp_len and text.byte_at(jp_src, jp_pos) == 125) {
+            jp_pos = jp_pos + 1
+            jp_depth = jp_depth - 1
+            return obj
+        }
+        loop (jp_bad == 0) {
+            jp_ws()
+            when (jp_pos >= jp_len or text.byte_at(jp_src, jp_pos) != 34) {
+                jp_bad = 1
+                break
+            }
+            type.text key = jp_string()
+            when (jp_bad == 1) {
+                break
+            }
+            jp_ws()
+            when (jp_pos >= jp_len or text.byte_at(jp_src, jp_pos) != 58) {
+                jp_bad = 1
+                break
+            }
+            jp_pos = jp_pos + 1
+            type.ptr<type.JV> val = jp_value()
+            when (jp_bad == 1) {
+                break
+            }
+            jp_push_key(obj, key, val)
+            jp_ws()
+            when (jp_pos >= jp_len) {
+                jp_bad = 1
+                break
+            }
+            type.number c = text.byte_at(jp_src, jp_pos)
+            when (c == 44) {
+                jp_pos = jp_pos + 1
+            }
+            else when (c == 125) {
+                jp_pos = jp_pos + 1
+                break
+            }
+            else {
+                jp_bad = 1
+                break
+            }
+        }
+        jp_depth = jp_depth - 1
+        when (jp_bad == 1) {
+            return null
+        }
+        return obj
+    }
+    else when (b == 91) {
+        # array
+        jp_pos = jp_pos + 1
+        jp_nodes = jp_nodes + 1
+        type.ptr<type.JV> arr = new_jv(J_ARR)
+        jp_depth = jp_depth + 1
+        jp_ws()
+        when (jp_pos < jp_len and text.byte_at(jp_src, jp_pos) == 93) {
+            jp_pos = jp_pos + 1
+            jp_depth = jp_depth - 1
+            return arr
+        }
+        loop (jp_bad == 0) {
+            type.ptr<type.JV> v = jp_value()
+            when (jp_bad == 1) {
+                break
+            }
+            jp_push_item(arr, v)
+            jp_ws()
+            when (jp_pos >= jp_len) {
+                jp_bad = 1
+                break
+            }
+            type.number c = text.byte_at(jp_src, jp_pos)
+            when (c == 44) {
+                jp_pos = jp_pos + 1
+            }
+            else when (c == 93) {
+                jp_pos = jp_pos + 1
+                break
+            }
+            else {
+                jp_bad = 1
+                break
+            }
+        }
+        jp_depth = jp_depth - 1
+        when (jp_bad == 1) {
+            return null
+        }
+        return arr
+    }
+    else when (b == 34) {
+        jp_nodes = jp_nodes + 1
+        type.ptr<type.JV> v = new_jv(J_STR)
+        v.str = jp_string()
+        when (jp_bad == 1) {
+            return null
+        }
+        return v
+    }
+    else when (b == 116) {
+        # true
+        when (jp_pos + 4 <= jp_len and text.slice(jp_src, jp_pos, jp_pos + 4) == "true") {
+            jp_pos = jp_pos + 4
+            jp_nodes = jp_nodes + 1
+            return new_jv(J_TRUE)
+        }
+        jp_bad = 1
+        return null
+    }
+    else when (b == 102) {
+        # false
+        when (jp_pos + 5 <= jp_len and text.slice(jp_src, jp_pos, jp_pos + 5) == "false") {
+            jp_pos = jp_pos + 5
+            jp_nodes = jp_nodes + 1
+            return new_jv(J_FALSE)
+        }
+        jp_bad = 1
+        return null
+    }
+    else when (b == 110) {
+        # null
+        when (jp_pos + 4 <= jp_len and text.slice(jp_src, jp_pos, jp_pos + 4) == "null") {
+            jp_pos = jp_pos + 4
+            jp_nodes = jp_nodes + 1
+            return new_jv(J_NULL)
+        }
+        jp_bad = 1
+        return null
+    }
+    else when (b == 45 or (b >= 48 and b <= 57)) {
+        type.ptr<type.JV> v = jp_number()
+        jp_nodes = jp_nodes + 1
+        return v
+    }
+    jp_bad = 1
+    return null
+}
+
+# entry: parse a complete JSON document; null on any malformed input
+function.parse(text.s) -> type.ptr<type.JV> {
+    jp_bad = 0
+    jp_pos = 0
+    jp_src = s
+    jp_len = text.length(s)
+    jp_depth = 0
+    jp_nodes = 0
+    type.ptr<type.JV> v = jp_value()
+    when (jp_bad == 1) {
+        return null
+    }
+    jp_ws()
+    when (jp_pos != jp_len) {
+        # trailing garbage
+        return null
+    }
+    return v
+}
+
+# ---- tree accessors (defensive: wrong-kind lookups yield "absent") ----
+function.jv_kind(type.ptr<type.JV>.v) -> number {
+    when (v == null) {
+        return J_NULL
+    }
+    return v.kind
+}
+
+function.jv_get(type.ptr<type.JV>.obj, text.key) -> type.ptr<type.JV> {
+    when (obj == null or obj.kind != J_OBJ) {
+        return null
+    }
+    loop (i from 0 until obj.nkeys) {
+        when (obj.keys[i] == key) {
+            return obj.vals[i]
+        }
+    }
+    return null
+}
+
+function.jv_str(type.ptr<type.JV>.v, text.key) -> text {
+    type.ptr<type.JV> f = jv_get(v, key)
+    when (f == null or f.kind != J_STR) {
+        return ""
+    }
+    return f.str
+}
+
+function.jv_int(type.ptr<type.JV>.v, text.key, number.fallback) -> number {
+    type.ptr<type.JV> f = jv_get(v, key)
+    when (f == null or f.kind != J_NUM) {
+        return fallback
+    }
+    when (f.is_dec == 1) {
+        return decimal.to_number(f.dnum)
+    }
+    return f.inum
+}
+
+function.jv_text(type.ptr<type.JV>.v) -> text {
+    when (v == null or v.kind != J_STR) {
+        return ""
+    }
+    return v.str
+}
+
+# release a parsed tree's node records and arrays (the referenced TEXTS
+# are arena views and survive); safe to call on any subtree
+function.jv_release(type.ptr<type.JV>.v) -> number {
+    when (v == null) {
+        return 0
+    }
+    when (v.kind == J_ARR) {
+        loop (i from 0 until v.nitems) {
+            jv_release(v.items[i])
+        }
+        when (v.items != null) {
+            release(v.items)
+        }
+        v.items = null
+        v.nitems = 0
+    }
+    when (v.kind == J_OBJ) {
+        loop (i from 0 until v.nkeys) {
+            jv_release(v.vals[i])
+        }
+        when (v.keys != null) {
+            release(v.keys)
+            release(v.vals)
+        }
+        v.keys = null
+        v.vals = null
+        v.nkeys = 0
+    }
+    release(v)
+    return 0
+}
+
+# ---- the JSON writer (a growable byte builder, arena-adopted) ----
+#
+# Building responses by text concatenation would be O(n^2) in the
+# arena; the SB mirrors elf.ok's Buf discipline for protocol bytes.
+struct.SB = {
+    type.ptr<type.byte> data
+    type.number len
+    type.number cap
+}.end
+
+function.sb_new() -> type.ptr<type.SB> {
+    type.ptr<type.SB> b = alloc<type.SB>(1)
+    b.data = null
+    b.len = 0
+    b.cap = 0
+    return b
+}
+
+function.sb_reserve(type.ptr<type.SB>.b, number.need) -> number {
+    when (b.len + need <= b.cap) {
+        return 0
+    }
+    type.number newcap = 256
+    when (b.cap > 0) {
+        newcap = b.cap * 2
+    }
+    loop (b.len + need > newcap) {
+        newcap = newcap * 2
+    }
+    type.ptr<type.byte> nd = alloc<type.byte>(newcap)
+    loop (i from 0 until b.len) {
+        nd[i] = b.data[i]
+    }
+    type.ptr<type.byte> old = b.data
+    b.data = nd
+    b.cap = newcap
+    when (old != null) {
+        release(old)
+    }
+    return 0
+}
+
+function.sb_put(type.ptr<type.SB>.b, number.v) -> number {
+    sb_reserve(b, 1)
+    b.data[b.len] = number.to_uint8(v)
+    b.len = b.len + 1
+    return 0
+}
+
+function.sb_app(type.ptr<type.SB>.b, text.s) -> number {
+    type.number n = text.length(s)
+    sb_reserve(b, n)
+    loop (i from 0 until n) {
+        b.data[b.len] = number.to_uint8(text.byte_at(s, i))
+        b.len = b.len + 1
+    }
+    return 0
+}
+
+function.sb_num(type.ptr<type.SB>.b, number.v) -> number {
+    sb_app(b, number.to_text(v))
+    return 0
+}
+
+function.sb_text(type.ptr<type.SB>.b) -> text {
+    return rt.arena_text(b.data, b.len)
+}
+
+# append a JSON string literal (escaping " \ and control characters;
+# UTF-8 payload bytes pass through unchanged — LSP JSON is UTF-8)
+function.sb_json_str(type.ptr<type.SB>.b, text.s) -> number {
+    sb_put(b, 34)
+    type.number n = text.length(s)
+    loop (i from 0 until n) {
+        type.number c = text.byte_at(s, i)
+        when (c == 34) {
+            sb_app(b, "\\\"")
+        }
+        else when (c == 92) {
+            sb_app(b, "\\\\")
+        }
+        else when (c == 8) {
+            sb_app(b, "\\b")
+        }
+        else when (c == 12) {
+            sb_app(b, "\\f")
+        }
+        else when (c == 10) {
+            sb_app(b, "\\n")
+        }
+        else when (c == 13) {
+            sb_app(b, "\\r")
+        }
+        else when (c == 9) {
+            sb_app(b, "\\t")
+        }
+        else when (c < 32) {
+            sb_app(b, "\\u00")
+            type.number hi = c / 16
+            type.number lo = c % 16
+            when (hi < 10) {
+                sb_put(b, 48 + hi)
+            }
+            else {
+                sb_put(b, 87 + hi)
+            }
+            when (lo < 10) {
+                sb_put(b, 48 + lo)
+            }
+            else {
+                sb_put(b, 87 + lo)
+            }
+        }
+        else {
+            sb_put(b, c)
+        }
+    }
+    sb_put(b, 34)
+    return 0
+}
+
+# serialize a JV tree back to JSON text (used to echo request ids and
+# to reply with parsed structures when needed)
+function.jv_write(type.ptr<type.SB>.b, type.ptr<type.JV>.v) -> number {
+    when (v == null) {
+        sb_app(b, "null")
+        return 0
+    }
+    when (v.kind == J_NULL) {
+        sb_app(b, "null")
+        return 0
+    }
+    when (v.kind == J_FALSE) {
+        sb_app(b, "false")
+        return 0
+    }
+    when (v.kind == J_TRUE) {
+        sb_app(b, "true")
+        return 0
+    }
+    when (v.kind == J_NUM) {
+        when (v.is_dec == 1) {
+            sb_app(b, rt.decimal_to_text(v.dnum))
+        }
+        else {
+            sb_num(b, v.inum)
+        }
+        return 0
+    }
+    when (v.kind == J_STR) {
+        sb_json_str(b, v.str)
+        return 0
+    }
+    when (v.kind == J_ARR) {
+        sb_put(b, 91)
+        loop (i from 0 until v.nitems) {
+            when (i > 0) {
+                sb_put(b, 44)
+            }
+            jv_write(b, v.items[i])
+        }
+        sb_put(b, 93)
+        return 0
+    }
+    # object
+    sb_put(b, 123)
+    loop (i from 0 until v.nkeys) {
+        when (i > 0) {
+            sb_put(b, 44)
+        }
+        sb_json_str(b, v.keys[i])
+        sb_put(b, 58)
+        jv_write(b, v.vals[i])
+    }
+    sb_put(b, 125)
+    return 0
+}
+
+# ---- JSON-RPC framing over stdio ----
+#
+# Base protocol (LSP part 1): messages are ASCII headers terminated by
+# CRLF, a blank line, then exactly Content-Length body bytes. Reading
+# is tolerant: LF-only header endings are accepted, and garbage that
+# carries no resynchronizable frame is skipped one byte at a time —
+# the next well-formed message is always found. A declared length
+# beyond the 64 MiB protocol ceiling is treated as garbage (never a
+# runaway allocation).
+const.MAX_MSG = 67108864
+
+type.ptr<type.byte> in_buf = null
+type.number in_len = 0
+type.number in_cap = 0
+type.number in_pos = 0
+type.number in_eof = 0
+
+function.in_reserve(number.need) -> number {
+    when (in_len + need <= in_cap) {
+        return 0
+    }
+    type.number newcap = 4096
+    when (in_cap > 0) {
+        newcap = in_cap * 2
+    }
+    loop (in_len + need > newcap) {
+        newcap = newcap * 2
+    }
+    type.ptr<type.byte> nd = alloc<type.byte>(newcap)
+    loop (i from 0 until in_len) {
+        nd[i] = in_buf[i]
+    }
+    type.ptr<type.byte> old = in_buf
+    in_buf = nd
+    in_cap = newcap
+    when (old != null) {
+        release(old)
+    }
+    return 0
+}
+
+# pull more bytes from stdin into the buffer; 0 on EOF
+function.in_fill() -> number {
+    when (in_eof == 1) {
+        return 0
+    }
+    in_reserve(4096)
+    type.number n = sys.read(0, in_buf + in_len, in_cap - in_len)
+    when (n <= 0) {
+        in_eof = 1
+        return 0
+    }
+    in_len = in_len + n
+    return n
+}
+
+# does the buffer hold a complete header block? returns the byte
+# index of the body start (after the blank line), -1 when incomplete
+function.in_header_end() -> number {
+    type.number i = in_pos
+    loop (i < in_len) {
+        # the end (LF) of the line starting at i
+        type.number j = i
+        loop (j < in_len and in_buf[j] != 10) {
+            j = j + 1
+        }
+        when (j >= in_len) {
+            return-1
+        }
+        # line content is [i, j) minus a trailing CR
+        type.number content_end = j
+        when (content_end > i and in_buf[content_end - 1] == 13) {
+            content_end = content_end - 1
+        }
+        when (content_end == i) {
+            # the blank line: the body starts after its LF
+            return j + 1
+        }
+        i = j + 1
+    }
+    return-1
+}
+
+# try to interpret [in_pos, hdr_end) as a header block and return the
+# Content-Length value; -1 when the block is malformed
+function.in_content_length(number.hdr_end) -> number {
+    type.number i = in_pos
+    type.number clen =-1
+    loop (i < hdr_end - 1) {
+        # find "Content-Length:" at a line start (case-insensitive)
+        type.number save = i
+        type.number hit2 = 1
+        type.text want = "content-length:"
+        loop (k from 0 until 15) {
+            when (i >= hdr_end) {
+                hit2 = 0
+                break
+            }
+            type.number b = in_buf[i]
+            when (b >= 65 and b <= 90) {
+                b = b + 32
+            }
+            when (b != text.byte_at(want, k)) {
+                hit2 = 0
+                break
+            }
+            i = i + 1
+        }
+        when (hit2 == 1) {
+            # skip spaces/tabs, then digits
+            loop (i < hdr_end and (in_buf[i] == 32 or in_buf[i] == 9)) {
+                i = i + 1
+            }
+            type.number v = 0
+            type.number nd = 0
+            loop (i < hdr_end and in_buf[i] >= 48 and in_buf[i] <= 57) {
+                v = v * 10 + (in_buf[i] - 48)
+                nd = nd + 1
+                i = i + 1
+            }
+            when (nd > 0) {
+                clen = v
+            }
+        }
+        # advance to the next line
+        i = save
+        loop (i < hdr_end and in_buf[i] != 10) {
+            i = i + 1
+        }
+        when (i < hdr_end) {
+            i = i + 1
+        }
+    }
+    return clen
+}
+
+# read the next complete message body; "" means the client is gone
+# (EOF with nothing buffered) — garbage framing is skipped until a
+# well-formed frame appears
+function.read_msg() -> text {
+    type.number alive = 1
+    loop (alive == 1) {
+        # do we have a complete header block?
+        type.number he = in_header_end()
+        when (he < 0) {
+            when (in_fill() == 0) {
+                # EOF: nothing more will arrive
+                return ""
+            }
+            continue
+        }
+        type.number clen = in_content_length(he)
+        when (clen < 0 or clen > MAX_MSG) {
+            # malformed header block: skip ONE byte and rescan (a valid
+            # frame further ahead will eventually align)
+            in_pos = in_pos + 1
+            when (in_pos >= in_len) {
+                in_pos = 0
+                in_len = 0
+                when (in_fill() == 0) {
+                    return ""
+                }
+            }
+            continue
+        }
+        # wait for the full body
+        when (in_len - he < clen) {
+            when (in_fill() == 0) {
+                # EOF mid-body: truncated message, nothing usable
+                return ""
+            }
+            continue
+        }
+        type.text body = rt.arena_text(in_buf + he, clen)
+        in_pos = he + clen
+        # compact the buffer when the consumed prefix gets large
+        when (in_pos > 1048576) {
+            type.number rest = in_len - in_pos
+            loop (i from 0 until rest) {
+                in_buf[i] = in_buf[in_pos + i]
+            }
+            in_pos = 0
+            in_len = rest
+        }
+        return body
+    }
+    return ""
+}
+
+# write one framed message to stdout
+function.write_msg(text.body) -> number {
+    type.text frame = "Content-Length: " + number.to_text(text.length(body)) + "\r\n\r\n" + body
+    return sys.write(1, frame)
+}
+
+# ---- UTF-8 <-> UTF-16 position mapping ----
+#
+# Compiler positions are (line, byte-column), both 1-based. LSP
+# positions are (line, UTF-16 code-unit offset), 0-based. The source
+# is UTF-8; the mappers decode UTF-8 sequences (leniently: an invalid
+# byte counts as one unit and advances one byte — never a crash).
+# length in bytes of the UTF-8 sequence led by b (1 for invalid leads)
+function.utf8_seq_len(number.b) -> number {
+    when (b < 128) {
+        return 1
+    }
+    when (b >= 194 and b <= 223) {
+        return 2
+    }
+    when (b >= 224 and b <= 239) {
+        return 3
+    }
+    when (b >= 240 and b <= 244) {
+        return 4
+    }
+    return 1
+}
+
+# UTF-16 code units for one code point
+function.utf16_units(number.cp) -> number {
+    when (cp >= 65536) {
+        return 2
+    }
+    return 1
+}
+
+# decode the code point starting at byte off (lenient); invalid
+# sequences fall back to the raw lead byte
+function.decode_cp(text.s, number.off, number.seqlen) -> number {
+    type.number b0 = text.byte_at(s, off)
+    when (seqlen == 1) {
+        return b0
+    }
+    when (off + seqlen > text.length(s)) {
+        return b0
+    }
+    type.number cp = 0
+    when (seqlen == 2) {
+        cp = b0 & 31
+    }
+    else when (seqlen == 3) {
+        cp = b0 & 15
+    }
+    else {
+        cp = b0 & 7
+    }
+    loop (i from 1 until seqlen) {
+        type.number b = text.byte_at(s, off + i)
+        when (b < 128 or b > 191) {
+            # invalid continuation: lenient fallback
+            return b0
+        }
+        cp = cp * 64 + (b & 63)
+    }
+    return cp
+}
+
+# byte offset of the start of 1-based line `want` (-1 when the line
+# does not exist)
+function.line_start(text.s, number.want) -> number {
+    when (want <= 1) {
+        return 0
+    }
+    type.number line = 1
+    type.number n = text.length(s)
+    loop (i from 0 until n) {
+        when (text.byte_at(s, i) == 10) {
+            line = line + 1
+            when (line == want) {
+                return i + 1
+            }
+        }
+    }
+    return-1
+}
+
+# compiler (line, byte-col) -> LSP character (UTF-16 units from the
+# line start); returns -1 when the line does not exist
+function.col_to_char16(text.s, number.line, number.col) -> number {
+    when (col <= 1) {
+        return 0
+    }
+    type.number ls = line_start(s, line)
+    when (ls < 0) {
+        return-1
+    }
+    type.number n = text.length(s)
+    type.number units = 0
+    type.number off = ls
+    type.number target = col - 1
+    loop (off < n) {
+        type.number b = text.byte_at(s, off)
+        when (b == 10) {
+            break
+        }
+        when (target == 0) {
+            break
+        }
+        type.number sl = utf8_seq_len(b)
+        type.number cp = decode_cp(s, off, sl)
+        units = units + utf16_units(cp)
+        when (sl > target) {
+            # the column points INTO a multi-byte sequence; land on its
+            # start (the LSP client rounds to the nearest boundary)
+            sl = target
+        }
+        off = off + sl
+        target = target - sl
+    }
+    return units
+}
+
+# LSP (line, character) -> byte offset in s (clamps to line end; -1
+# when the line does not exist)
+function.char16_to_off(text.s, number.line0, number.char0) -> number {
+    type.number ls = line_start(s, line0 + 1)
+    when (ls < 0) {
+        return-1
+    }
+    type.number n = text.length(s)
+    type.number units = 0
+    type.number off = ls
+    loop (off < n) {
+        type.number b = text.byte_at(s, off)
+        when (b == 10) {
+            break
+        }
+        when (units >= char0) {
+            break
+        }
+        type.number sl = utf8_seq_len(b)
+        type.number cp = decode_cp(s, off, sl)
+        type.number u = utf16_units(cp)
+        when (units + u > char0) {
+            # the position splits a code point: land on its start
+            break
+        }
+        units = units + u
+        off = off + sl
+    }
+    return off
+}
+
+# ---- the open-document table ----
+struct.Doc = {
+    type.text uri
+    type.text path
+    type.text text
+    type.number version
+    type.number open
+}.end
+
+const.MAX_DOCS = 32
+type.ptr<type.ptr<type.Doc>> docs = null
+type.number n_docs = 0
+
+function.doc_reset() -> number {
+    n_docs = 0
+    return 0
+}
+
+function.hex_val(number.b) -> number {
+    when (b >= 48 and b <= 57) {
+        return b - 48
+    }
+    when (b >= 97 and b <= 102) {
+        return b - 87
+    }
+    when (b >= 65 and b <= 70) {
+        return b - 55
+    }
+    return-1
+}
+
+# URI -> filesystem path (strips file:// , percent-decodes; non-file
+# URIs pass through undecoded — diagnostics then key on the URI)
+function.uri_to_path(text.uri) -> text {
+    type.number n = text.length(uri)
+    when (n < 7 or text.slice(uri, 0, 7) != "file://") {
+        return uri
+    }
+    type.number rest = 7
+    # file://localhost/path -> /path
+    when (n >= 17 and text.slice(uri, 7, 17) == "localhost") {
+        rest = 17
+    }
+    type.ptr<type.SB> b = sb_new()
+    type.number i = rest
+    loop (i < n) {
+        type.number c = text.byte_at(uri, i)
+        when (c == 37 and i + 2 < n) {
+            type.number h1 = hex_val(text.byte_at(uri, i + 1))
+            type.number h2 = hex_val(text.byte_at(uri, i + 2))
+            when (h1 >= 0 and h2 >= 0) {
+                sb_put(b, h1 * 16 + h2)
+                i = i + 2
+            }
+            else {
+                sb_put(b, c)
+            }
+        }
+        else {
+            sb_put(b, c)
+        }
+        i = i + 1
+    }
+    return sb_text(b)
+}
+
+function.doc_find(text.uri) -> type.ptr<type.Doc> {
+    loop (i from 0 until n_docs) {
+        when (docs[i].uri == uri) {
+            return docs[i]
+        }
+    }
+    return null
+}
+
+function.doc_open(text.uri, text.text, number.version) -> type.ptr<type.Doc> {
+    type.ptr<type.Doc> d = doc_find(uri)
+    when (d != null) {
+        d.text = text
+        d.version = version
+        d.open = 1
+        return d
+    }
+    when (n_docs == MAX_DOCS) {
+        # recycle the oldest closed slot; when all are open, replace the
+        # least recently opened (documented bound, never a crash)
+        type.number victim = 0
+        loop (i from 0 until n_docs) {
+            when (docs[i].open == 0) {
+                victim = i
+                break
+            }
+        }
+        d = docs[victim]
+        d.uri = uri
+        d.path = uri_to_path(uri)
+        d.text = text
+        d.version = version
+        d.open = 1
+        return d
+    }
+    when (docs == null) {
+        docs = alloc<type.ptr<type.Doc>>(MAX_DOCS)
+    }
+    d = alloc<type.Doc>(1)
+    d.uri = uri
+    d.path = uri_to_path(uri)
+    d.text = text
+    d.version = version
+    d.open = 1
+    docs[n_docs] = d
+    n_docs = n_docs + 1
+    return d
+}
+
+function.doc_close(text.uri) -> number {
+    type.ptr<type.Doc> d = doc_find(uri)
+    when (d != null) {
+        d.open = 0
+        d.text = ""
+    }
+    return 0
+}
+
+function.doc_by_path(text.path) -> type.ptr<type.Doc> {
+    loop (i from 0 until n_docs) {
+        when (docs[i].open == 1 and docs[i].path == path) {
+            return docs[i]
+        }
+    }
+    return null
+}
+
+# ---- server state ----
+type.number initialized = 0
+type.number shutdown_seen = 0
+const.SERVER_NAME = "okular"
+const.SERVER_VERSION = "0.18"
+
+# write a JSON-RPC response: {"jsonrpc":"2.0","id":<id>,"result":<res>}
+# (res == null writes the JSON literal null — shutdown's result)
+function.send_result(text.id_text, type.ptr<type.SB>.res) -> number {
+    type.ptr<type.SB> b = sb_new()
+    sb_app(b, "{\"jsonrpc\":\"2.0\",\"id\":")
+    sb_app(b, id_text)
+    sb_app(b, ",\"result\":")
+    when (res == null) {
+        sb_app(b, "null")
+    }
+    else {
+        loop (i from 0 until res.len) {
+            sb_put(b, res.data[i])
+        }
+    }
+    sb_app(b, "}")
+    return write_msg(sb_text(b))
+}
+
+# write a JSON-RPC error response: {"jsonrpc":"2.0","id":<id>,
+# "error":{"code":<code>,"message":"<msg>"}}
+function.send_error(text.id_text, number.code, text.msg) -> number {
+    type.ptr<type.SB> b = sb_new()
+    sb_app(b, "{\"jsonrpc\":\"2.0\",\"id\":")
+    sb_app(b, id_text)
+    sb_app(b, ",\"error\":{\"code\":")
+    sb_num(b, code)
+    sb_app(b, ",\"message\":")
+    sb_json_str(b, msg)
+    sb_app(b, "}}")
+    return write_msg(sb_text(b))
+}
+
+# write a JSON-RPC notification (no id)
+function.send_notification(text.method, type.ptr<type.SB>.params) -> number {
+    type.ptr<type.SB> b = sb_new()
+    sb_app(b, "{\"jsonrpc\":\"2.0\",\"method\":")
+    sb_json_str(b, method)
+    when (params != null) {
+        sb_app(b, ",\"params\":")
+        loop (i from 0 until params.len) {
+            sb_put(b, params.data[i])
+        }
+    }
+    sb_app(b, "}")
+    return write_msg(sb_text(b))
+}

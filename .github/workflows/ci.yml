@@ -101,10 +101,27 @@ jobs:
           fi
           echo "native arm64 product test OK: $OUT"
 
+  lsp:
+    name: LSP protocol suite (okular lsp over stdio JSON-RPC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the compiler (C-free)
+        run: make
+
+      # A real JSON-RPC 2.0 client drives the server through the full
+      # contract: lifecycle, document sync, diagnostics (0-based lines,
+      # UTF-16 characters), hover signatures, and the robustness clause
+      # (malformed anything degrades to an error response, never a
+      # crash). python3 is a test tool, not a build dependency.
+      - name: LSP protocol tests
+        run: bash tools/run_lsp_tests.sh
+
   release-package:
     name: Package and test the real product (x86-64 and arm64)
     runs-on: ubuntu-latest
-    needs: [selfhost, arm64, arm64-native]
+    needs: [selfhost, arm64, arm64-native, lsp]
     steps:
       - uses: actions/checkout@v4
 
