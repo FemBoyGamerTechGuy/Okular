@@ -1,6 +1,6 @@
 # Getting Started with Okular
 
-**Okular 0.14** — a natively compiled systems language. This guide takes
+**Okular 0.15** — a natively compiled systems language. This guide takes
 you from zero to a running executable.
 
 ## Requirements
