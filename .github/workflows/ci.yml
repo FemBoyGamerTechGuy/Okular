@@ -82,15 +82,19 @@ jobs:
       # deterministic local build (md5 recorded by the maintainer); and
       # one traced compile shows how far the native compiler gets before
       # any hang, with the last emitted function in the log
-      - name: Diagnostics (binary hash + one traced compile)
+      - name: Diagnostics (binary hash + strace + traced compile)
         run: |
           md5sum build/okular-arm64
+          sudo apt-get install -y strace >/dev/null 2>&1 || true
           mkdir -p build/diag/hello
           printf 'type.text=1\n\nwrite("diag")\nprint\n' > build/diag/hello/main.ok
           cd build/diag/hello
-          timeout 60 ../../../build/okular-arm64 main.ok --target arm64 --out ./diag 2> trace.log || true
-          echo "--- trace tail ---"
-          tail -5 trace.log || true
+          echo "--- traced compile (--trace-emit): the last phase reached ---"
+          timeout 60 ../../../build/okular-arm64 main.ok --target arm64 --out ./diag --trace-emit 2> trace.log || true
+          echo "trace lines: $(wc -l < trace.log)"; tail -5 trace.log || true
+          echo "--- strace: the last syscalls before the hang ---"
+          timeout 60 strace -f -o strace.out ../../../build/okular-arm64 main.ok --target arm64 --out ./diag2 || true
+          tail -30 strace.out || true
           echo "--- result ---"
           ls -la ./
           cd "$GITHUB_WORKSPACE"
