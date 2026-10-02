@@ -19,8 +19,14 @@ jobs:
       - name: Build the Okular compiler with the native seed (zero C)
         run: make
 
-      - name: Self-reproduction + 191-case differential suite
+      - name: Self-reproduction + full differential suite
         run: bash tools/run_selfbuild_check.sh
+
+      - name: Formatting check (okular fmt --check)
+        run: |
+          build/okular fmt --check \
+            selfhost/compiler/main.ok selfhost/compiler/src/*.ok \
+            stdlib/*.ok examples/*/main.ok
 
   release-package:
     name: Package and test the real product
