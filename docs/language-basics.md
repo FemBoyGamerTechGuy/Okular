@@ -105,6 +105,38 @@ loop (lives > 0) { ... }          # condition loop
 `break` and `continue` work as usual. Loop bounds evaluate once, before
 the first iteration.
 
+## Recoverable errors — `guard`/`fail` (0.19)
+
+Functions that can fail say so in their signature, and every call pays
+the failure price visibly at the call site:
+
+```ok
+function.parse(text.input) -> number? {   # `?` = may fail
+    when (text.length(input) == 0) {
+        fail "empty input"                # the message is `text`
+    }
+    return text.length(input)
+}
+
+guard n = parse(user_input) else (err) {  # err: text, scoped here
+    write("bad input: " + err)
+    print
+    return 1                              # the block MUST exit
+}
+write(n)                                  # n is valid here — always
+```
+
+The rules the compiler enforces:
+
+* An unguarded call to a fallible function is a **compile error** — no
+  silent defaults, no ignored results.
+* The else-block must exit (`return`, `fail`, `break`, `continue`);
+  that is what makes `n` safe to use afterwards.
+* Propagation is explicit — re-raise with `fail err`, optionally
+  decorating the message first.
+* Top-level code cannot `fail` (it is the program itself), but it can
+  `guard`.
+
 ## Match-style `when` (0.15)
 
 The same `when` keyword also reads a **value** instead of testing a

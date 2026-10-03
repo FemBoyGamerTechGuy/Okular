@@ -58,6 +58,15 @@ type.ptr<type.byte> out_buf = null
 type.number out_len = 0
 const.OUT_CAP = 65536
 
+# ---- recoverable-error state (guard/fail, spec §13) ----
+# The ABI the codegen rides on: a guarded call clears err_flag first,
+# the callee raises it on `fail` (parking the message in err_msg), and
+# the caller's check binds the message, re-clears the flag (a recovered
+# inner error must never leak into an outer guard), and runs the else
+# block. Single-threaded by design — Okular programs have one thread.
+type.number err_flag = 0
+type.text err_msg = ""
+
 function.out_ensure() -> number {
     when (out_buf == null) {
         out_buf = sys.mmap(OUT_CAP)

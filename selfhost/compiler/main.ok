@@ -848,6 +848,9 @@ function.lsp_hover(type.ptr<type.Doc>.d, number.line0, number.char0, type.ptr<ty
         }
         lsp.sb_app(out, ") -> ")
         lsp.sb_app(out, sema.ty_name(sym.func.ret))
+        when (sym.func.fallible == 1) {
+            lsp.sb_app(out, "?")
+        }
         return 1
     }
     when (sym.kind == sema.SYM_VAR) {

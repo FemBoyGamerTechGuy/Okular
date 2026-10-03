@@ -45,6 +45,9 @@ const.I_PTRCHK = 37
 const.I_PTR_SCALE = 38
 const.I_PTR_DIFF = 39
 const.I_ADDOFF = 40
+const.I_ERR_CLEAR = 41  # guard/fail prologue: rt error flag = 0
+const.I_ERR_CHECK = 42  # after a guarded call: on flag, bind err slot from the msg global, clear, jump
+const.I_FAIL = 43  # fail <text>: set flag+msg, return a zero of the fn's type
 
 struct.IrInst = {
     type.number kind
@@ -1327,6 +1330,57 @@ function.build_stmt(type.ptr<type.Node>.s) -> number {
         emit(p)
         return 0
     }
+    when (s.kind == parser.N_FAIL) {
+        # fail <msg>: evaluate the text message, then I_FAIL stores it to
+        # the runtime error slot and returns a zero of the current
+        # function's type (the caller's guard never reads it)
+        build_operand_conv(s.a, sema.T_TEXT)
+        type.ptr<type.IrInst> f = mkinst(I_FAIL, s.line, s.col)
+        f.ty = stmt_fi.ret
+        emit(f)
+        return 0
+    }
+    when (s.kind == parser.N_GUARD) {
+        # guard v = call(...) [else (err)] { ... } — recoverable errors
+        # (spec §13). The runtime owns the error state (rt.ok globals
+        # err_flag/err_msg); the ABI is:
+        #   caller:  err_flag = 0; r = call();
+        #            if (err_flag) { err = err_msg; err_flag = 0; goto ELSE }
+        #   callee:  on `fail msg`: err_msg = msg; err_flag = 1; return 0
+        # The flag is cleared before the call (callee writes it only on
+        # failure) and re-cleared while taking the error branch, so a
+        # recovered inner error can never leak into an outer guard.
+        type.ptr<type.IrInst> clr = mkinst(I_ERR_CLEAR, s.line, s.col)
+        emit(clr)
+        build_expr(s.a)
+        # the guarded value lands in its local (a garbage store on the
+        # error path — the else-block exits, so it is never observed)
+        build_store(s.sym)
+        type.number l_else = new_label()
+        type.ptr<type.IrInst> chk = mkinst(I_ERR_CHECK, s.line, s.col)
+        chk.label = l_else
+        when (s.sym2 != null) {
+            chk.slot = slot_for(s.sym2)
+        }
+        else {
+            chk.slot =-1
+        }
+        emit(chk)
+        # success path: skip the else-block
+        type.number l_end = new_label()
+        type.ptr<type.IrInst> skip = mkinst(I_JMP, s.line, s.col)
+        skip.label = l_end
+        emit(skip)
+        # the else-block (its exit is guaranteed by sema)
+        type.ptr<type.IrInst> le = mkinst(I_LABEL, s.line, s.col)
+        le.label = l_else
+        emit(le)
+        build_stmt_list(s.body, s.nbody)
+        type.ptr<type.IrInst> lend = mkinst(I_LABEL, s.line, s.col)
+        lend.label = l_end
+        emit(lend)
+        return 0
+    }
     when (s.kind == parser.N_RETURN) {
         when (s.a != null) {
             build_operand_conv(s.a, stmt_fi.ret)
@@ -2277,6 +2331,9 @@ function.kind_name(number.k) -> text {
     else when (k == I_FS_EXISTS) { return "FS_EXISTS" }
     else when (k == I_ENV_ARGC) { return "ENV_ARGC" }
     else when (k == I_ENV_ARG) { return "ENV_ARG" }
+    else when (k == I_ERR_CLEAR) { return "ERR_CLEAR" }
+    else when (k == I_ERR_CHECK) { return "ERR_CHECK" }
+    else when (k == I_FAIL) { return "FAIL" }
     return "?"
 }
 
@@ -2285,7 +2342,7 @@ function.dump_func(type.ptr<type.IrFunc>.f) -> number {
     loop (i from 0 until f.n) {
         type.ptr<type.IrInst> in = f.insts[i]
         type.text line = "  " + number.to_text(i) + " " + kind_name(in.kind)
-        when (in.kind == I_LABEL or in.kind == I_JMP or in.kind == I_JMPF) {
+        when (in.kind == I_LABEL or in.kind == I_JMP or in.kind == I_JMPF or in.kind == I_ERR_CHECK) {
             line = line + " L" + number.to_text(in.label)
         }
         when (in.kind == I_LOAD_LOCAL or in.kind == I_STORE_LOCAL or in.kind == I_ADDR_LOCAL) {

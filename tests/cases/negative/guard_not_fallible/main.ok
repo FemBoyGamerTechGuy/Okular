@@ -1,0 +1,14 @@
+type.text=1
+
+function.double(number.x) -> number {
+    return x * 2
+}
+
+function.main() -> number {
+    guard n = double(21) else {
+        return 1
+    }
+    return 0
+}
+
+main()

@@ -1,11 +1,33 @@
 # Okular Language Specification
 
-**Version:** 0.18 (the LSP foundation: `okular lsp` — diagnostics and hover over stdio JSON-RPC)
+**Version:** 0.19 (recoverable errors: `guard`/`fail` — the designed error model, implemented and enforced)
 **Status:** Evolving draft
 **Implementation:** the compiler written in Okular (`selfhost/compiler`),
 which compiles itself; a committed native seed (`bin/okular`) builds it —
 no C compiler, no `as`, no `ld` anywhere in the repository
 
+> 0.19 gives Okular **recoverable errors** (§13): the designed
+> `guard`/`fail` model, implemented and enforced. `-> T?` marks a
+> fallible function; `fail <text>` raises with a message; every call
+> to a fallible function must be guarded — `guard v = call(...) else
+> (err) { ... }` binds the result and the message, and the else-block
+> must exit (`return` / `fail` / `break` / `continue`), so the guarded
+> value is always valid past the guard. Propagation is explicit
+> (`fail err` re-raises); the runtime ABI is two `rt` globals
+> (`err_flag`, `err_msg`) with clear-before-call / bind-and-re-clear
+> discipline — a recovered inner error can never leak into an outer
+> guard. `guard` and `fail` were reserved words since 0.1; the `?`
+> token joins the grammar. Both backends emit the ABI; the optimizer
+> treats the flag check as a control-flow barrier (semantics identical
+> at -O0/-O1/-O2, differentially verified); the LSP recompiles and
+> hovers through it (`function parse(s: text) -> number?`). Nine new
+> checks (three positive programs across all optimization levels and
+> ARM64, six negative diagnostics: unguarded call, non-exiting
+> else-block, `fail` in a non-fallible function, non-text message,
+> guarding a non-fallible call, top-level `fail`); the suite is now
+> 850. Also in this release: 0.18.1's ARM64 native fixes and the qemu
+> CI cross-check (see below).
+>
 > 0.18 adds **the language server** (§15): `okular lsp` speaks
 > JSON-RPC 2.0 over stdio — `initialize`/`shutdown`/`exit` lifecycle,
 > `textDocument/didOpen`/`didChange`/`didClose` with full-text sync,
@@ -1427,20 +1449,56 @@ Okular's memory model is now real, not just designed:
   **malformed text in `text.to_number`/`text.to_decimal` (0.6) exits 76**;
   **file operation failures (0.10) exit 77**. Implemented for the cases the
   runtime can hit.
-* **Recoverable errors** — designed model: valued functions can signal
-  failure through a `guard`/`fail` mechanism with explicit propagation:
+* **Recoverable errors** — `guard`/`fail`, **implemented (0.19)**. Valued
+  functions may declare themselves fallible with `?` after the return
+  type; failure travels as a `text` message through an explicit,
+  checked protocol:
 
   ```ok
-  function.parse(text.input) -> number {
-    fail "not a number"        # provisional grammar
+  function.parse(text.input) -> number? {
+    fail "not a number"          # raise: message is `text`
   }
 
-  guard result = parse(userInput) else {
-    # error path; result unusable here
+  guard result = parse(userInput) else (err) {
+    # error path: `err: text` holds the message; the block MUST exit
+    return -1                    # (return / fail / break / continue)
   }
+  # here `result: number` is valid — the else-block exited, so the
+  # only way control reaches past the guard is the success path
   ```
 
-  This is documented direction, not 0.1 behavior; keywords are reserved.
+  The rules, all compiler-enforced:
+
+  - `-> T?` marks a fallible function (any valued return type; void
+    functions cannot be fallible in 0.19 — a documented restriction).
+  - `fail <text-expr>` aborts the function immediately; the return
+    value is never observed (the caller's error path diverges).
+    `list_returns` treats a `fail` like a `return`: a function whose
+    paths all end in `fail` or `return` satisfies its result promise.
+  - Every call to a fallible function must be the initializer of a
+    `guard` — an unguarded call is a compile error, not a silent
+    default.
+  - `guard v = call(...) else (err) { ... }` binds `v: T` (valid after
+    the guard) and — when the optional `(err)` clause is present —
+    `err: text` (scoped to the else-block). The else-block must exit;
+    falling through is a compile error, because `v` would be
+    uninitialized on that path.
+  - Propagation is explicit: re-raise with `fail err` (or a decorated
+    message) — there is no implicit `?` operator.
+  - Top-level code (the entry) cannot `fail` — it is the program
+    itself; `guard` works there.
+
+  The runtime ABI (both backends): two `rt` globals — `err_flag`
+  (number) and `err_msg` (text). The guarded call clears `err_flag`
+  immediately before the call; the callee's `fail` parks the message
+  and raises the flag, returning a zero of its result type; the
+  caller's check binds the message, re-clears the flag (a recovered
+  inner error can never leak into an outer guard), and runs the
+  else-block. Single-threaded by design. `-O1`/`-O2` preserve the
+  semantics exactly (the flag check is a control-flow barrier in
+  every optimizer pass); the ARM64 backend implements the same ABI,
+  differentially verified under the emulator, qemu, and native
+  hardware.
 
 ---
 
@@ -1547,8 +1605,8 @@ Project/main.ok
   programs**: (1) every positive suite case re-compiled `--target
   arm64` and executed under `tools/emu64.py`, the aarch64 user-mode
   emulator shipping with the repository — stdout and exit codes must
-  match the x86-64 expectations exactly (270 further checks; the suite
-  is now 829); (2) since 0.18.1 the same suite is also executed under
+  match the x86-64 expectations exactly (276 further checks; the suite
+  is now 850); (2) since 0.18.1 the same suite is also executed under
   an external **qemu-aarch64** (`ARM64_RUN=qemu`) — an independent
   implementation of the machine and the Linux syscall ABI, so an
   emulator/kernel divergence is a red test on every push; (3) the
@@ -1855,7 +1913,7 @@ An implementation claiming "Okular 0.1" must:
 | `break`/`continue` | §10 | implemented |
 | `write`/`print` buffer model | §11 | implemented |
 | Pointers, manual memory | §12 | implemented (unchecked indexing, use-after-release, dangling `&local` documented) |
-| Recoverable errors (`guard`/`fail`) | §13 | NOT IMPLEMENTED |
+| Recoverable errors (`guard`/`fail`) | §13 | **implemented (0.19)** — `-> T?` fallible signatures, `fail <text>`, `guard v = call(...) else (err) { ... }` with exit-checked else-blocks, explicit re-raise propagation; runtime ABI on both backends |
 | Runtime traps (bounds, div by zero, null deref, bad alloc/release) | §13 | implemented |
 | Diagnostics: format, multi-error recovery | §14 | implemented |
 | `-w`, `-xw`, `-s`, `-l` flags | §14 | implemented (no legacy constructs exist yet) |
@@ -1990,7 +2048,7 @@ the conversion family (`T.to_U`): the source type names the operation.
   executing real programs: the positive cases re-compiled and
   executed under `tools/emu64.py` (the aarch64 user-mode emulator
   shipping with the repository — a test tool, not a build dependency;
-  270 further checks, suite now 829); the same suite again under an
+  276 further checks, suite now 850); the same suite again under an
   external qemu-aarch64 (`ARM64_RUN=qemu`) — an independent
   implementation of the machine and the Linux syscall ABI, so
   emulator/kernel divergence is a red test on every push; the

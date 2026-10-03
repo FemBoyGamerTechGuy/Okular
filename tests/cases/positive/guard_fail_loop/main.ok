@@ -1,0 +1,39 @@
+type.text=1
+
+# guards inside loops: break and continue are legal else-block exits,
+# and a recovered failure in one iteration must not poison the next
+# (the error flag is cleared as it is taken)
+
+function.step(number.i) -> number? {
+    when (i % 3 == 0) {
+        fail "bad step " + number.to_text(i)
+    }
+    return i * 100
+}
+
+function.main() -> number {
+    type.number total = 0
+    loop (i from 1 until 8) {
+        guard v = step(i) else (err) {
+            # recovered: continue to the next iteration
+            continue
+        }
+        total = total + v
+    }
+    write(total)
+    print
+
+    # break out of the loop on the first failure
+    type.number first_bad =-1
+    loop (i from 1 until 20) {
+        guard w = step(i) else (err) {
+            first_bad = i
+            break
+        }
+    }
+    write(first_bad)
+    print
+    return 0
+}
+
+main()

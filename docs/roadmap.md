@@ -5,6 +5,23 @@ before the test suite proves it.**
 
 ## Where we are
 
+**Okular 0.19 — recoverable errors.** In addition to everything below,
+0.19 implements the designed error model (spec §13): `-> T?` marks a
+fallible function; `fail <text>` raises with a message; every call to
+a fallible function must be the initializer of a `guard v = call(...)
+else (err) { ... }` — the else-block must exit (`return`/`fail`/
+`break`/`continue`), which is exactly what makes the guarded value
+safe to use past the guard; `err: text` is scoped to the block;
+propagation is an explicit re-raise (`fail err`). The runtime ABI is
+two `rt` globals (`err_flag`, `err_msg`) with clear-before-call and
+bind-and-re-clear discipline — a recovered inner error can never leak
+into an outer guard — emitted identically by both backends, treated as
+a control-flow barrier by every optimizer pass (behavior identical at
+-O0/-O1/-O2, differentially verified on x86-64, ARM64 under the
+emulator, qemu, and native hardware). The LSP recompiles and hovers
+through the new syntax (`function parse(s: text) -> number?`). Nine
+new suite checks; the suite is now 850.
+
 **Okular 0.18 — the language server.** In addition to everything
 below, 0.18 gives Okular editor integration: `okular lsp` speaks
 JSON-RPC 2.0 over stdio — initialize/shutdown/exit lifecycle, full-text
@@ -42,7 +59,7 @@ lowered per target. Cross-compilation works in both directions;
 of it executing real programs: the full positive suite re-compiled
 and executed under `tools/emu64.py` (the aarch64 user-mode emulator
 shipping with the repository — a test tool, not a build dependency;
-270 further checks, suite now 829), the same suite again under an
+276 further checks, suite now 850), the same suite again under an
 external qemu-aarch64 (`ARM64_RUN=qemu` — an independent
 implementation of the machine and the Linux syscall ABI, so
 emulator/kernel divergence is a red test on every push), the

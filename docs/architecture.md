@@ -147,10 +147,10 @@
 
 ## 7. Testing
 
-* `tools/run_selfhost_tests.sh` — 512 checks: positive (compile + run +
+* `tools/run_selfhost_tests.sh` — 527 checks: positive (compile + run +
   exact stdout/exit — at -O0, -O1, AND -O2), negative (exact diagnostic
   patterns), policy (optional-source semantics incl. `--strict`).
-* `tools/run_arm64_tests.sh` — 270 further checks: every positive case
+* `tools/run_arm64_tests.sh` — 276 further checks: every positive case
   re-compiled `--target arm64` and executed (under `tools/emu64.py`, the
   aarch64 user-mode emulator shipping with the repository; under an
   external qemu-aarch64 via `ARM64_RUN=qemu` — an independent

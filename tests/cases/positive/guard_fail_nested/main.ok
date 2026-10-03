@@ -1,0 +1,57 @@
+type.text=1
+
+# nested fallibility: inner guards that recover must not leak their
+# error state to the outer caller (the flag is re-cleared as it is
+# taken), and re-raising decorates the message
+
+function.inner(number.x) -> number? {
+    when (x == 1) {
+        fail "inner boom"
+    }
+    return x * 10
+}
+
+function.outer_recover(number.x) -> number? {
+    guard v = inner(x) else (e) {
+        return 0
+    }
+    return v + 1
+}
+
+function.outer_reraise(number.x) -> number? {
+    guard v = inner(x) else (e) {
+        fail "outer_reraise: " + e
+    }
+    return v + 1
+}
+
+function.main() -> number {
+    # outer recovers internally: the caller must see a normal result
+    guard r1 = outer_recover(1) else (e) {
+        write("LEAK: " + e)
+        print
+        return 1
+    }
+    write(r1)
+    print
+
+    guard r2 = outer_recover(2) else (e) {
+        write("unexpected: " + e)
+        print
+        return 1
+    }
+    write(r2)
+    print
+
+    # propagation: the message survives the re-raise with decoration
+    guard r3 = outer_reraise(1) else (e) {
+        write("caught: " + e)
+        print
+        return 0
+    }
+    write("unreachable")
+    print
+    return 0
+}
+
+main()

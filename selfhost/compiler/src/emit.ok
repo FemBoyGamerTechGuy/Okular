@@ -2053,6 +2053,79 @@ function.emit_inst(type.ptr<type.IrInst>.in) -> number {
         call_aligned_sym(rt_sym("print_flush"))
         return 0
     }
+    when (in.kind == ir.I_ERR_CLEAR) {
+        # rt.err_flag = 0 (the guard/fail ABI, spec §13): the callee
+        # writes the flag only on failure, so clearing before the call
+        # makes the post-call check exact
+        mov_r_sym(R_RCX, sym_by_name("ok_rt_err_flag"), 0)
+        # xor eax, eax
+        put(0x31)
+        put(0xC0)
+        store_ind(R_RCX, R_RAX)
+        return 0
+    }
+    when (in.kind == ir.I_ERR_CHECK) {
+        # after a guarded call: on failure, bind the err slot from
+        # rt.err_msg, clear the flag (a recovered inner error must not
+        # leak into an outer guard), and jump to the else-block
+        mov_r_sym(R_RCX, sym_by_name("ok_rt_err_flag"), 0)
+        load_ind(R_RAX, R_RCX)
+        test_rr(R_RAX, R_RAX)
+        type.number lcont = trap_lbl(trap_seq)
+        trap_seq = trap_seq + 1
+        jcc_lbl(CC_E, lcont)
+        when (in.slot >= 0) {
+            mov_r_sym(R_RCX, sym_by_name("ok_rt_err_msg"), 0)
+            load_ind(R_RAX, R_RCX)
+            load_ind8(R_RDX, R_RCX, 8)
+            type.number off = fn_offset(in.slot)
+            store_rbp(R_RAX,-off)
+            store_rbp(R_RDX,-off + 8)
+        }
+        mov_r_sym(R_RCX, sym_by_name("ok_rt_err_flag"), 0)
+        # xor eax, eax
+        put(0x31)
+        put(0xC0)
+        store_ind(R_RCX, R_RAX)
+        jmp_lbl(in.label)
+        label_here(lcont)
+        return 0
+    }
+    when (in.kind == ir.I_FAIL) {
+        # fail <msg>: park the message in rt.err_msg, raise rt.err_flag,
+        # and return a zero of the current function's type — the caller's
+        # guard never reads the value on the error path
+        pop_pair_rax_rdx()
+        mov_r_sym(R_RCX, sym_by_name("ok_rt_err_msg"), 0)
+        store_ind(R_RCX, R_RAX)
+        store_ind8(R_RCX, 8, R_RDX)
+        mov_r_sym(R_RCX, sym_by_name("ok_rt_err_flag"), 0)
+        # mov eax, 1
+        put(0xB8)
+        put(0x01)
+        put(0x00)
+        put(0x00)
+        put(0x00)
+        store_ind(R_RCX, R_RAX)
+        # zero the return value of in.ty, then the shared epilogue
+        when (in.ty == sema.T_DECIMAL) {
+            # xor eax, eax; movq xmm0, rax
+            put(0x31)
+            put(0xC0)
+            movq_rax_xmm0()
+        }
+        else {
+            # xor eax, eax; xor edx, edx (covers int/f32 bits and the
+            # text pair)
+            put(0x31)
+            put(0xC0)
+            put(0x31)
+            put(0xD2)
+        }
+        put(0xC9)  # leave
+        put(0xC3)  # ret
+        return 0
+    }
     when (in.kind == ir.I_RETURN) {
         when (in.ty != null and (sema.is_integer(in.ty) or in.ty == sema.T_BOOL or sema.is_ptr(in.ty) or in.ty == sema.T_NULL or in.ty == sema.T_F32)) {
             # f32 returns its bits in rax's low half, like integers

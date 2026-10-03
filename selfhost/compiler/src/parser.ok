@@ -52,6 +52,8 @@ const.N_UNIONDECL = 36
 const.N_CONSTDECL = 37
 const.N_FUNC = 38
 const.N_FILE = 39
+const.N_GUARD = 44  # guard v = call(...) else (err) { ... } — recoverable errors
+const.N_FAIL = 45  # fail <text message> — raise through the fallible ABI
 const.N_SYSOP = 40  # sema-created (machine AST protocol append-only)
 const.N_MATCH = 41  # when (subject) { arms } — match-style when (0.15)
 const.N_MATCHARM = 42  # one arm: patterns (args), guard (a), body; bval=1 -> else-arm
@@ -161,6 +163,7 @@ struct.Node = {
     type.text tval
     type.ptr<type.Ty> rtype
     type.ptr<type.Symbol> sym
+    type.ptr<type.Symbol> sym2
     type.ptr<type.FuncInfo> finfo
 }.end
 
@@ -249,6 +252,7 @@ function.new_node(number.kind, number.line, number.col) -> type.ptr<type.Node> {
     n.tval = ""
     n.rtype = null
     n.sym = null
+    n.sym2 = null
     n.finfo = null
     return n
 }
@@ -1712,6 +1716,66 @@ function.parse_stmt() -> type.ptr<type.Node> {
         }
         return n
     }
+    when (k == toks.K_GUARD) {
+        # guard v = call(...) [else (err)] { ... } — recoverable errors
+        # (spec §13): sema requires the initializer to be a call to a
+        # fallible function (`-> T?`) and the else-block to exit.
+        advance()
+        when (is_at(toks.K_IDENT) == false) {
+            perr(cur_line(), cur_col(), "expected the result name after `guard`: `guard v = call(...) else { ... }`.")
+            sync_stmt()
+            return null
+        }
+        type.ptr<type.Node> n = new_node(N_GUARD, tline, tcol)
+        n.name = toks.spelling(pos)
+        advance()
+        when (expect(toks.K_EQ) == false) {
+            sync_stmt()
+            return null
+        }
+        n.a = parse_expr()
+        when (n.a == null) {
+            sync_stmt()
+            return null
+        }
+        when (expect(toks.K_ELSE) == false) {
+            sync_stmt()
+            return null
+        }
+        # optional error binding: else (err) { ... }
+        when (is_at(toks.K_LPAREN)) {
+            advance()
+            when (is_at(toks.K_IDENT) == false) {
+                perr(cur_line(), cur_col(), "expected the error name inside `else ( ... )`.")
+            }
+            else {
+                n.str = toks.spelling(pos)
+                advance()
+            }
+            when (expect(toks.K_RPAREN) == false) {
+                sync_stmt()
+                return null
+            }
+        }
+        # parse_stmt_list consumes the `{ ... }` block itself
+        parse_stmt_list(n)
+        return n
+    }
+    when (k == toks.K_FAIL) {
+        # fail <message> — raise a recoverable error (text message)
+        advance()
+        when (is_at(toks.K_NL) or is_at(toks.K_RBRACE) or is_at(toks.K_EOF)) {
+            perr(tline, tcol, "`fail` needs a message: `fail \"what went wrong\"`.")
+            return null
+        }
+        type.ptr<type.Node> n = new_node(N_FAIL, tline, tcol)
+        n.a = parse_expr()
+        when (n.a == null) {
+            sync_stmt()
+            return null
+        }
+        return n
+    }
     when (k == toks.K_STRUCT or k == toks.K_UNION) {
         # record declarations are top level or column members (spec §8.3/§8.5)
         perr(tline, tcol, "structs and unions are declared at the top of a file or inside a column, not inside function bodies.")
@@ -2132,6 +2196,12 @@ function.parse_toplevel_function() -> type.ptr<type.Node> {
         }
         else {
             n.otype = ty
+        }
+        # `-> T?` marks a fallible function (spec §13): it may `fail`
+        # with a text message, and every call to it must be guarded.
+        when (is_at(toks.K_QUESTION)) {
+            advance()
+            n.bval = 1
         }
     }
     else {

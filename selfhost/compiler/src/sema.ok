@@ -1092,6 +1092,7 @@ struct.FuncInfo = {
     type.ptr<type.Node> decl
     type.ptr<type.Mod> module
     type.number is_entry
+    type.number fallible
 }.end
 
 function.new_symbol(text.name, number.kind) -> type.ptr<type.Symbol> {
@@ -1193,6 +1194,7 @@ function.funcinfo_new(text.name, text.mangled, type.ptr<type.Ty>.ret, type.ptr<t
     fi.decl = decl
     fi.module = mod
     fi.is_entry = 0
+    fi.fallible = 0
     return fi
 }
 
@@ -1236,6 +1238,9 @@ type.ptr<type.Mod> cur_mod = null
 type.ptr<type.Scope> cur_scope = null
 type.ptr<type.FuncInfo> cur_func = null
 type.number in_loop = 0
+# guard/fail (spec §13): >0 while checking the call of a `guard` —
+# fallible calls are legal only inside that window
+type.number guard_depth = 0
 
 function.cur_mod_display() -> text {
     when (cur_mod == null) {
@@ -3473,7 +3478,15 @@ function.check_call(type.ptr<type.Node>.n) -> type.ptr<type.Ty> {
             sig = sig + ty_name(fi.ptypes[k]) + " " + fi.pnames[k]
         }
         sig = sig + ") -> " + ty_name(fi.ret)
+        when (fi.fallible == 1) {
+            sig = sig + "?"
+        }
         note(n, sig)
+    }
+    # fallible calls (spec §13) are legal only inside a `guard`'s call
+    when (fi.fallible == 1 and guard_depth == 0) {
+        serr_node(n, "`" + full + "` is fallible (`-> " + ty_name(fi.ret) + "?`): its call must be guarded.")
+        note(n, "form: `guard v = " + full + "(...) else (err) { ... }` — the else-block sees `err: text` and must exit (return / fail / break / continue).")
     }
     type.number check_n = n.nargs
     when (check_n > fi.nparams) {
@@ -4027,7 +4040,7 @@ function.check_expr(type.ptr<type.Node>.e) -> type.ptr<type.Ty> {
 function.list_exits(type.ptr<type.ptr<type.Node>>.body, number.n) -> bool {
     loop (i from 0 until n) {
         type.ptr<type.Node> s = body[i]
-        when (s.kind == parser.N_RETURN or s.kind == parser.N_BREAK or s.kind == parser.N_CONTINUE) {
+        when (s.kind == parser.N_RETURN or s.kind == parser.N_BREAK or s.kind == parser.N_CONTINUE or s.kind == parser.N_FAIL) {
             return true
         }
         when (s.kind == parser.N_WHEN and s.nbody_else > 0 and list_exits(s.body, s.nbody) and list_exits(s.body_else, s.nbody_else)) {
@@ -4056,6 +4069,10 @@ function.list_returns(type.ptr<type.ptr<type.Node>>.body, number.n) -> bool {
     loop (i from 0 until n) {
         type.ptr<type.Node> s = body[i]
         when (s.kind == parser.N_RETURN and s.a != null) {
+            return true
+        }
+        when (s.kind == parser.N_FAIL) {
+            # a fail exits the function; the caller's error path diverges
             return true
         }
         when (s.kind == parser.N_WHEN and s.nbody_else > 0 and list_returns(s.body, s.nbody) and list_returns(s.body_else, s.nbody_else)) {
@@ -4788,6 +4805,82 @@ function.check_stmt(type.ptr<type.Node>.s) -> number {
         }
         return 0
     }
+    when (s.kind == parser.N_FAIL) {
+        # fail <message> — raise a recoverable error (spec §13)
+        when (cur_func == null or cur_func.is_entry == 1) {
+            serr_node(s, "`fail` is only valid inside a fallible function (`-> T?`).")
+            note(s, "top-level code is the program itself — handle the error with `guard`, or trap with `fs`/runtime checks.")
+            check_expr(s.a)
+            return 0
+        }
+        when (cur_func.fallible == 0) {
+            serr_node(s, "this function is not fallible — `fail` needs `-> " + ty_name(cur_func.ret) + "?` in its signature.")
+            note(s, "mark the signature fallible, or return an error value explicitly (spec §13).")
+        }
+        type.ptr<type.Ty> mt = check_expr(s.a)
+        when (mt != T_TEXT) {
+            serr_node(s, "`fail` carries a `text` message, but a `" + ty_name(mt) + "` value was given.")
+            note(s, "form: `fail \"what went wrong\"` — the message reaches the caller's `guard ... else (err)` binding.")
+        }
+        return 0
+    }
+    when (s.kind == parser.N_GUARD) {
+        # guard v = call(...) [else (err)] { ... } — recoverable errors
+        # (spec §13). The initializer must be a call to a fallible
+        # function; the else-block must exit; `err` (when bound) is
+        # `text`; `v` is the call's return type.
+        when (s.a.kind != parser.N_CALL) {
+            serr_node(s, "`guard` takes a call to a fallible function, but the initializer is not a call.")
+            note(s, "form: `guard v = fallible(...) else (err) { ... }` (spec §13).")
+            check_expr(s.a)
+            return 0
+        }
+        guard_depth = guard_depth + 1
+        type.ptr<type.Ty> rt = check_expr(s.a)
+        guard_depth = guard_depth - 1
+        when (rt == null) {
+            rt = T_NUMBER
+        }
+        when (s.a.kind == parser.N_CALL and s.a.finfo != null and s.a.finfo.fallible == 0) {
+            serr_node(s, "this call is not fallible — do not guard it; assign the result directly.")
+            note(s, "`guard` is for calls to fallible functions (`-> T?`); this one cannot fail (spec §13).")
+        }
+        # the guarded value becomes a local of the call's return type
+        # (valid after the guard: the else-block exits, so the only way
+        # control reaches past the guard is the success path)
+        type.ptr<type.Symbol> vs = scope_insert(cur_scope, s.name, SYM_VAR, s.line, s.col)
+        when (vs.kind != SYM_VAR or (vs.decl != null and vs.decl != s)) {
+            serr_node(s, "duplicate definition of `" + s.name + "` in this scope.")
+            return 0
+        }
+        vs.ty = rt
+        vs.decl = s
+        s.sym = vs
+        # the else-block runs in its own scope; the optional error
+        # binding (`err: text`) lives inside it
+        type.ptr<type.Scope> sc = scope_new(cur_scope)
+        cur_scope = sc
+        when (text.length(s.str) > 0) {
+            type.ptr<type.Symbol> es = scope_insert(cur_scope, s.str, SYM_VAR, s.line, s.col)
+            when (es.kind != SYM_VAR or (es.decl != null and es.decl != s)) {
+                serr_node(s, "duplicate definition of `" + s.str + "` in this scope.")
+            }
+            else {
+                es.ty = T_TEXT
+                es.decl = s
+                s.sym2 = es
+            }
+        }
+        check_stmt_list(s.body, s.nbody)
+        cur_scope = sc.parent
+        # the else-block must exit: the guarded value is not valid on
+        # the error path, so control may not fall through past it
+        when (list_exits(s.body, s.nbody) == false) {
+            serr_node(s, "the `guard` else-block must exit (`return` / `fail` / `break` / `continue`) — `" + s.name + "` is not valid on the error path.")
+            note(s, "return a fallback, re-raise with `fail err`, or break out of the enclosing loop (spec §13).")
+        }
+        return 0
+    }
     serr_node(s, "this statement is not allowed here.")
     return 0
 }
@@ -4799,7 +4892,7 @@ function.check_stmt_list(type.ptr<type.ptr<type.Node>>.body, number.n) -> number
         # unreachable code after an exiting statement (spec §14, -w)
         when (warn_enabled == 1 and i + 1 < n) {
             type.number exits = 0
-            when (s.kind == parser.N_RETURN or s.kind == parser.N_BREAK or s.kind == parser.N_CONTINUE) {
+            when (s.kind == parser.N_RETURN or s.kind == parser.N_BREAK or s.kind == parser.N_CONTINUE or s.kind == parser.N_FAIL) {
                 exits = 1
             }
             when (exits == 1) {
@@ -5072,6 +5165,7 @@ function.collect_devcol(type.ptr<type.Mod>.m, type.ptr<type.Node>.col, type.ptr<
             }
             type.ptr<type.FuncInfo> fi = funcinfo_new(n.name, mg, fret, n, m)
             fi.nparams = n.nparams
+            fi.fallible = n.bval
             type.ptr<type.ptr<type.Ty>> pt = alloc<type.ptr<type.Ty>>(n.nparams + 1)
             type.ptr<type.text> pn = alloc<type.text>(n.nparams + 1)
             loop (k from 0 until n.nparams) {
@@ -5173,6 +5267,7 @@ function.collect_toplevel(type.ptr<type.Mod>.m, type.ptr<type.Node>.file, type.p
             }
             type.ptr<type.FuncInfo> fi = funcinfo_new(n.name, mg, fret, n, m)
             fi.nparams = n.nparams
+            fi.fallible = n.bval
             type.ptr<type.ptr<type.Ty>> pt = alloc<type.ptr<type.Ty>>(n.nparams + 1)
             type.ptr<type.text> pn = alloc<type.text>(n.nparams + 1)
             loop (k from 0 until n.nparams) {

@@ -1,0 +1,56 @@
+type.text=1
+
+# the recoverable-error model (spec §13): `-> T?` marks a fallible
+# function; `fail <text>` raises; `guard v = call(...) else (err) { }`
+# receives — the else-block must exit, `err` is the message, `v` is
+# valid afterwards
+
+function.parse_len(text.s) -> number? {
+    when (text.length(s) == 0) {
+        fail "empty input"
+    }
+    when (text.length(s) > 4) {
+        fail "too long: " + s
+    }
+    return text.length(s)
+}
+
+function.ratio(number.a, number.b) -> decimal? {
+    when (b == 0) {
+        fail "division by zero"
+    }
+    return number.to_decimal(a) / number.to_decimal(b)
+}
+
+function.main() -> number {
+    # success path: v is the call's result
+    guard n = parse_len("abc") else (err) {
+        write("unexpected: " + err)
+        print
+        return 1
+    }
+    write("len=")
+    write(n)
+    print
+
+    # decimal returns ride the same ABI
+    guard d = ratio(10, 4) else (err) {
+        write("unexpected: " + err)
+        print
+        return 1
+    }
+    write(d)
+    print
+
+    # error path: err carries the message; the block exits
+    guard m = parse_len("toolong!") else (err) {
+        write("caught: " + err)
+        print
+        return 0
+    }
+    write("unreachable")
+    print
+    return 0
+}
+
+main()

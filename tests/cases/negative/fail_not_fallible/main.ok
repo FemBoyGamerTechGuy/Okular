@@ -1,0 +1,6 @@
+type.text=1
+
+function.parse(text.s) -> number {
+    fail "not here"
+    return 0
+}

@@ -73,24 +73,27 @@ const.K_NULL = 55
 const.K_UNION = 56
 const.K_CONST = 57
 const.K_RESERVED = 58
+const.K_GUARD = 59
+const.K_FAIL = 60
+const.K_QUESTION = 61
 
 # ---- keyword table (spelling -> kind) ----
-type.array<type.text, 25> KEYWORDS = {
+type.array<type.text, 27> KEYWORDS = {
     "type", "function", "struct", "when", "else", "loop",
     "from", "to", "until", "break", "continue", "return",
     "print", "write", "true", "false", "and", "or", "not", "end",
-    "alloc", "release", "null", "union", "const"
+    "alloc", "release", "null", "union", "const", "guard", "fail"
 }
 
-type.array<type.number, 25> KEYWORD_KINDS = {
+type.array<type.number, 27> KEYWORD_KINDS = {
     33, 34, 35, 36, 37, 38,
     39, 40, 41, 42, 43, 44,
     45, 46, 47, 48, 49, 50, 51, 52,
-    53, 54, 55, 56, 57
+    53, 54, 55, 56, 57, 59, 60
 }
 
-type.array<type.text, 8> RESERVED_WORDS = {
-    "pointer", "guard", "fail", "with", "priv", "pub", "match", "case"
+type.array<type.text, 6> RESERVED_WORDS = {
+    "pointer", "with", "priv", "pub", "match", "case"
 }
 
 # ---- the token record ----
@@ -241,12 +244,12 @@ function.is_hex(number.b) -> bool {
 }
 
 function.keyword_kind(text.spelling) -> number {
-    loop (i from 0 until 25) {
+    loop (i from 0 until 27) {
         when (spelling == KEYWORDS[i]) {
             return KEYWORD_KINDS[i]
         }
     }
-    loop (i from 0 until 8) {
+    loop (i from 0 until 6) {
         when (spelling == RESERVED_WORDS[i]) {
             return K_RESERVED
         }
@@ -357,6 +360,10 @@ function.scan_punct(number.c) -> number {
             return push_tok(K_EQEQ, l, cl, t_off, s_pos - t_off)
         }
         return push_tok(K_EQ, l, cl, t_off, s_pos - t_off)
+    }
+    else when (c == 63) {
+        advance()
+        return push_tok(K_QUESTION, l, cl, t_off, s_pos - t_off)
     }
     else when (c == 33) {
         advance()

@@ -155,7 +155,7 @@ build/        build artifacts
 
 * [Getting started](docs/getting-started.md) — build, compile, run
 * [Language basics](docs/language-basics.md) — a tour of Okular 0.12
-* [Specification v0.18](specs/spec-v0.18.md) — the definition, with an
+* [Specification v0.19](specs/spec-v0.19.md) — the definition, with an
   implementation status table that says exactly what works
 * [Architecture](docs/architecture.md) — how the bootstrap compiler is
   built and how it will self-host

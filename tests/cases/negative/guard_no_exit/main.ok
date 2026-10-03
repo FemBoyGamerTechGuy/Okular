@@ -1,0 +1,15 @@
+type.text=1
+
+function.parse(text.s) -> number? {
+    fail "no"
+}
+
+function.main() -> number {
+    guard n = parse("a") else (err) {
+        write("ignored")
+        print
+    }
+    return 0
+}
+
+main()

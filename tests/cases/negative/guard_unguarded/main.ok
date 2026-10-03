@@ -1,0 +1,7 @@
+type.text=1
+
+function.parse(text.s) -> number? {
+    fail "no"
+}
+
+type.number x = parse("a")

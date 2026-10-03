@@ -168,11 +168,14 @@ function.spelling_of(number.k, text.sp) -> text {
     else when (k == toks.K_RELEASE) { return "release" }
     else when (k == toks.K_NULL) { return "null" }
     else when (k == toks.K_CONST) { return "const" }
+    else when (k == toks.K_GUARD) { return "guard" }
+    else when (k == toks.K_FAIL) { return "fail" }
+    else when (k == toks.K_QUESTION) { return "?" }
     return sp
 }
 
 function.is_word(number.k) -> bool {
-    return k == toks.K_IDENT or k == toks.K_INT or k == toks.K_DEC or k == toks.K_TEXT or (k >= toks.K_TYPE and k <= toks.K_RESERVED)
+    return k == toks.K_IDENT or k == toks.K_INT or k == toks.K_DEC or k == toks.K_TEXT or (k >= toks.K_TYPE and k <= toks.K_FAIL)
 }
 
 function.is_binop(number.k) -> bool {

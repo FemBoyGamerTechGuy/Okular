@@ -138,10 +138,10 @@ function.opt_dce(type.ptr<type.IrFunc>.f) -> number {
                 }
                 break
             }
-            when (k == ir.I_RETURN) {
+            when (k == ir.I_RETURN or k == ir.I_FAIL) {
                 break
             }
-            when (k == ir.I_JMPF) {
+            when (k == ir.I_JMPF or k == ir.I_ERR_CHECK) {
                 type.number t = lmap[f.insts[i].label]
                 when (t >= 0 and reach[t] == 0) {
                     wl[nwl] = t
@@ -211,7 +211,7 @@ function.opt_dce(type.ptr<type.IrFunc>.f) -> number {
                 when (w.kind == ir.I_LOAD_LOCAL and w.slot == s.slot) {
                     break
                 }
-                when (w.kind == ir.I_LABEL or w.kind == ir.I_JMP or w.kind == ir.I_JMPF or w.kind == ir.I_RETURN) {
+                when (w.kind == ir.I_LABEL or w.kind == ir.I_JMP or w.kind == ir.I_JMPF or w.kind == ir.I_ERR_CHECK or w.kind == ir.I_FAIL or w.kind == ir.I_RETURN) {
                     # control may join here or leave: stop proving
                     break
                 }
@@ -402,7 +402,7 @@ function.opt_jumps(type.ptr<type.IrFunc>.f) -> number {
         }
         loop (i from 0 until n) {
             type.number k = f.insts[i].kind
-            when (k == ir.I_JMP or k == ir.I_JMPF) {
+            when (k == ir.I_JMP or k == ir.I_JMPF or k == ir.I_ERR_CHECK) {
                 refs[f.insts[i].label] = refs[f.insts[i].label] + 1
             }
         }

@@ -1326,6 +1326,50 @@ function.a_emit_inst(type.ptr<type.IrInst>.in) -> number {
         a_call_rt("print_flush")
         return 0
     }
+    when (in.kind == ir.I_ERR_CLEAR) {
+        # rt.err_flag = 0 (the guard/fail ABI, spec §13)
+        a_sym_addr(AX9, emit.sym_by_name("ok_rt_err_flag"), 0)
+        a_str_x(31, AX9, 0)
+        return 0
+    }
+    when (in.kind == ir.I_ERR_CHECK) {
+        # after a guarded call: on failure, bind the err slot from
+        # rt.err_msg, clear the flag, and branch to the else-block
+        a_sym_addr(AX9, emit.sym_by_name("ok_rt_err_flag"), 0)
+        a_ldr_x(AX0, AX9, 0)
+        type.number lcont = a_trap_lbl(a_trap_seq)
+        a_trap_seq = a_trap_seq + 1
+        a_cbz(AX0, lcont)
+        when (in.slot >= 0) {
+            a_sym_addr(AX9, emit.sym_by_name("ok_rt_err_msg"), 0)
+            a_ldr_x(AX0, AX9, 0)
+            a_ldr_x(AX1, AX9, 8)
+            type.number off = a_local_off(in.slot)
+            a_str_x(AX0, AX29, off)
+            a_str_x(AX1, AX29, off + 8)
+        }
+        a_sym_addr(AX9, emit.sym_by_name("ok_rt_err_flag"), 0)
+        a_str_x(31, AX9, 0)
+        a_b(in.label)
+        a_label_here(lcont)
+        return 0
+    }
+    when (in.kind == ir.I_FAIL) {
+        # fail <msg>: park the message, raise the flag, return a zero
+        a_pop_pair(AX0, AX1)
+        a_sym_addr(AX9, emit.sym_by_name("ok_rt_err_msg"), 0)
+        a_str_x(AX0, AX9, 0)
+        a_str_x(AX1, AX9, 8)
+        a_sym_addr(AX9, emit.sym_by_name("ok_rt_err_flag"), 0)
+        a_movz(AX0, 1, 0)
+        a_str_x(AX0, AX9, 0)
+        # zero the return value (x0/x1 cover the text pair, integers,
+        # f32 bits, and decimal bit patterns — the guard never reads it)
+        a_movz(AX0, 0, 0)
+        a_movz(AX1, 0, 0)
+        a_epilogue()
+        return 0
+    }
     when (in.kind == ir.I_RETURN) {
         when (in.ty != null and (sema.is_integer(in.ty) or in.ty == sema.T_BOOL or sema.is_ptr(in.ty) or in.ty == sema.T_NULL or in.ty == sema.T_F32)) {
             a_pop(AX0)

@@ -128,7 +128,7 @@ the build always fails.
 ## Where to go next
 
 * `docs/language-basics.md` — a tour of the language
-* `specs/spec-v0.18.md` — the specification (with an honest status table)
+* `specs/spec-v0.19.md` — the specification (with an honest status table)
 * `docs/architecture.md` — how the compiler works
 * `docs/roadmap.md` — what comes next (heap, pointers, structs, arrays…)
 * `examples/` — runnable programs (`examples/HelloProject` shows a full
