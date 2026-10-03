@@ -1251,9 +1251,14 @@ function.main() -> number {
 
     when (out_path == "") {
         out_path = path_join(proj_root, "build/output/main")
-        mkdir_p(path_join(proj_root, "build"))
-        mkdir_p(path_join(proj_root, "build/output"))
     }
+
+    # The output's parent directory is created for BOTH the default and
+    # an explicit --out path: `okular main.ok --out some/dir/app` must
+    # not fail with ENOENT when some/dir does not exist yet. (0.18.1:
+    # the release packaging test caught this exact gap — it compiles
+    # with --out ./build/output/main after `rm -rf build`.)
+    mkdir_p(dirname(out_path))
 
     when (elf.emit_elf(out_path) != 0) {
         sys.write(2, "okc: cannot write `" + out_path + "`.\n")

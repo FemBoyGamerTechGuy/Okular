@@ -1,1 +1,2 @@
 formatted program
+fmt: all checks passed

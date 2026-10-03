@@ -1,0 +1,8 @@
+type.text=1
+
+# built once by the harness through the default path (build/output/),
+# and again by out_nested.sh through --out nested/deep/app — a path
+# whose parents do not exist. The compiler must create them.
+
+write("nested ok")
+print

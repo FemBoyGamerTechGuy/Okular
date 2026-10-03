@@ -13,6 +13,8 @@ if [ ! -x "$OKC" ]; then
     echo "run_selfhost: Okular compiler not built at $OKC" >&2
     exit 2
 fi
+# exec_after scripts invoke the compiler themselves — they need the path
+export OKC
 
 pass=0; fail=0
 failed_cases=()

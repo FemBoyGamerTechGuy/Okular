@@ -42,7 +42,7 @@ lowered per target. Cross-compilation works in both directions;
 of it executing real programs: the full positive suite re-compiled
 and executed under `tools/emu64.py` (the aarch64 user-mode emulator
 shipping with the repository — a test tool, not a build dependency;
-268 further checks, suite now 824), the same suite again under an
+270 further checks, suite now 829), the same suite again under an
 external qemu-aarch64 (`ARM64_RUN=qemu` — an independent
 implementation of the machine and the Linux syscall ABI, so
 emulator/kernel divergence is a red test on every push), the

@@ -124,10 +124,11 @@ for dir in "$CASES/positive"/*/; do
         if [ -f "$dir/stdout.txt" ] && [ "$has_exec_after" -eq 0 -o "$name" = "selfhost_assembler" ]; then
             diff -q "$dir/stdout.txt" "$out" >/dev/null || ok=0
         elif [ -f "$dir/stdout.txt" ]; then
-            # exec_after-driven cases: compare the program's own first line
-            # only when the whole expected output is produced by the script
-            # (fmt_check: stdout.txt is exactly the program's own output)
-            diff -q "$dir/stdout.txt" "$out" >/dev/null || ok=0
+            # exec_after-driven cases: stdout.txt's FIRST line is the
+            # program's own output; the remaining lines come from the
+            # host-side script, which this suite does not run (compiler
+            # features, not codegen — the x86-64 suite covers them)
+            [ "$(head -n 1 "$dir/stdout.txt")" = "$(head -n 1 "$out")" ] || ok=0
         fi
         if [ -f "$dir/exit.txt" ] && [ "$has_exec_after" -eq 0 ]; then
             [ "$pexit" -eq "$(cat "$dir/exit.txt")" ] || ok=0

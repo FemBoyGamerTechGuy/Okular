@@ -91,6 +91,17 @@ no C compiler, no `as`, no `ld` anywhere in the repository
 > 12345-byte file on every target: kernel, emulator, and qemu must
 > agree.
 >
+> 0.18.1 (the ARM64-native-fix release) also fixed two product defects
+> the now-working verification exposed: `--out <path>` now creates the
+> output's parent directories (previously only the default
+> `build/output/` path did — the release packaging test, `rm -rf
+> build` + `--out ./build/output/main`, failed with ENOENT); and the
+> test harness's `exec_after` mechanism actually executes its scripts
+> now (`OKC` is exported to them; `fmt_check`'s formatter end-to-end
+> checks had been silently dead — the mechanism executed the script's
+> *text* as a filename), with the `out_nested_dir` regression test
+> pinning the `--out` behavior.
+>
 > 0.16 adds **the optimizer** (§15): `-O1` runs a pass pipeline over the
 > typed stack IR — dead-code elimination (unreachable instructions, dead
 > stores to non-escaped locals, pure computations whose value is
@@ -1536,8 +1547,8 @@ Project/main.ok
   programs**: (1) every positive suite case re-compiled `--target
   arm64` and executed under `tools/emu64.py`, the aarch64 user-mode
   emulator shipping with the repository — stdout and exit codes must
-  match the x86-64 expectations exactly (268 further checks; the suite
-  is now 824); (2) since 0.18.1 the same suite is also executed under
+  match the x86-64 expectations exactly (270 further checks; the suite
+  is now 829); (2) since 0.18.1 the same suite is also executed under
   an external **qemu-aarch64** (`ARM64_RUN=qemu`) — an independent
   implementation of the machine and the Linux syscall ABI, so an
   emulator/kernel divergence is a red test on every push; (3) the
@@ -1979,7 +1990,7 @@ the conversion family (`T.to_U`): the source type names the operation.
   executing real programs: the positive cases re-compiled and
   executed under `tools/emu64.py` (the aarch64 user-mode emulator
   shipping with the repository — a test tool, not a build dependency;
-  268 further checks, suite now 824); the same suite again under an
+  270 further checks, suite now 829); the same suite again under an
   external qemu-aarch64 (`ARM64_RUN=qemu`) — an independent
   implementation of the machine and the Linux syscall ABI, so
   emulator/kernel divergence is a red test on every push; the
