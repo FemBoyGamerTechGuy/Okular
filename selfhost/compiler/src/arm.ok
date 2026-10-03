@@ -157,7 +157,13 @@ function.a_patch_jumps() -> number {
         type.number at = a_jsite_at[i]
         type.number kind = a_jsite_kind[i]
         type.number target = a_lbl_pos[lbl]
-        type.number rel = (target - at - 4) / 4
+        # AArch64 branches are relative to the instruction's OWN
+        # address (x86's rel32 is next-instruction-relative — the -4
+        # the x86 backend correctly uses does NOT apply here). The +4
+        # bias made every branch land 4 bytes early on real hardware;
+        # the emulator shared the bias, masking it until the native
+        # aarch64 CI run.
+        type.number rel = (target - at) / 4
         type.number word = elf.buf_rd32_at(elf.code, at)
         when (kind == 1) {
             # cbz/cbnz: imm19 at bits 23:5, register at 4:0

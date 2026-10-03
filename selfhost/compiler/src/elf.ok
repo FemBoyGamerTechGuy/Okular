@@ -401,10 +401,12 @@ function.emit_elf(text.path) -> number {
             buf_wr32_at(img, CODE_OFF + off, rel & 4294967295)
         }
         else when (kind == 2) {
-            # AArch64 rel26 branch: target = site + 4 + imm26*4 — the
-            # low 26 bits of the word carry the offset in 4-byte units
+            # AArch64 rel26 branch: target = site + imm26*4 — branches
+            # are relative to the instruction's OWN address (NOT x86's
+            # next-instruction rel32 convention); the low 26 bits of
+            # the word carry the offset in 4-byte units
             type.number site = BASE + CODE_OFF + off
-            type.number rel = (target - site - 4) / 4
+            type.number rel = (target - site) / 4
             type.number word = buf_rd32_at(img, CODE_OFF + off)
             word = (word &~67108863) | (rel & 67108863)
             buf_wr32_at(img, CODE_OFF + off, word & 4294967295)

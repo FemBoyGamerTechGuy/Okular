@@ -485,23 +485,25 @@ class Emu:
                 raise RuntimeError('unknown exception op %08x' % op)
             return
 
-        # B / BL
+        # B / BL — the branch base is the instruction's OWN address
+        # (decode() runs with self.pc already advanced by 4; real
+        # hardware computes target = branch_addr + imm26*4)
         if (op >> 26) in (0x05, 0x25):
             imm26 = op & 0x3FFFFFF
             if imm26 & (1 << 25):
                 imm26 -= 1 << 26
             if (op >> 26) == 0x25:    # BL
                 self.x[30] = self.pc
-            self.pc = (self.pc + imm26 * 4) & 0xFFFFFFFFFFFFFFFF
+            self.pc = (self.pc - 4 + imm26 * 4) & 0xFFFFFFFFFFFFFFFF
             return
 
-        # B.cond
+        # B.cond — base = the instruction's own address
         if top == 0x54:
             imm19 = (op >> 5) & 0x7FFFF
             if imm19 & (1 << 18):
                 imm19 -= 1 << 19
             if self.cond(op & 0xF):
-                self.pc = (self.pc + imm19 * 4) & 0xFFFFFFFFFFFFFFFF
+                self.pc = (self.pc - 4 + imm19 * 4) & 0xFFFFFFFFFFFFFFFF
             return
 
         # CBZ / CBNZ
@@ -515,7 +517,7 @@ class Emu:
                 val &= 0xFFFFFFFF
             taken = (val == 0) if (top & 1) == 0 else (val != 0)
             if taken:
-                self.pc = (self.pc + imm19 * 4) & 0xFFFFFFFFFFFFFFFF
+                self.pc = (self.pc - 4 + imm19 * 4) & 0xFFFFFFFFFFFFFFFF
             return
 
         # unconditional branch register (RET etc.)
