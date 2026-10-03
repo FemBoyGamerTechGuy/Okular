@@ -75,6 +75,38 @@ class Emu:
             addr += take
             i += take
 
+    def write_stat(self, statp, st):
+        # aarch64 struct stat — the REAL asm-generic LP64 kernel layout
+        # (verified against /usr/include/asm-generic/stat.h and empir-
+        # ically with a hand-assembled probe ELF under qemu-aarch64):
+        #   dev@0 ino@8 mode@16 nlink@20 uid@24 gid@28 rdev@32
+        #   __pad1@40  st_size@48  st_blksize@56  __pad2@60
+        #   st_blocks@64  atime@72  mtime@88  ctime@104
+        # The emulator MUST model the kernel, not the compiler — a
+        # compiler-side ABI mistake has to show up as a red test here,
+        # never as a green one. (st_size at 48, like x86-64; __pad1@40
+        # has caught this project twice.)
+        M = 0xFFFFFFFFFFFFFFFF
+        self.write(statp + 0, struct.pack('<Q', st.st_dev & M))
+        self.write(statp + 8, struct.pack('<Q', st.st_ino & M))
+        self.write(statp + 16, struct.pack('<I', st.st_mode))
+        self.write(statp + 20, struct.pack('<I', st.st_nlink))
+        self.write(statp + 24, struct.pack('<I', st.st_uid))
+        self.write(statp + 28, struct.pack('<I', st.st_gid))
+        self.write(statp + 32, struct.pack('<Q', st.st_rdev & M))
+        self.write(statp + 40, struct.pack('<Q', 0))            # __pad1
+        self.write(statp + 48, struct.pack('<q', st.st_size))
+        self.write(statp + 56, struct.pack('<i', st.st_blksize))
+        self.write(statp + 60, struct.pack('<i', 0))            # __pad2
+        self.write(statp + 64, struct.pack('<q', st.st_blocks))
+        self.write(statp + 72, struct.pack('<q', int(st.st_atime)))
+        self.write(statp + 80, struct.pack('<Q', st.st_atime_ns & M))
+        self.write(statp + 88, struct.pack('<q', int(st.st_mtime)))
+        self.write(statp + 96, struct.pack('<Q', st.st_mtime_ns & M))
+        self.write(statp + 104, struct.pack('<q', int(st.st_ctime)))
+        self.write(statp + 112, struct.pack('<Q', st.st_ctime_ns & M))
+        self.write(statp + 120, struct.pack('<Q', 0))           # unused4/5
+
     def rd64(self, addr):
         off = addr & 0xFFF
         if off <= 0xFF8:
@@ -286,7 +318,7 @@ class Emu:
                 del self.files[fd]
             self.x[0] = 0
             return True
-        if nr == 80:      # newfstatat(dirfd, pathname, buf, flags)
+        if nr == 79:      # newfstatat(dirfd, pathname, buf, flags)
             import os
             dirfd, pathp, statp, eflags = a[0], a[1], a[2], a[3]
             # path = NUL-terminated
@@ -313,20 +345,21 @@ class Emu:
                         base = os.readlink('/proc/self/fd/%d' % dirfd)
                         fname = base + '/' + fname
                     st = os.stat(fname)
-                # aarch64 struct stat (asm-generic, LP64) — the REAL kernel
-                # layout, which the compiler must match: dev@0 ino@8
-                # mode@16 nlink@20 uid@24 gid@28 rdev@32 size@40
-                # blksize@48 pad@52 blocks@56
-                self.write(statp + 0, struct.pack('<Q', st.st_dev & 0xFFFFFFFFFFFFFFFF))
-                self.write(statp + 8, struct.pack('<Q', st.st_ino & 0xFFFFFFFFFFFFFFFF))
-                self.write(statp + 16, struct.pack('<I', st.st_mode))
-                self.write(statp + 20, struct.pack('<I', st.st_nlink))
-                self.write(statp + 24, struct.pack('<I', st.st_uid))
-                self.write(statp + 28, struct.pack('<I', st.st_gid))
-                self.write(statp + 32, struct.pack('<Q', st.st_rdev & 0xFFFFFFFFFFFFFFFF))
-                self.write(statp + 40, struct.pack('<q', st.st_size))
-                self.write(statp + 48, struct.pack('<i', st.st_blksize))
-                self.write(statp + 52, struct.pack('<i', 0))
+                self.write_stat(statp, st)
+                self.x[0] = 0
+            except OSError as e:
+                self.x[0] = (-(e.errno or 2)) & 0xFFFFFFFFFFFFFFFF
+            return True
+        if nr == 80:      # fstat(fd, buf) — TWO arguments (aarch64: 79
+            import os    # is newfstatat, 80 is fstat; the kernel header
+            fd, statp = a[0], a[1]  # is authoritative, and qemu agrees)
+            try:
+                f = self.files.get(fd)
+                if f is None or not hasattr(f, 'fileno'):
+                    st = os.fstat(fd)
+                else:
+                    st = os.fstat(f.fileno())
+                self.write_stat(statp, st)
                 self.x[0] = 0
             except OSError as e:
                 self.x[0] = (-(e.errno or 2)) & 0xFFFFFFFFFFFFFFFF

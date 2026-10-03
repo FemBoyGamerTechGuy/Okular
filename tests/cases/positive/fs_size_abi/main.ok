@@ -1,0 +1,38 @@
+type.text=1
+
+# The sys.size ABI regression: a file of exactly 12345 bytes. The
+# returned number goes through newfstatat/fstat and the st_size field
+# of struct stat — on ARM64 that means syscall 79 with st_size at
+# offset 48 of the asm-generic layout (the port once called 80 —
+# which is fstat — with newfstatat's four-argument setup, and read
+# "st_size" from an untouched stack slot: every file looked empty on
+# real hardware). This pins the exact value: wrong syscall number,
+# wrong struct offset, or wrong buffer addressing must turn stdout
+# red on every target (x86-64 kernel, tools/emu64.py, qemu, native
+# aarch64 — four independent implementations of the ABI).
+
+function.main() -> number {
+    type.number fd = sys.open("data.bin", 0, 0)
+    write(fd >= 0)
+    print
+    write(sys.size(fd))
+    print
+    sys.close(fd)
+
+    # a second stat of the same descriptor through the empty-path
+    # route (AT_EMPTY_PATH), after other stack activity
+    type.array<type.number, 8> pad = {1, 2, 3, 4, 5, 6, 7, 8}
+    type.number total = 0
+    loop (i from 0 until 8) {
+        total = total + pad[i]
+    }
+    type.number fd2 = sys.open("data.bin", 0, 0)
+    write(sys.size(fd2))
+    print
+    write(total)
+    print
+    sys.close(fd2)
+    return 0
+}
+
+main()

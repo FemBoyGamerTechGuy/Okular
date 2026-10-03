@@ -110,10 +110,12 @@ $ ./build/okular main.ok --target x86-64   # the explicit default
 The ARM64 backend (`selfhost/compiler/src/arm.ok`) shares the whole
 front half of the compiler and the runtime source with x86-64 — only
 the instruction selection, frames, fixups, and syscall numbers differ.
-It is verified three ways, all executing real programs: every positive
+It is verified four ways, all executing real programs: every positive
 test case re-compiled for arm64 and run (under `tools/emu64.py`, the
-aarch64 user-mode emulator shipping with the repository, or natively on
-the ARM64 CI runners), and the self-cross-compilation test — the
+aarch64 user-mode emulator shipping with the repository), the same
+suite again under an external qemu-aarch64 (`ARM64_RUN=qemu` — an
+independent implementation of the machine and the Linux syscall ABI),
+natively on the ARM64 CI runners, and the self-cross-compilation test — the
 compiler itself compiled to aarch64 and run to compile programs. `make
 arm64` cross-builds the whole compiler for aarch64.
 

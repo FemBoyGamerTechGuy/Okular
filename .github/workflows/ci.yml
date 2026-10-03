@@ -44,6 +44,19 @@ jobs:
       - name: ARM64 differential suite (executed, not just assembled)
         run: bash tools/run_arm64_tests.sh
 
+      # Independent ABI cross-check: the same suite executed under an
+      # external qemu-aarch64 — a second, independent implementation of
+      # the machine AND the Linux syscall ABI. The 2026-10 sys.size bug
+      # (newfstatat called as 80 — which is fstat — with a four-argument
+      # setup) passed under the repository's own emulator because both
+      # sides shared the mistake, and only died on real hardware; this
+      # step makes such divergence visible on every push, x86-64 runner
+      # included. qemu is a test tool, not a build dependency.
+      - name: ARM64 differential under qemu (independent kernel-ABI check)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static
+          ARM64_RUN=qemu bash tools/run_arm64_tests.sh
+
       # The decisive ARM64 test: the compiler itself cross-compiled to
       # aarch64, then EXECUTED under the emulator to compile a program;
       # the produced executable is run natively.

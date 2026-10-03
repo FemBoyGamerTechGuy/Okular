@@ -147,14 +147,17 @@
 
 ## 7. Testing
 
-* `tools/run_selfhost_tests.sh` — 503 checks: positive (compile + run +
+* `tools/run_selfhost_tests.sh` — 509 checks: positive (compile + run +
   exact stdout/exit — at -O0, -O1, AND -O2), negative (exact diagnostic
   patterns), policy (optional-source semantics incl. `--strict`).
-* `tools/run_arm64_tests.sh` — 264 further checks: every positive case
+* `tools/run_arm64_tests.sh` — 268 further checks: every positive case
   re-compiled `--target arm64` and executed (under `tools/emu64.py`, the
-  aarch64 user-mode emulator shipping with the repository, or natively
+  aarch64 user-mode emulator shipping with the repository; under an
+  external qemu-aarch64 via `ARM64_RUN=qemu` — an independent
+  implementation of the machine and the Linux syscall ABI; or natively
   via `ARM64_RUN=native` on real aarch64 hosts) — stdout and exit codes
-  must match the x86-64 expectations exactly.
+  must match the x86-64 expectations exactly. The `fs_size_abi` case
+  pins the aarch64 stat ABI (syscall 79, `st_size`@48) on every target.
 * `tools/run_selfbuild_check.sh` — the acceptance gate: seed
   self-reproduction + the full suite.
 * `tools/run_lsp_tests.sh` + `tools/lsp_test.py` — 47 protocol
@@ -163,7 +166,8 @@
   attribution), hover signatures — and the robustness clause (malformed
   anything degrades to an error response, never a crash).
 * CI (`.github/workflows/ci.yml`) runs the gate, the emulated ARM64
-  suite, the self-cross-compilation test, a native `ubuntu-24.04-arm`
+  suite, the ARM64 suite again under qemu-aarch64 (independent ABI
+  check), the self-cross-compilation test, a native `ubuntu-24.04-arm`
   job (the ARM64 compiler self-compiles byte-identically on real
   hardware; the full positive suite is compiled and executed natively),
   and the LSP protocol suite, then packages and end-to-end tests both

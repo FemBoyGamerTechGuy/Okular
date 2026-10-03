@@ -44,8 +44,9 @@ no C compiler, no `as`, no `ld` anywhere in the repository
 > arguments as addresses of `(ptr, len)` pairs, array/record parameters
 > copied into callee-visible frame scratch), and the Linux aarch64
 > syscall interface (`write` 64, `read` 63, `openat` 56, `close` 57,
-> `newfstatat` 80 with `AT_EMPTY_PATH` — plain `fstat` does not exist on
-> the architecture — `mmap` 222, `exit` 93, `getdents64` 61, `mkdirat`
+> `newfstatat` 79 with `AT_EMPTY_PATH` — plain `fstat` (80) exists but
+> takes two arguments; 79 is the four-argument form the runtime needs —
+> `mmap` 222, `exit` 93, `getdents64` 61, `mkdirat`
 > 34, `fchmodat` 53 with an explicit zeroed flags argument). Every
 > positive suite case is re-compiled `--target arm64` and **executed**
 > under `tools/emu64.py`, the aarch64 user-mode emulator that ships with
@@ -59,6 +60,11 @@ no C compiler, no `as`, no `ld` anywhere in the repository
 > built there, self-compiles byte-identically on the hardware, and the
 > full positive suite is compiled AND executed natively — no emulator
 > anywhere in that job (qemu-user runs only the x86-64 bootstrap seed).
+> Since 0.18.1 the x86-64 CI job also executes the whole ARM64 suite
+> under an **external qemu-aarch64** — an independent implementation of
+> both the machine and the Linux syscall ABI — so emulator/kernel
+> divergence is visible on every push, not only when native arm64
+> hardware is attached (`ARM64_RUN=qemu` in the test runner).
 > The `okular-linux-arm64` release archive ships the compiler
 > as a native aarch64 executable. `-O2` register-cached emission remains
 > x86-64-only for now and falls back to the `-O1` IR passes on arm64
@@ -67,11 +73,23 @@ no C compiler, no `as`, no `ld` anywhere in the repository
 > outgoing-argument area (scaled STR/LDR immediates truncate non-multiple-
 > of-8 frame offsets), `sys.open` passing mode where flags belong, and
 > `fstatat` emitted in a three-argument form real kernels reject. A
-> fourth — the aarch64 `struct stat` layout (st_size at offset 40,
-> asm-generic; the port had copied x86-64's 48, so every file appeared
-> to be `st_blksize` = 4096 bytes on real hardware) — was caught by the
-> FIRST native aarch64 CI run; the emulator now models the real kernel
-> layout so the differential guards it too.
+> fourth — `sys.size` calling syscall **80** (on aarch64 the
+> TWO-argument `fstat`, not the four-argument `newfstatat` at **79**) —
+> made the kernel write the stat struct over the empty-path string slot
+> while the compiler read "st_size" from an untouched stack slot: file
+> sizes came back garbage, the ARM64 compiler silently shipped binaries
+> without a runtime, and they hung on real hardware. The misdiagnosis
+> that followed (a claimed `st_size` offset of 40) compounded it — the
+> real asm-generic layout is `dev@0 ino@8 mode@16 nlink@20 uid@24
+> gid@28 rdev@32 __pad1@40 size@48 blksize@56`: st_size at 48, exactly
+> like x86-64 ("everybody gets this wrong", warns the kernel header).
+> Both facts were verified against the kernel headers and empirically
+> with a hand-assembled probe ELF under qemu-aarch64; the emulator now
+> models the real kernel (79 and 80, real layout — a compiler-side ABI
+> mistake must show up as a red test, never a green one), and the
+> `fs_size_abi` regression test pins the exact stat size of a
+> 12345-byte file on every target: kernel, emulator, and qemu must
+> agree.
 >
 > 0.16 adds **the optimizer** (§15): `-O1` runs a pass pipeline over the
 > typed stack IR — dead-code elimination (unreachable instructions, dead
@@ -1500,23 +1518,33 @@ Project/main.ok
   `movz`/`movk` chains patched by the ABS64_ARM fixup; branches and
   calls use the REL26 fixup; ELF images carry `e_machine = EM_AARCH64`.
   The Linux aarch64 syscall interface (`write` 64, `read` 63, `openat`
-  56, `close` 57, `newfstatat` 80 with `AT_EMPTY_PATH` — plain `fstat`
-  does not exist on the architecture — `mmap` 222, `exit` 93,
+  56, `close` 57, `newfstatat` 79 with `AT_EMPTY_PATH` — plain `fstat`
+  (80) exists but takes two arguments; the runtime needs the four-
+  argument form — `mmap` 222, `exit` 93,
   `getdents64` 61, `mkdirat` 34, `fchmodat` 53 with an explicit zeroed
   flags argument) is the same runtime source, `rt.ok`, lowered per
-  target. Cross-compilation works in both directions from either
+  target. The aarch64 `struct stat` (asm-generic, LP64) places `st_size`
+  at offset 48 — `dev@0 ino@8 mode@16 nlink@20 uid@24 gid@28 rdev@32
+  __pad1@40 size@48 blksize@56` — verified against the kernel headers
+  and empirically (probe ELF under qemu-aarch64); the `fs_size_abi`
+  regression test pins it on every target. Cross-compilation works in
+  both directions from either
   distribution (`--target arm64` / `--target x86-64`), and the same
   seed+sources deterministically produce both the x86-64 and the
   aarch64 compiler (`make arm64`).
-  **Verification is three-layered and all of it executes real
+  **Verification is four-layered and all of it executes real
   programs**: (1) every positive suite case re-compiled `--target
   arm64` and executed under `tools/emu64.py`, the aarch64 user-mode
   emulator shipping with the repository — stdout and exit codes must
-  match the x86-64 expectations exactly (264 further checks; the suite
-  is now 767); (2) the decisive self-cross-compilation test: the
+  match the x86-64 expectations exactly (268 further checks; the suite
+  is now 824); (2) since 0.18.1 the same suite is also executed under
+  an external **qemu-aarch64** (`ARM64_RUN=qemu`) — an independent
+  implementation of the machine and the Linux syscall ABI, so an
+  emulator/kernel divergence is a red test on every push; (3) the
+  decisive self-cross-compilation test: the
   compiler itself cross-compiled to aarch64, then executed under the
   emulator to compile a program whose output runs natively — self-
-  hosting through the second backend; (3) since 0.17, a native
+  hosting through the second backend; (4) since 0.17, a native
   `ubuntu-24.04-arm` CI runner: the ARM64 compiler builds there, self-
   compiles byte-identically on real hardware, and the full positive
   suite is compiled AND executed natively — no emulator anywhere in
@@ -1948,10 +1976,14 @@ the conversion family (`T.to_U`): the source type names the operation.
   works in both directions from either distribution; `make arm64`
   cross-builds the compiler itself for aarch64, and the same
   seed+sources deterministically produce it. Verification, all of it
-  executing real programs: the 132 positive cases re-compiled and
+  executing real programs: the positive cases re-compiled and
   executed under `tools/emu64.py` (the aarch64 user-mode emulator
   shipping with the repository — a test tool, not a build dependency;
-  264 further checks, suite now 767); the self-cross-compilation test
+  268 further checks, suite now 824); the same suite again under an
+  external qemu-aarch64 (`ARM64_RUN=qemu`) — an independent
+  implementation of the machine and the Linux syscall ABI, so
+  emulator/kernel divergence is a red test on every push; the
+  self-cross-compilation test
   (the emulated aarch64 compiler compiles a program whose output runs
   natively); and a native `ubuntu-24.04-arm` CI job where the ARM64
   compiler self-compiles byte-identically on real hardware and the
@@ -1964,11 +1996,16 @@ the conversion family (`T.to_U`): the source type names the operation.
   argument area (scaled STR/LDR immediates truncate non-multiple-of-8
   frame offsets), `sys.open` passing mode where flags belong, and
   `fstatat` emitted in a three-argument form real kernels reject. A
-  fourth — the aarch64 `struct stat` st_size offset (40, not x86-64's
-  48; on real hardware every file stat'd as 4096 bytes) — was caught
-  by the first native `ubuntu-24.04-arm` CI run and fixed; the
-  emulator now models the real kernel layout so the emulated
-  differential regression-guards the ABI.
+  fourth — `sys.size` calling syscall 80 (aarch64 `fstat`, two
+  arguments) with newfstatat's four-argument setup, then reading
+  "st_size" from an untouched stack slot — shipped runtimes-less
+  binaries that hung on real hardware; the follow-up misdiagnosis
+  claimed a `st_size` offset of 40 (the real asm-generic layout has
+  `__pad1` at 40 and `st_size` at 48, exactly like x86-64). Both were
+  verified against the kernel headers and empirically with a probe
+  ELF under qemu-aarch64; the emulator now models the real kernel
+  (79 and 80, real layout), the qemu CI step and the `fs_size_abi`
+  regression test guard the ABI from every side.
 
 ### 0.16
 

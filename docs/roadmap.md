@@ -42,7 +42,11 @@ lowered per target. Cross-compilation works in both directions;
 of it executing real programs: the full positive suite re-compiled
 and executed under `tools/emu64.py` (the aarch64 user-mode emulator
 shipping with the repository — a test tool, not a build dependency;
-264 further checks, suite now 767), the self-cross-compilation test
+268 further checks, suite now 824), the same suite again under an
+external qemu-aarch64 (`ARM64_RUN=qemu` — an independent
+implementation of the machine and the Linux syscall ABI, so
+emulator/kernel divergence is a red test on every push), the
+self-cross-compilation test
 (the emulated aarch64 compiler compiles a program that runs natively),
 and — on real hardware — a native `ubuntu-24.04-arm` CI runner where
 the ARM64 compiler self-compiles byte-identically and the whole
@@ -51,7 +55,15 @@ cached emission remains x86-64-only for now (honest fallback to `-O1`).
 Three latent defects were found by the ARM64 differential before they
 could ship: a mis-aligned outgoing-argument area, `sys.open` passing
 mode where flags belong, and a three-argument `fstatat` real kernels
-reject.
+reject. A fourth — `sys.size` calling syscall 80 (aarch64 `fstat`) with
+newfstatat's four-argument setup while reading "st_size" from an
+untouched stack slot — shipped runtime-less binaries that hung on real
+hardware; its misdiagnosis (`st_size` at offset 40; the real
+asm-generic layout is `__pad1@40 size@48`, exactly like x86-64) was
+corrected against the kernel headers and verified empirically with a
+probe ELF under qemu-aarch64. The emulator models the real kernel, and
+the `fs_size_abi` regression test pins the exact stat size on every
+target.
 
 **Okular 0.16 — the optimizer.** In addition to everything below, 0.16
 gives Okular its first real optimization subsystem: `-O1` runs an IR

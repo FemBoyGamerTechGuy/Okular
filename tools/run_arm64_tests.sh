@@ -9,9 +9,13 @@
 # must never change observable program behavior.
 #
 # Execution mode: "emu" (default; x86-64 hosts run the aarch64 ELF under
-# tools/emu64.py) or "native" (a real aarch64 host executes the binaries
-# directly — no emulator anywhere). Both compare against the same x86-64
-# expectations: the target must never change observable program behavior.
+# tools/emu64.py), "qemu" (x86-64 hosts run the aarch64 ELF under an
+# external qemu-aarch64 — an INDEPENDENT implementation of the machine
+# and the Linux ABI; found via $QEMU_AARCH64 or PATH; mirrors the native
+# CI semantics on non-arm hosts), or "native" (a real aarch64 host
+# executes the binaries directly — no emulator anywhere). All compare
+# against the same x86-64 expectations: the target must never change
+# observable program behavior.
 #
 # This is the honest verification path for ARM64 in the absence of native
 # arm64 runners: real programs, really executed, really compared. The
@@ -28,9 +32,28 @@ if [ ! -x "$OKC" ]; then
     echo "run_arm64: compiler not built at $OKC" >&2
     exit 2
 fi
-if [ "$ARM64_RUN" != "native" ] && [ ! -f "$EMU" ]; then
+if [ "$ARM64_RUN" = "emu" ] && [ ! -f "$EMU" ]; then
     echo "run_arm64: emulator missing at $EMU" >&2
     exit 2
+fi
+QEMU_BIN=""
+if [ "$ARM64_RUN" = "qemu" ]; then
+    QEMU_BIN="${QEMU_AARCH64:-$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)}"
+    if [ -z "$QEMU_BIN" ]; then
+        echo "run_arm64: ARM64_RUN=qemu needs qemu-aarch64 (set QEMU_AARCH64)" >&2
+        exit 2
+    fi
+fi
+
+# In qemu mode an aarch64 compiler binary (the CI-native configuration:
+# OKC=build/okular-arm64) also executes under qemu.
+OKC_PREFIX=()
+if [ "$ARM64_RUN" = "qemu" ] && [ -x "$OKC" ]; then
+    # e_machine at ELF offset 18 (LE): 0x00B7 = EM_AARCH64 = 183
+    mach="$(head -c 20 "$OKC" | tail -c 2 | od -An -tu1 | tr -d ' \n')"
+    if [ "$mach" = "1830" ]; then
+        OKC_PREFIX=("$QEMU_BIN")
+    fi
 fi
 
 pass=0; fail=0; skip=0
@@ -70,7 +93,7 @@ for dir in "$CASES/positive"/*/; do
     for lvl in "" $ARM_LEVELS; do
         tag="$name${lvl:+ $lvl}"
         cout="$TMP/$name.cerr"
-        (cd "$work" && timeout 120 $OKC "$entry" --target arm64 $lvl --out ./abin) >"$cout" 2>&1
+        (cd "$work" && timeout 120 "${OKC_PREFIX[@]}" $OKC "$entry" --target arm64 $lvl --out ./abin) >"$cout" 2>&1
         cexit=$?
         if [ "$cexit" -ne 0 ]; then
             fail=$((fail + 1))
@@ -82,6 +105,8 @@ for dir in "$CASES/positive"/*/; do
         out="$TMP/$name.out"
         if [ "$ARM64_RUN" = "native" ]; then
             (cd "$work" && timeout 240 ./abin "${local_args[@]}") >"$out" 2>/dev/null
+        elif [ "$ARM64_RUN" = "qemu" ]; then
+            (cd "$work" && timeout 240 "$QEMU_BIN" ./abin "${local_args[@]}") >"$out" 2>/dev/null
         else
             (cd "$work" && timeout 240 python3 "$EMU" ./abin "${local_args[@]}") >"$out" 2>/dev/null
         fi
@@ -126,6 +151,8 @@ if [ "$fail" -gt 0 ]; then
 fi
 if [ "$ARM64_RUN" = "native" ]; then
     echo "ALL ARM64 TESTS PASSED (compiled with --target arm64, executed NATIVELY on aarch64 hardware)"
+elif [ "$ARM64_RUN" = "qemu" ]; then
+    echo "ALL ARM64 TESTS PASSED (compiled with --target arm64, executed under $QEMU_BIN)"
 else
     echo "ALL ARM64 TESTS PASSED (compiled with --target arm64, executed under tools/emu64.py)"
 fi
